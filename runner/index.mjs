@@ -364,6 +364,15 @@ export const gradeMint = async (payUrl, report) => {
     // absence is never a failure - but a field that IS published and is
     // the wrong shape is worth saying out loud, because a wallet will try
     // to render it. Malformed means a warning, not a fail.
+    //
+    // previousPubkeys in particular: LUD-25 carried it briefly and dropped
+    // it on 2026-09-04, replacing it with "SERVICE SHOULD NOT rotate
+    // mintPubkey" plus a WALLET-side MUST to pin per origin and require
+    // explicit holder approval for any replacement. So it is now purely a
+    // convention between the implementations that already emit and read it,
+    // and it is graded here as one: shape only, never presence. Nothing in
+    // this suite asks a SERVICE to publish it, and a wallet must not treat
+    // it as permission to move a pin by itself.
     const problems = []
     for (const key of ['name', 'description', 'tosUrl', 'motd', 'version']) {
       const value = body[key]
@@ -833,7 +842,10 @@ export const gradeBoundMint = async (noteUrl, report, {preimage, payCallback = n
 // options.previousPubkeys: keys this mint has signed under before, from
 // the discovery endpoint. A note issued before a signing-key rotation
 // still verifies against one of them, and grading that as a bad signature
-// would punish a mint for rotating properly.
+// would punish a mint for rotating properly. Not a LUD-25 field - the spec
+// dropped it on 2026-09-04 and now says a SERVICE SHOULD NOT rotate at all
+// - so this is a convention the grader honours where a mint offers it,
+// never something it asks for.
 export const gradeNote = async (noteUrl, report, options = {}) => {
   const knownBaseFee = 'mintFee' in options ? (options.mintFee?.baseFeeMsat ?? 0) : null
   const previousPubkeys = Array.isArray(options.previousPubkeys)
@@ -1038,9 +1050,12 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     assert(info.mintPubkey, 'no mintPubkey advertised - offline verification is mandatory')
     assert(isCompressedPubkey(info.mintPubkey), 'mintPubkey is not a 33-byte compressed secp256k1 key')
     assert(currentSig, 'the rotate returned no sig - offline verification is mandatory')
-    // A mint that has rotated its signing key publishes the old ones as
+    // A mint that has rotated its signing key may publish the old ones as
     // previousPubkeys, so notes it issued before the rotation still
-    // verify. Any key it currently stands behind is an acceptable signer.
+    // verify. Any key it currently stands behind is an acceptable signer
+    // for grading purposes. That is a narrower claim than it looks: it
+    // says the signature is genuine, not that a wallet should accept the
+    // new key - LUD-25 puts that decision with the holder.
     const signedBy = [info.mintPubkey, ...previousPubkeys].find(key =>
       verifySignature(current, info.maxWithdrawable, currentSig, key)
     )

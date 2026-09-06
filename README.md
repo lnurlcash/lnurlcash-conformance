@@ -125,7 +125,7 @@ conforming default explicit. Optional fields stay absent unless requested:
 | `--baseFeeMsat --feePpm` | also publishes `fees: {baseFeeMsat, feePpm}` on that endpoint, the structured twin of the fee line in the payRequest metadata |
 | `--stats` | serves `GET /stats`: what the mint owes, what is in flight, what the node holds, and the coverage between them |
 | `--localBalanceMsat=N` | what the node behind a stats-publishing mock claims to hold, so a mock can be told to look under-covered |
-| `--previousPubkeys=a,b` | keys this mint has signed under before, so notes issued before a rotation still verify |
+| `--previousPubkeys=a,b` | keys this mint has signed under before, so notes issued before a rotation still verify. Not a LUD-25 field: the spec carried it briefly and dropped it on 2026-09-04. Graded for shape where a mint offers it, never asked for |
 | `--previousPrivateKey=<hex>` | an old signing key the mock still holds. Its public half joins `previousPubkeys` on its own |
 | `--signWithPreviousKey` | issues every note under that old key while still advertising the new one: the mid-rotation state a mint passes through when the advertisement moves before the signer |
 | `--retriedMutation=replay` | answers a byte-identical repeat of a mutation with the original success. This is the conforming default; use `refuse` only as an adversarial fixture |
