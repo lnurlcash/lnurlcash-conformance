@@ -6,6 +6,15 @@ exact version if you gate CI on the grade.
 
 ## Unreleased
 
+- Documentation only, no grade changes. `previousPubkeys` is no longer a
+  LUD-25 field: the spec carried it briefly and dropped it on 2026-09-04,
+  replacing it with "`SERVICE` SHOULD NOT rotate `mintPubkey`" plus a
+  `WALLET`-side MUST to pin per origin and require explicit holder approval
+  for any replacement. The runner already graded it for shape only and never
+  for presence, which is the right posture for a convention; the comments and
+  the flag table now say that is what it is, and that a wallet must not read
+  it as permission to move a pin by itself.
+
 ## 0.7.0 - 2026-09-04
 
 **`cash-derivation.json`: LUD-25's own seed-recoverable note secrets.** The
