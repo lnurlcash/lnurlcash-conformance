@@ -104,7 +104,7 @@ must survive:
 | `--retriedMutation=refuse` | deliberately answers an identical mutation retry as already spent instead of replaying its original success |
 | `--hashLookup=echoesK1` | offers hash lookup but puts a `k1` back in the response |
 | `--hashLookup=answersUnknown` | offers hash lookup but invents a note for an unknown hash |
-| `--hashLookup=revealsSpent` | offers hash lookup but distinguishes a burned hash from an unknown note |
+| `--hashLookup=hidesSpent` | incorrectly reports a retained spent hash as unknown |
 | `--hashLookup=acceptsBoth` | offers hash lookup but accepts `k1` and `h` together |
 | `--mintToHashAcceptsMalformedH` | claims `mintToHash` and invoices an `h` that is not 64 lowercase hex, so a wallet pays for a quote the mint will refuse |
 | `--mintToHashAcceptsUsedH` | claims it and invoices an `h` that already names a note, an invoice or another quote's output |
@@ -113,6 +113,10 @@ must survive:
 The three `mintToHash*` misbehaviours need `--mintToHash` alongside them;
 on their own they do nothing, because a mint that never offered the
 capability cannot misuse it.
+
+Hash lookup keeps the spending secret off the wire but reports spent state:
+`--hashLookup=true` distinguishes a burned hash from an unknown hash. The older
+`--hashLookup=revealsSpent` spelling remains an alias for this compliant behaviour.
 
 The remaining flags enable optional features, legal wire variants, or make a
 conforming default explicit. Optional fields stay absent unless requested:

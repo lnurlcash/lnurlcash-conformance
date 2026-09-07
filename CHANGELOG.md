@@ -6,6 +6,12 @@ exact version if you gate CI on the grade.
 
 ## Unreleased
 
+- Revise spent-hash grading to match the proposed LUD-25 status contract:
+  a retained burned hash must return a spent error, while an unregistered
+  hash remains unknown. Add the adversarial `hidesSpent` fixture; retain
+  `revealsSpent` as a compliant compatibility alias. This reverses the
+  0.7.0 privacy check and requires corresponding mint changes.
+
 - Documentation only, no grade changes. `previousPubkeys` is no longer a
   LUD-25 field: the spec carried it briefly and dropped it on 2026-09-04,
   replacing it with "`SERVICE` SHOULD NOT rotate `mintPubkey`" plus a

@@ -3,6 +3,7 @@
 // 'grader' job, so the pre-push gate runs what CI would have run - in
 // process, no ports or log scraping.
 
+import assert from 'node:assert/strict'
 import {bech32} from '@scure/base'
 import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
@@ -57,6 +58,36 @@ if (good.failed > 0) {
   process.exit(1)
 }
 console.log(`ok   compliant mock passes (${good.results.length} checks)`)
+
+// A held melt must never look spent before settlement, and a failed melt
+// restores the same value. Both lookup forms observe the retained state.
+const lifecycleMint = await createMockMint({hashLookup: true, meltNeverSettles: true})
+try {
+  const k1 = bytesToHex(randomBytes(32))
+  const h = bytesToHex(sha256(hexToBytes(k1)))
+  lifecycleMint.state.creditNote(k1, 3000)
+  const lookup = query => fetch(`${lifecycleMint.url}/w?${query}`).then(r => r.json())
+  const live = await lookup(`h=${h}`)
+  assert.equal(live.maxWithdrawable, 3000)
+  assert.equal('k1' in live, false)
+  const melt = () => fetch(`${lifecycleMint.url}/w/cb?k1=${k1}&pr=mock-invoice`).then(r => r.json())
+  assert.equal((await melt()).status, 'OK')
+  for (const query of [`h=${h}`, `k1=${k1}`]) {
+    assert.deepEqual(await lookup(query), {status: 'ERROR', reason: 'pending'})
+  }
+  lifecycleMint.state.failMelt(k1)
+  assert.equal((await lookup(`h=${h}`)).maxWithdrawable, 3000)
+  assert.equal((await melt()).status, 'OK')
+  lifecycleMint.state.settleMelt(k1)
+  for (const query of [`h=${h}`, `k1=${k1}`]) {
+    assert.deepEqual(await lookup(query), {status: 'ERROR', reason: 'Note already spent.'})
+  }
+  assert.deepEqual(await lookup(`h=${bytesToHex(randomBytes(32))}`), {status: 'ERROR', reason: 'Unknown note.'})
+  assert.equal(lifecycleMint.state.noteState(k1), 'burned')
+  console.log('ok   hash lookups follow live, pending, restored and retained spent states')
+} finally {
+  await lifecycleMint.close()
+}
 
 // The other legal spelling of withdrawLink: the lnurlw:// scheme form. The
 // grader must take both, and say which it saw.
@@ -667,11 +698,16 @@ if (!caughtBy(invents, HASH_CHECK)) {
 }
 console.log('ok   a hash lookup that answers for an unregistered hash caught')
 
-const revealsSpent = await grade({hashLookup: 'revealsSpent'})
-if (!caughtBy(revealsSpent, 'does not reveal a burned note through hash lookup')) {
-  die('a hash lookup distinguishing a burned hash from an unknown note PASSED - the grader is blind')
+const hidesSpent = await grade({hashLookup: 'hidesSpent'})
+if (!caughtBy(hidesSpent, 'reports a spent hash distinguishably from an unknown hash')) {
+  die('a hash lookup hiding a spent hash as unknown PASSED - the grader is blind')
 }
-console.log('ok   a hash lookup that reveals a burned note caught')
+console.log('ok   a hash lookup hiding a retained spent note caught')
+
+// Keep the old fixture name accepted as a compatible alias, but stop
+// describing the intended spent response as a privacy violation.
+const revealsSpent = await grade({hashLookup: 'revealsSpent'})
+if (revealsSpent.failed > 0) die('the legacy revealsSpent alias failed the revised contract')
 
 const acceptsBoth = await grade({hashLookup: 'acceptsBoth'})
 if (!caughtBy(acceptsBoth, HASH_CHECK)) {
