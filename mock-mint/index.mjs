@@ -190,8 +190,8 @@ const DEFAULTS = {
   //                      on the wire the lookup existed to keep it off
   //   'answersUnknown' - non-compliant: answers for a hash it never
   //                      registered, instead of the unknown-note refusal
-  //   'revealsSpent'   - non-compliant: distinguishes a burned h from an
-  //                      unknown note
+  //   'hidesSpent'     - non-compliant: hides a retained burned h as unknown
+  //   'revealsSpent'   - legacy alias for the now-compliant true behaviour
   //   'acceptsBoth'    - non-compliant: accepts k1 and h together
   hashLookup: false,
   // LUD-25 lets a SERVICE refuse an oversized merge outright rather than
@@ -813,8 +813,9 @@ export const createMockMint = async (options = {}) => {
         if (!invent) {
           if (!held) return fail('Unknown note.')
           if (held.state === 'burned') {
-            return fail(opts.hashLookup === 'revealsSpent' ? 'Note already spent.' : 'Unknown note.')
+            return fail(opts.hashLookup === 'hidesSpent' ? 'Unknown note.' : 'Note already spent.')
           }
+          if (held.state === 'pending') return fail('pending')
         }
         return send({
           tag: 'withdrawRequest',
@@ -833,6 +834,7 @@ export const createMockMint = async (options = {}) => {
       const note = notes.get(noteId(k1))
       if (!note) return fail('Unknown note.')
       if (note.state === 'burned') return fail('Note already spent.')
+      if (note.state === 'pending') return fail('pending')
       return send({
         tag: 'withdrawRequest',
         callback: `${origin}/w/cb`,

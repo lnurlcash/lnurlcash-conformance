@@ -14,6 +14,8 @@ export type HashLookup =
   | boolean
   | 'echoesK1'
   | 'answersUnknown'
+  | 'hidesSpent'
+  /** Legacy alias for true: spent hashes are now distinguishable. */
   | 'revealsSpent'
   | 'acceptsBoth'
 

@@ -1070,26 +1070,28 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       : `verified offline against a previous signing key (${signedBy.slice(0, 16)}...)`
   })
 
-  await report.check('does not reveal a burned note through hash lookup', async () => {
+  await report.check('reports a spent hash distinguishably from an unknown hash', async () => {
     if (!hashLookupOffered) throw soft('hash lookup is not offered')
     const burned = new URL(url)
     burned.searchParams.delete('k1')
     burned.searchParams.delete('amount')
     burned.searchParams.set('h', noteId(k1))
     const burnedResponse = await get(burned)
-
-    const unknown = new URL(url)
-    unknown.searchParams.set('k1', bytesToHex(randomBytes(32)))
-    unknown.searchParams.delete('h')
-    unknown.searchParams.delete('amount')
-    const unknownResponse = await get(unknown)
-
     assert(
-      burnedResponse.status === unknownResponse.status &&
-        burnedResponse.reason === unknownResponse.reason,
-      `a burned h answered ${JSON.stringify(burnedResponse)} but an unknown k1 answered ${JSON.stringify(unknownResponse)}`
+      burnedResponse.status === 'ERROR' && typeof burnedResponse.reason === 'string' &&
+        /spent/i.test(burnedResponse.reason) && !/unknown|not found/i.test(burnedResponse.reason),
+      `a spent hash must be identified as spent, got ${JSON.stringify(burnedResponse)}`
     )
-    return 'burned h is indistinguishable from an unknown note'
+
+    const unknown = new URL(burned)
+    unknown.searchParams.set('h', noteId(bytesToHex(randomBytes(32))))
+    const unknownResponse = await get(unknown)
+    assert(
+      unknownResponse.status === 'ERROR' && typeof unknownResponse.reason === 'string' &&
+        /unknown|not found/i.test(unknownResponse.reason) && !/spent/i.test(unknownResponse.reason),
+      `an unregistered hash must be identified as unknown, got ${JSON.stringify(unknownResponse)}`
+    )
+    return 'spent and unknown hashes are distinguishable without disclosing k1'
   })
 
   await report.check('keeps signatures off the informational endpoint', async () => {
