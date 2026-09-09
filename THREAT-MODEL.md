@@ -89,7 +89,7 @@ launder its own mistakes through the vectors.
 If a vector is wrong in a way that would lead an implementer to lose money,
 that is worth reporting privately:
 
-<https://github.com/TheCryptoDonkey/lnurlcash-conformance/security/advisories/new>
+<https://github.com/lnurlcash/lnurlcash-conformance/security/advisories/new>
 
 Ordinary disagreements about what the spec means belong in a public issue, or
 on the LUD-25 PR.

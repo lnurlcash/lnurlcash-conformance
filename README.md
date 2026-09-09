@@ -272,7 +272,7 @@ Spec and reference implementations, all by dni, all MIT:
 - [lnurl-wallet](https://github.com/dni/lnurl-wallet) — the reference wallet
 
 Implementations to run these vectors against are indexed in
-[awesome-lnurlcash](https://github.com/TheCryptoDonkey/awesome-lnurlcash).
+[awesome-lnurlcash](https://github.com/lnurlcash/awesome-lnurlcash).
 
 Contributions of vectors are welcome, particularly from implementers who
 found a case these missed. See [CONTRIBUTING.md](CONTRIBUTING.md).

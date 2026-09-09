@@ -3,7 +3,7 @@
 Status: additive implementation proposal layered on current LUD-25 comment-bound minting.
 
 This document records the wire contract implemented by the ForgeSworn /
-TheCryptoDonkey repositories. It does not modify the upstream LUD-25 draft or
+lnurlcash repositories. It does not modify the upstream LUD-25 draft or
 dni's reference repositories.
 
 ## Why the receipt exists

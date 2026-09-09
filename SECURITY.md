@@ -11,7 +11,7 @@ If a vector is wrong in a way that would lead an implementer to lose money, or
 the mock mint or grader can be made to do something harmful, report it
 privately:
 
-<https://github.com/TheCryptoDonkey/lnurlcash-conformance/security/advisories/new>
+<https://github.com/lnurlcash/lnurlcash-conformance/security/advisories/new>
 
 Ordinary disagreements about what the spec means belong in a public issue, or
 on the [LUD-25 PR](https://github.com/lnurl/luds/pull/301).
