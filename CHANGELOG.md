@@ -4,7 +4,17 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
-## Unreleased
+## 0.8.0 - 2026-09-09
+
+**A spent note must say so.** LUD-25 [#307][307] settled the hash lookup's
+status contract the other way round from 0.7.0: a retained burned hash returns
+a spent error, an unregistered hash stays unknown, and the two must be
+distinguishable. A holder who kept only the hash can then learn a note was
+redeemed without putting its bearer secret on the wire, which is the whole
+point of the lookup. Mints passing 0.7.0's privacy check fail this one, and the
+change is deliberate.
+
+[307]: https://github.com/lnurl/luds/pull/307
 
 - Revise spent-hash grading to match the proposed LUD-25 status contract:
   a retained burned hash must return a spent error, while an unregistered
