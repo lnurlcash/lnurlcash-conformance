@@ -13,7 +13,7 @@
 import {writeFileSync, mkdirSync} from 'node:fs'
 import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
-import {bech32, base64urlnopad} from '@scure/base'
+import {bech32, bech32m, base64urlnopad} from '@scure/base'
 import {sha256, sha512} from '@noble/hashes/sha2.js'
 import {secp256k1} from '@noble/curves/secp256k1.js'
 import {hmac} from '@noble/hashes/hmac.js'
@@ -478,6 +478,184 @@ const cashDerivation = {
     cashCase("standard mnemonic, index 20 (one past a 20-index gap limit)", MNEMONIC_A, 'mint.example', 20),
     cashCase('a second mnemonic, same host and index', MNEMONIC_B, 'mint.example', 0),
     cashCase('a host carrying a port', MNEMONIC_A, '127.0.0.1:8899', 0)
+  ]
+}
+
+// ---- vectors: Part 2, recoverable signatures -----------------------------
+//
+// LUD-25 Part 2 keys a note by a public key. The holder keeps sk, discloses
+// `cp1<pk>`, and spends the note with `ck1`, a recoverable signature by sk
+// over the fixed message "LNURLcash"; the mint recovers pk from it. The mint
+// certifies each note with `cs1`, the same 65-byte shape over
+// "LNURLcash:<amount_msat>:<hex(pk)>". A watch-only `cx1` (the branch's
+// x-only key and chain code) lets a mint derive every pk on a branch and so
+// mint straight to a holder's next key.
+//
+// Built from the primitives like everything else here. The address branch
+// follows the reference wallet (lnurl-wallet cashSecrets.ts): m/139'/1' with
+// the hashing key at m/139'/1'/0. The draft text roots it at m/139'/d1..d4,
+// the node the Part 1 ladder already uses, and a wallet following the text
+// finds none of the reference wallet's notes. `conventions` records both.
+
+const concat = (...parts) => {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+  let offset = 0
+  for (const p of parts) {
+    out.set(p, offset)
+    offset += p.length
+  }
+  return out
+}
+
+const bech32mOf = (hrp, bytes) => bech32m.encode(hrp, bech32m.toWords(bytes), false)
+
+const taggedHash = (tag, ...parts) => {
+  const t = sha256(utf8ToBytes(tag))
+  return sha256(concat(t, t, ...parts))
+}
+
+const lightningSignedDigest = message =>
+  sha256(sha256(concat(utf8ToBytes('Lightning Signed Message:'), utf8ToBytes(message))))
+
+// r || s || recovery id. noble puts the recovery id first; the wire puts it last.
+const signRecoverable = (secretKey, digest) => {
+  const sig = secp256k1.sign(digest, secretKey, {format: 'recovered', prehash: false})
+  return concat(sig.subarray(1), sig.subarray(0, 1))
+}
+
+const OWNERSHIP_DIGEST = lightningSignedDigest('LNURLcash')
+
+const addressRootOf = seed => ckdPriv(cashRootOf(seed), 1 + HARDENED)
+
+const addressDomainIndices = (addressRoot, host) => {
+  const material = hmac(sha256, ckdPriv(addressRoot, 0).privateKey, utf8ToBytes(host))
+  return [0, 4, 8, 12].map(offset => readUint32BE(material, offset))
+}
+
+const ser32 = index => {
+  const out = new Uint8Array(4)
+  new DataView(out.buffer).setUint32(0, index, false)
+  return out
+}
+
+// BIP-341's tweak, so a watcher holding only the cx1 derives the same pk the
+// holder does. i is any uint32 and is never hardened.
+const noteKeysAt = (node, index) => {
+  const p = bytesToNumber(node.privateKey)
+  const P = secp256k1.Point.BASE.multiply(p)
+  const Px = P.toBytes(true).slice(1)
+  const t = bytesToNumber(taggedHash('LNURLcash/derive', Px, node.chainCode, ser32(index)))
+  if (t >= CURVE_N) throw new Error(`unusable tweak at ${index}`)
+  const even = P.y % 2n === 0n
+  const sk = ((even ? p : CURVE_N - p) + t) % CURVE_N
+  const watched = secp256k1.Point.fromBytes(concat(Uint8Array.of(0x02), Px))
+    .add(secp256k1.Point.BASE.multiply(t))
+    .toBytes(true)
+    .slice(1)
+  const held = secp256k1.Point.BASE.multiply(sk).toBytes(true).slice(1)
+  if (bytesToHex(watched) !== bytesToHex(held)) throw new Error(`watch-only and held keys disagree at ${index}`)
+  return {secretKey: numberTo32(sk), pubkey: held}
+}
+
+const PART2_INDICES = [0, 1, 2, 1000, HARDENED - 1, HARDENED, 0xffffffff]
+const PART2_HOSTS = ['mint.example', 'mint.lnurlcash.com', 'moneyer.dev', 'localhost:3338']
+
+const part2Branch = (mnemonic, host) => {
+  const seed = seedOf(mnemonic)
+  const addressRoot = addressRootOf(seed)
+  const domainIndices = addressDomainIndices(addressRoot, host)
+  const node = domainIndices.reduce(ckdPriv, addressRoot)
+  const P = secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey))
+  const branchPubkey = P.toBytes(true).slice(1)
+  return {
+    mnemonic,
+    seedHex: bytesToHex(seed),
+    host,
+    cashRoot: nodeHex(cashRootOf(seed)),
+    domainIndices,
+    addressNode: nodeHex(node),
+    branchPubkey: bytesToHex(branchPubkey),
+    branchParity: P.y % 2n === 0n ? 'even' : 'odd',
+    chainCode: bytesToHex(node.chainCode),
+    cx1: bech32mOf('cx', concat(branchPubkey, node.chainCode)),
+    notes: PART2_INDICES.map(index => {
+      const {secretKey, pubkey} = noteKeysAt(node, index)
+      const ownershipSignature = signRecoverable(secretKey, OWNERSHIP_DIGEST)
+      return {
+        index,
+        notePubkey: bytesToHex(pubkey),
+        cp1: bech32mOf('cp', pubkey),
+        noteSecretKey: bytesToHex(secretKey),
+        ownershipSignature: bytesToHex(ownershipSignature),
+        ck1: bech32mOf('ck', ownershipSignature)
+      }
+    })
+  }
+}
+
+const part2Branches = [MNEMONIC_A, MNEMONIC_B].flatMap(m => PART2_HOSTS.map(h => part2Branch(m, h)))
+
+const PART2_MINT_KEY = hexToBytes('da6ec5c4342514114ee493a55ddc06d085d61eb78f0b7163e07cdb7f1f66ac05')
+
+const part2Certificate = (notePubkey, amountMsat) => {
+  const message = `LNURLcash:${amountMsat}:${notePubkey}`
+  const digest = lightningSignedDigest(message)
+  const signature = signRecoverable(PART2_MINT_KEY, digest)
+  return {
+    notePubkey,
+    amountMsat,
+    message,
+    digest: bytesToHex(digest),
+    signature: bytesToHex(signature),
+    cs1: bech32mOf('cs', signature)
+  }
+}
+
+const firstNotes = part2Branches[0].notes
+const samplePubkey = hexToBytes(firstNotes[0].notePubkey)
+const sampleCp1 = firstNotes[0].cp1
+const mixedCase = value => value.slice(0, 8) + value.slice(8, 20).toUpperCase() + value.slice(20)
+
+const part2 = {
+  version: VERSION,
+  spec: SPEC,
+  description:
+    'LUD-25 Part 2: notes keyed by a public key and spent by a recoverable signature. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/1\'/0, msg = utf8(host)), and addressNode is m/139\'/1\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is RFC6979 ECDSA, low-S, over sha256(sha256("Lightning Signed Message:" || "LNURLcash")), laid out r || s || recovery id, and ck1 is its bech32m("ck") encoding: the value that spends the note. A certificate is the same signature shape by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")), encoded bech32m("cs"). All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350). Values match vectors generated from lnurl-wallet src/lib and confirmed against lnurl-mint.',
+  conventions: {
+    addressBranch: "m/139'/1'/d1/d2/d3/d4",
+    hashingKey: "m/139'/1'/0",
+    specTextSays: "m/139'/d1/d2/d3/d4 with the hashing key at m/139'/0 - the Part 1 ladder's node; every implementation follows the reference wallet instead",
+    noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t >= n is unusable, use the next index',
+    indexWidth: '4 bytes, big-endian, any uint32, never hardened',
+    ownershipMessage: 'LNURLcash',
+    ownershipDigest: bytesToHex(OWNERSHIP_DIGEST),
+    signatureLayout: 'r || s || recovery id (0..3), RFC6979, low-S',
+    certificateMessage: 'LNURLcash:<amount_msat>:<hex(pk)>'
+  },
+  mint: {
+    privateKey: bytesToHex(PART2_MINT_KEY),
+    mintPubkey: bytesToHex(secp256k1.getPublicKey(PART2_MINT_KEY, true))
+  },
+  branches: part2Branches,
+  certificates: [
+    part2Certificate(firstNotes[0].notePubkey, 1000),
+    part2Certificate(firstNotes[1].notePubkey, 21000),
+    part2Certificate(firstNotes[2].notePubkey, 99999),
+    part2Certificate(firstNotes[3].notePubkey, 100000000)
+  ],
+  valid: [
+    {type: 'cp1', value: sampleCp1.toUpperCase(), bytes: bytesToHex(samplePubkey), why: 'all uppercase is the same string (BIP-350)'}
+  ],
+  invalid: [
+    {type: 'cp1', value: bech32mOf('ck', samplePubkey), why: 'the ck human-readable part on a cp1 payload'},
+    {type: 'cp1', value: bech32mOf('cp', concat(samplePubkey, Uint8Array.of(0))), why: '33 bytes, not 32'},
+    {type: 'cp1', value: bech32.encode('cp', bech32.toWords(samplePubkey), false), why: 'a bech32 checksum, not bech32m'},
+    {type: 'cp1', value: sampleCp1.slice(0, -1) + (sampleCp1.endsWith('q') ? 'p' : 'q'), why: 'the checksum does not verify'},
+    {type: 'cp1', value: mixedCase(sampleCp1), why: 'mixed case (BIP-350)'},
+    {type: 'ck1', value: sampleCp1, why: 'a cp1 is not a ck1'},
+    {type: 'ck1', value: bech32mOf('ck', hexToBytes(firstNotes[0].ownershipSignature).slice(0, 64)), why: '64 bytes, not 65'},
+    {type: 'cs1', value: firstNotes[0].ck1, why: 'a ck1 is not a cs1'},
+    {type: 'cx1', value: bech32mOf('cx', samplePubkey), why: '32 bytes, not 64'}
   ]
 }
 
@@ -2722,7 +2900,8 @@ const files = [
   write('payment-request.json', paymentRequest),
   write('settle-for-value.json', settleForValue),
   write('retried-mutation.json', retriedMutation),
-  write('mint-to-hash.json', mintToHash)
+  write('mint-to-hash.json', mintToHash),
+  write('part2.json', part2)
 ]
 
 write('index.json', {

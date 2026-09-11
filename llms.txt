@@ -12,6 +12,9 @@ vectors/index.json:
 
 signature.json       offline verification, both recovery-id orderings
 derivation.json      deterministic note secrets from a BIP39 seed
+cash-derivation.json LUD-25 m/139' note secrets, plus BIP-32 vector 1
+part2.json           Part 2: cp1/ck1/cs1/cx1, the note-key tweak, ownership sigs, certificates;
+                     address path is the reference wallet's m/139'/1'/d1..d4 (not the text's)
 bech32.json          LUD-01 encoding
 url-admission.json   which URLs may be fetched (https, or http to loopback/.onion)
 input-resolution.json bech32, LUD-17, Lightning Address, bare domain
