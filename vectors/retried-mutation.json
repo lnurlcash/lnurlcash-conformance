@@ -10,7 +10,7 @@
   ],
   "provenance": "Recorded, never inferred. A SERVICE links the burned inputs to the outputs they minted and matches against that. Matching on \"a note exists at h\" alone would let anyone holding a burned k1 and any outstanding note id pull a success out of the SERVICE.",
   "outcomes": {
-    "replay": "the original success, byte for byte: the same status, the same sig and sig2, and no balance moved",
+    "replay": "the original success, byte for byte: the same status, the same sig and sig2 where the outputs had any, and no balance moved",
     "double-spend": "refused exactly as any other attempt to spend a burned secret, with the reason string unchanged"
   },
   "cases": [

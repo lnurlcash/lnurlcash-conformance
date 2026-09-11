@@ -216,7 +216,8 @@ console.log('ok   pre-settlement verify leak caught')
 
 const MINT_INFO_CHECK = 'publishes a mint address (experimental, optional)'
 const LIABILITIES_CHECK = 'publishes liabilities (optional)'
-const SIGNATURE_CHECK = 'signs the notes it issues'
+const SIGNATURE_CHECK = 'a plain note carries no signature, or one that verifies'
+const PART2_CHECK = 'certifies a cp1 note it issues (Part 2)'
 
 // a real npub, decoded rather than pattern-matched by the grader
 const npub = bech32.encode('npub', bech32.toWords(new Uint8Array(32).fill(2)), 200)
@@ -311,11 +312,18 @@ if (statusOf(unpublished, SIGNATURE_CHECK) !== 'fail') {
 }
 console.log('ok   a signature under an unpublished key still caught')
 
+// Since the Part 2 rewrite a plain note is unsigned by design: the mint's
+// signature belongs on cp1 notes, and the mock does not issue those.
 const unsigned = await grade({signatures: false})
-if (statusOf(unsigned, SIGNATURE_CHECK) !== 'fail') {
-  die('a mint omitting the mandatory note signature PASSED - the grader is blind')
+if (statusOf(unsigned, SIGNATURE_CHECK) !== 'pass' || !/unsigned/.test(detailOf(unsigned, SIGNATURE_CHECK))) {
+  die(`a mint issuing unsigned plain notes was graded down: ${detailOf(unsigned, SIGNATURE_CHECK)}`)
 }
-console.log('ok   a missing mandatory note signature caught')
+if (unsigned.failed > 0) die('a mint issuing unsigned plain notes FAILED the grade')
+console.log('ok   an unsigned plain note is not graded down')
+if (statusOf(good, PART2_CHECK) !== 'warn' || !/Part 2 not offered/.test(detailOf(good, PART2_CHECK))) {
+  die(`a Part 1 mint refusing a cp1 output did not warn: ${statusOf(good, PART2_CHECK)} ${detailOf(good, PART2_CHECK)}`)
+}
+console.log('ok   a mint without Part 2 warns on the certificate check and never fails')
 
 // ---- the retried mutation ----------------------------------------------
 //

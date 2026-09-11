@@ -1,7 +1,7 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. A SERVICE returning a rotate, split or merge MUST include the offline-verification signature in `sig` (and `sig2` for the second split output).",
+  "description": "A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. A SERVICE returning a rotate, split or merge to a cp1 output MUST include its certificate in `sig` (and `sig2` for the second split output); a plain hash output carries none, and a legacy Part 1 signature on one is harmless where it verifies.",
   "parse": [
     {
       "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000",

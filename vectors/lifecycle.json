@@ -58,7 +58,7 @@
         "the connection drops after the SERVICE applied it",
         "the HTTP stack silently resends the identical request"
       ],
-      "requirement": "a SERVICE MUST recognize the byte-identical retry from the same k1 set, h, h2 and amount, and return the original success with the same sig and sig2 without moving balance again. A WALLET still persists every fresh output secret before sending the first request and keeps it across an ambiguous transport failure. A request that changes any recorded field is a genuine double-spend attempt and gets the ordinary already-spent refusal."
+      "requirement": "a SERVICE MUST recognize the byte-identical retry from the same k1 set, h, h2 and amount, and return the original success, with the same sig and sig2 where the outputs had any, without moving balance again. A WALLET still persists every fresh output secret before sending the first request and keeps it across an ambiguous transport failure. A request that changes any recorded field is a genuine double-spend attempt and gets the ordinary already-spent refusal."
     },
     {
       "name": "settle a merge or split output",

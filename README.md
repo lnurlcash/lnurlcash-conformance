@@ -95,7 +95,7 @@ must survive:
 | `--echoWrongK1` | answers the informational GET with a different `k1` |
 | `--lieAboutValue=N` | reports a `maxWithdrawable` it never signed |
 | `--signatureLayout=leading` | emits the recovery id at the other end |
-| `--signatures=false` | deliberately violates LUD-25 by issuing no signatures |
+| `--signatures=false` | issues no Part 1 signatures. Allowed since the Part 2 rewrite: a plain note is unsigned by design, so the grader passes it |
 | `--serverGeneratedSecrets` | hands back a secret it generated — the exposure `h` exists to close |
 | `--meltNeverSettles` | holds every melt in flight, so notes stay `pending` |
 | `--meltAlwaysFails` | fails every payment, restoring the note |

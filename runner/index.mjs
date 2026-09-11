@@ -5,30 +5,24 @@
 // with the thing it grades would agree with that implementation's mistakes,
 // which is the one thing it must never do.
 
-import {bech32} from '@scure/base'
+import {bech32, bech32m} from '@scure/base'
 import {sha256} from '@noble/hashes/sha2.js'
-import {secp256k1} from '@noble/curves/secp256k1.js'
+import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {randomBytes} from 'node:crypto'
 
 const noteId = k1 => bytesToHex(sha256(hexToBytes(k1)))
 
-const verifySignature = (k1, amountMsat, signatureHex, pubkeyHex) => {
-  let sig
-  try {
-    sig = hexToBytes(signatureHex)
-  } catch {
-    return false
-  }
+// The "Lightning Signed Message" digest every LUD-25 signature is over.
+const signedMessageDigest = message =>
+  sha256(sha256(new Uint8Array([...utf8ToBytes('Lightning Signed Message:'), ...utf8ToBytes(message)])))
+
+// Does a 65-byte recoverable signature recover to that key? Both byte
+// orderings are tried: the spec wants r || s || recovery-id, a node's
+// signmessage emits the recovery id first, and a mint that forgot to
+// reorder is still signing with its own key.
+const recoversTo = (digest, sig, pubkeyHex) => {
   if (sig.length !== 65) return false
-  const digest = sha256(
-    sha256(
-      new Uint8Array([
-        ...utf8ToBytes('Lightning Signed Message:'),
-        ...utf8ToBytes(`LNURLcash:${amountMsat}:${noteId(k1)}`)
-      ])
-    )
-  )
   const leading = new Uint8Array([sig[64], ...sig.subarray(0, 64)])
   for (const candidate of [leading, sig]) {
     try {
@@ -41,6 +35,45 @@ const verifySignature = (k1, amountMsat, signatureHex, pubkeyHex) => {
     }
   }
   return false
+}
+
+// A Part 1 signature, over the note's hash. The spec no longer asks for
+// one, but a mint that still issues them must at least issue true ones.
+const verifySignature = (k1, amountMsat, signatureHex, pubkeyHex) => {
+  let sig
+  try {
+    sig = hexToBytes(signatureHex)
+  } catch {
+    return false
+  }
+  return recoversTo(signedMessageDigest(`LNURLcash:${amountMsat}:${noteId(k1)}`), sig, pubkeyHex)
+}
+
+// A Part 2 certificate: cs1 over the note's raw x-only public key.
+const verifyCertificate = (pubkeyHex32, amountMsat, sig, mintPubkeyHex) =>
+  recoversTo(signedMessageDigest(`LNURLcash:${amountMsat}:${pubkeyHex32}`), sig, mintPubkeyHex)
+
+// Part 2's bech32m strings: cp1 (32-byte key), ck1 and cs1 (65-byte
+// signature). Longer than BIP-173's 90 characters by design.
+const BECH32M_LIMIT = 200
+const encodeCash = (hrp, bytes) => bech32m.encode(hrp, bech32m.toWords(bytes), BECH32M_LIMIT)
+const decodeCash = (hrp, value, length) => {
+  if (typeof value !== 'string') return null
+  try {
+    const {prefix, words} = bech32m.decode(value, BECH32M_LIMIT)
+    if (prefix !== hrp) return null
+    const bytes = bech32m.fromWords(words)
+    return bytes.length === length ? bytes : null
+  } catch {
+    return null
+  }
+}
+
+// The bearer secret of a cp1 note: the key's signature over the fixed
+// message "LNURLcash", r || s || recovery-id, the same value every time.
+const ownershipProof = secretKey => {
+  const lead = secp256k1.sign(signedMessageDigest('LNURLcash'), secretKey, {format: 'recovered', prehash: false})
+  return encodeCash('ck', new Uint8Array([...lead.subarray(1), lead[0]]))
 }
 
 // LUD-17: lnurlw://host/path is https://host/path, or http:// when the host
@@ -1046,28 +1079,33 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     return 'burned the old secret, minted the new'
   })
 
-  await report.check('signs the notes it issues', async () => {
-    assert(info.mintPubkey, 'no mintPubkey advertised - offline verification is mandatory')
-    assert(isCompressedPubkey(info.mintPubkey), 'mintPubkey is not a 33-byte compressed secp256k1 key')
-    assert(currentSig, 'the rotate returned no sig - offline verification is mandatory')
-    // A mint that has rotated its signing key may publish the old ones as
-    // previousPubkeys, so notes it issued before the rotation still
-    // verify. Any key it currently stands behind is an acceptable signer
-    // for grading purposes. That is a narrower claim than it looks: it
-    // says the signature is genuine, not that a wallet should accept the
-    // new key - LUD-25 puts that decision with the holder.
-    const signedBy = [info.mintPubkey, ...previousPubkeys].find(key =>
-      verifySignature(current, info.maxWithdrawable, currentSig, key)
-    )
-    assert(
-      signedBy,
-      previousPubkeys.length > 0
-        ? 'the signature verifies against neither the advertised mintPubkey nor any published previous key'
-        : 'the signature does not verify against the advertised mintPubkey and amount'
-    )
-    return signedBy === info.mintPubkey
+  // A mint that has rotated its signing key may publish the old ones as
+  // previousPubkeys, so notes it issued before the rotation still verify.
+  // Any key it currently stands behind is an acceptable signer for grading
+  // purposes. That is a narrower claim than it looks: it says the
+  // signature is genuine, not that a wallet should accept the new key -
+  // LUD-25 puts that decision with the holder.
+  const signerOf = verifies => [info.mintPubkey, ...previousPubkeys].find(key => verifies(key))
+  const describeSigner = signedBy =>
+    signedBy === info.mintPubkey
       ? 'verified offline'
       : `verified offline against a previous signing key (${signedBy.slice(0, 16)}...)`
+  const unverified = () =>
+    previousPubkeys.length > 0
+      ? 'the signature verifies against neither the advertised mintPubkey nor any published previous key'
+      : 'the signature does not verify against the advertised mintPubkey and amount'
+
+  await report.check('a plain note carries no signature, or one that verifies', async () => {
+    // LUD-25 Part 2 signs cp1 notes only: a hash has nothing to attest to
+    // without disclosing the secret, so a plain note is unsigned by
+    // design. A mint that still issues the old Part 1 signature over the
+    // hash is harmless, as long as the signature is a true one.
+    if (currentSig === null) return 'unsigned, as Part 2 specifies for a plain note'
+    assert(info.mintPubkey, 'a sig with no mintPubkey advertised verifies against nothing')
+    assert(isCompressedPubkey(info.mintPubkey), 'mintPubkey is not a 33-byte compressed secp256k1 key')
+    const signedBy = signerOf(key => verifySignature(current, info.maxWithdrawable, currentSig, key))
+    assert(signedBy, unverified())
+    return `a legacy Part 1 signature, ${describeSigner(signedBy)}`
   })
 
   await report.check('reports a spent hash distinguishably from an unknown hash', async () => {
@@ -1095,12 +1133,10 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   })
 
   await report.check('keeps signatures off the informational endpoint', async () => {
-    // LUD-25: "Signatures are only ever delivered in the
-    // withdrawSuccessResponse of a rotate, split or merge, the
-    // informational endpoint never returns one." A mint that hands one out
-    // here lets anyone holding only a note's PUBLIC url mint a certificate
-    // for it, and invites a wallet to treat the informational answer as an
-    // offline proof when it is an online one.
+    // A plain note has no certificate, so its informational GET carries no
+    // sig. Part 2 does hand out a cs1 here for a cp1 note, and the Part 2
+    // check below expects it; this probe is by hex k1, where one would
+    // invite a wallet to treat an online answer as an offline proof.
     const here = new URL(url)
     here.searchParams.set('k1', current)
     const body = await get(here)
@@ -1416,6 +1452,61 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     const body = await get(cb)
     assert(body.status === 'ERROR', 'a secret burned earlier was accepted again')
     return body.reason
+  })
+
+  // LUD-25 Part 2. The spec's one MUST for signatures lives here: a cp1
+  // note is a public key, and the SERVICE certifies every one it issues
+  // with a cs1 over (key, amount) that recovers to mintPubkey. Part 2 is
+  // optional, so a SERVICE that refuses the cp1 output warns rather than
+  // fails. Last, because the note comes back as a plain secret only if
+  // the rotate home succeeds.
+  await report.check('certifies a cp1 note it issues (Part 2)', async () => {
+    const secretKey = secp256k1.utils.randomSecretKey()
+    const pubkey = schnorr.getPublicKey(secretKey)
+    const cp1 = encodeCash('cp', pubkey)
+    const out = new URL(info.callback)
+    out.searchParams.append('k1', current)
+    out.searchParams.append('p1', cp1)
+    const body = await get(out)
+    if (body.status === 'ERROR') throw soft(`Part 2 not offered: a cp1 output was refused (${body.reason})`)
+    // The plain secret is burned either way; from here the bearer secret
+    // is the key's ownership proof, until the rotate home below.
+    const ck1 = ownershipProof(secretKey)
+    current = ck1
+    assert(info.mintPubkey, 'issued a cp1 note with no mintPubkey advertised - nothing to verify its certificate against')
+    assert(isCompressedPubkey(info.mintPubkey), 'mintPubkey is not a 33-byte compressed secp256k1 key')
+    const pubkeyHex = bytesToHex(pubkey)
+    const certificate = decodeCash('cs', body.sig, 65)
+    assert(certificate, `the rotate to a cp1 output returned no cs1 certificate in sig (got ${JSON.stringify(body.sig)})`)
+    const signedBy = signerOf(key => verifyCertificate(pubkeyHex, info.maxWithdrawable, certificate, key))
+    assert(signedBy, unverified())
+
+    // The informational GET by ck1 delivers the certificate again, so a
+    // holder need not rotate just to obtain one.
+    const byKey = new URL(url)
+    byKey.searchParams.set('k1', ck1)
+    const lookup = await get(byKey)
+    assert(lookup.status !== 'ERROR', `the cp1 note is not spendable by its ck1: ${lookup.reason}`)
+    assert(
+      lookup.maxWithdrawable === info.maxWithdrawable,
+      `value changed across a rotate to cp1: ${info.maxWithdrawable} -> ${lookup.maxWithdrawable}`
+    )
+    const again = decodeCash('cs', lookup.sig, 65)
+    assert(again, 'the informational GET by ck1 returned no cs1 certificate')
+    assert(
+      signerOf(key => verifyCertificate(pubkeyHex, info.maxWithdrawable, again, key)),
+      'the certificate on the informational GET does not verify'
+    )
+
+    // Home: back to a plain secret, spent by the ck1.
+    const fresh = bytesToHex(randomBytes(32))
+    const home = new URL(info.callback)
+    home.searchParams.append('k1', ck1)
+    home.searchParams.append('p1', noteId(fresh))
+    const back = await get(home)
+    assert(back.status === 'OK', `the cp1 note could not be rotated back to a plain secret by its ck1: ${back.reason}`)
+    current = fresh
+    return `${describeSigner(signedBy)}; the plain note it rotated home to is ${back.sig === undefined ? 'unsigned' : 'still signed the Part 1 way'}`
   })
 
   return {finalSecret: current, noteUrl: (() => {
