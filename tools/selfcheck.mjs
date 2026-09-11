@@ -1213,6 +1213,42 @@ check('part2: the valid strings decode and the invalid ones do not, for the reas
   }
 })
 
+// ---- the Nostr-key branch extension ----
+
+const nostrSeed = load('nostr-seed.json')
+
+check('nostr-seed: marked as an extension, not LUD-25', () => {
+  assert(nostrSeed.extension === true && nostrSeed.label === 'LNURLcash/nostr-seed', 'extension/label')
+})
+
+check('nostr-seed: every seed, branch and note recomputes', () => {
+  const tag = sha256(utf8ToBytes('LNURLcash/derive'))
+  const digest = hexToBytes(part2.conventions.ownershipDigest)
+  for (const c of nostrSeed.cases) {
+    const identity = hexToBytes(c.identity)
+    assert(bytesToHex(hmac(sha256, identity, utf8ToBytes(nostrSeed.label))) === c.seed, `${c.host}: seed`)
+    assert(
+      bytesToHex(secp256k1.Point.BASE.multiply(toNum(identity)).toBytes(true).slice(1)) === c.identityPubkey,
+      `${c.host}: identityPubkey`
+    )
+    const node = hexToBytes(c.addressNode)
+    const P = secp256k1.Point.BASE.multiply(toNum(node.subarray(0, 32)))
+    const x = P.toBytes(true).slice(1)
+    const cx = decode2('cx', c.cx1, 64)
+    assert(cx && bytesToHex(cx) === bytesToHex(x) + bytesToHex(node.subarray(32)), `${c.host}: cx1`)
+    const lifted = secp256k1.Point.fromBytes(cat(Uint8Array.of(0x02), x))
+    for (const n of c.notes) {
+      const i = new Uint8Array(4)
+      new DataView(i.buffer).setUint32(0, n.index, false)
+      const t = toNum(sha256(cat(tag, tag, x, node.subarray(32), i)))
+      const pk = bytesToHex(lifted.add(secp256k1.Point.BASE.multiply(t)).toBytes(true).slice(1))
+      assert(pk === n.notePubkey, `${c.host} #${n.index}: watch-only pk`)
+      const sig = decode2('ck', n.ck1, 65)
+      assert(sig && bytesToHex(recoverX(sig, digest)) === n.notePubkey, `${c.host} #${n.index}: ck1 recovery`)
+    }
+  }
+})
+
 console.log(
   failures === 0
     ? '\nvectors are self-consistent'

@@ -29,6 +29,7 @@ payment-request.json lnurlcashreq1: asking another holder for value
 settle-for-value.json the decision table for taking a note as payment
 retried-mutation.json what makes a repeat a retry, not a double-spend
 mint-to-hash.json    naming the note you are buying: h on the pay callback
+nostr-seed.json      EXTENSION: Part 2 branch from a Nostr key, HMAC-SHA256(key, "LNURLcash/nostr-seed")
 lifecycle.json       behavioural scenarios
 threat-suite.json    transport/exposure scorecard, options vs attacks (non-normative)
 

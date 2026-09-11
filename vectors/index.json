@@ -23,6 +23,7 @@
     "settle-for-value.json",
     "retried-mutation.json",
     "mint-to-hash.json",
-    "part2.json"
+    "part2.json",
+    "nostr-seed.json"
   ]
 }

@@ -19,6 +19,12 @@ draft text's `m/139'/d1..d4`; `conventions` records both. The self-check
 recomputes every value, including recovering each `ck1` to its key and each
 `cs1` to the mint's.
 
+`vectors/nostr-seed.json` is an extension, not LUD-25, marked as such: a Part
+2 address branch rooted in a Nostr identity key (`HMAC-SHA256(key,
+"LNURLcash/nostr-seed")`, then the same path), for a holder with no BIP39
+words. heartwood-esp32 derives it on the device and lnurlcash-kit exports
+it; the generated file is identical to the one both already grade against.
+
 ## 0.8.0 - 2026-09-09
 
 **A spent note must say so.** LUD-25 [#307][307] settled the hash lookup's

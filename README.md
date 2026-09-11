@@ -63,6 +63,7 @@ for (const c of cases) {
 | `settle-for-value.json` | the decision table a server works through to take a note as payment |
 | `retried-mutation.json` | what makes a repeated mutation a retry rather than a double-spend |
 | `mint-to-hash.json` | additive `mintToHash` compatibility and optional bound LUD-21 receipts; not baseline LUD-25 |
+| `nostr-seed.json` | a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words (heartwood-esp32, lnurlcash-kit); an extension, not LUD-25 |
 | `lifecycle.json` | behavioural requirements, as scenarios to drive |
 | `threat-suite.json` | the transport/exposure scorecard — candidate spec options against fixed attacks (non-normative) |
 

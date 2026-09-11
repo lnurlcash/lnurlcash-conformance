@@ -659,6 +659,61 @@ const part2 = {
   ]
 }
 
+// ---- vectors: Nostr-key address branches (an extension, not LUD-25) -------
+//
+// A holder with no BIP39 words - a hardware signer that keeps only its
+// identity key, or a wallet that never made any - can still be paid to keys
+// of its own: seed = HMAC-SHA256(key = the Nostr identity's secret key,
+// msg = "LNURLcash/nostr-seed"), then the Part 2 address path above from
+// that seed, unchanged. heartwood-esp32 derives this on the device and
+// lnurlcash-kit exports it. A mint only ever sees a cx1, so nothing here
+// changes what a mint does.
+
+const NOSTR_SEED_LABEL = 'LNURLcash/nostr-seed'
+
+const nostrSeedCase = (identityHex, host) => {
+  const seed = hmac(sha256, hexToBytes(identityHex), utf8ToBytes(NOSTR_SEED_LABEL))
+  const addressRoot = addressRootOf(seed)
+  const node = addressDomainIndices(addressRoot, host).reduce(ckdPriv, addressRoot)
+  const branchPubkey = secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey)).toBytes(true).slice(1)
+  return {
+    identity: identityHex,
+    identityPubkey: bytesToHex(secp256k1.Point.BASE.multiply(bytesToNumber(hexToBytes(identityHex))).toBytes(true).slice(1)),
+    host,
+    seed: bytesToHex(seed),
+    addressNode: nodeHex(node),
+    cx1: bech32mOf('cx', concat(branchPubkey, node.chainCode)),
+    notes: [0, 1, 7].map(index => {
+      const {secretKey, pubkey} = noteKeysAt(node, index)
+      return {
+        index,
+        noteSecretKey: bytesToHex(secretKey),
+        notePubkey: bytesToHex(pubkey),
+        cp1: bech32mOf('cp', pubkey),
+        ck1: bech32mOf('ck', signRecoverable(secretKey, OWNERSHIP_DIGEST))
+      }
+    })
+  }
+}
+
+const IDENTITY_ONE = '0000000000000000000000000000000000000000000000000000000000000001'
+const IDENTITY_TWO = '7f4c11a9742721d66e40e321ca70b682c27f7422190c84a187525e69e6038369'
+
+const nostrSeed = {
+  version: VERSION,
+  spec: SPEC,
+  extension: true,
+  description:
+    'An extension, not LUD-25: a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words. seed = HMAC-SHA256(key = identity (the 32-byte secret key), msg = utf8("LNURLcash/nostr-seed")); the branch is then the reference wallet\'s m/139\'/1\'/d1..d4 from that seed exactly as in part2.json, and every note field means what it means there. identityPubkey is the identity\'s x-only public key, the npub a lightning address belongs to. heartwood-esp32 derives this on the device and lnurlcash-kit exports it (deriveNostrAddressNode); a mint sees an ordinary cx1.',
+  label: NOSTR_SEED_LABEL,
+  cases: [
+    nostrSeedCase(IDENTITY_ONE, 'moneyer.dev'),
+    nostrSeedCase(IDENTITY_ONE, 'mint.example'),
+    nostrSeedCase(IDENTITY_TWO, 'moneyer.dev'),
+    nostrSeedCase(IDENTITY_TWO, '127.0.0.1:8899')
+  ]
+}
+
 // ---- vectors: bech32 (LUD-01) --------------------------------------------
 
 const lnurlEncode = url =>
@@ -2901,7 +2956,8 @@ const files = [
   write('settle-for-value.json', settleForValue),
   write('retried-mutation.json', retriedMutation),
   write('mint-to-hash.json', mintToHash),
-  write('part2.json', part2)
+  write('part2.json', part2),
+  write('nostr-seed.json', nostrSeed)
 ]
 
 write('index.json', {
