@@ -9,7 +9,7 @@
 import {readdirSync, readFileSync} from 'node:fs'
 import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
-import {bech32, base64urlnopad} from '@scure/base'
+import {bech32, bech32m, base64urlnopad} from '@scure/base'
 import {sha256} from '@noble/hashes/sha2.js'
 import {secp256k1} from '@noble/curves/secp256k1.js'
 import {hmac} from '@noble/hashes/hmac.js'
@@ -1097,6 +1097,156 @@ check('the threat suite cross-references its executable companion', () => {
     threatSuite.policy.redGreen.includes('test_bearer_threat_suite_poc.py'),
     'policy.redGreen does not name the lnurl-mint companion file'
   )
+})
+
+// ---- Part 2 ----
+
+const part2 = load('part2.json')
+const N2 = secp256k1.Point.Fn.ORDER
+const toNum = bytes => BigInt(`0x${bytesToHex(bytes)}`)
+const cat = (...parts) => {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+  let o = 0
+  for (const p of parts) {
+    out.set(p, o)
+    o += p.length
+  }
+  return out
+}
+// Strict, as BIP-350 and the reference mint read them: bech32m only, one
+// case, the right prefix, the right length, zero padding.
+const decode2 = (hrp, value, length) => {
+  try {
+    const d = bech32m.decode(value, false)
+    if (d.prefix.toLowerCase() !== hrp) return null
+    const bytes = bech32m.fromWords(d.words)
+    return bytes.length === length ? bytes : null
+  } catch {
+    return null
+  }
+}
+const LENGTHS = {cp1: ['cp', 32], ck1: ['ck', 65], cs1: ['cs', 65], cx1: ['cx', 64]}
+const lsmDigest = message =>
+  sha256(sha256(cat(utf8ToBytes('Lightning Signed Message:'), utf8ToBytes(message))))
+const recoverX = (signature, digest) => {
+  const recIdFirst = cat(signature.subarray(64), signature.subarray(0, 64))
+  return secp256k1.recoverPublicKey(recIdFirst, digest, {prehash: false}).slice(1)
+}
+
+check('part2: the ownership digest recomputes', () => {
+  assert(bytesToHex(lsmDigest('LNURLcash')) === part2.conventions.ownershipDigest, 'ownershipDigest')
+})
+
+check('part2: every cx1 is its branch key and chain code', () => {
+  for (const b of part2.branches) {
+    const bytes = decode2('cx', b.cx1, 64)
+    assert(bytes && bytesToHex(bytes) === b.branchPubkey + b.chainCode, `${b.host}: cx1`)
+    const node = hexToBytes(b.addressNode)
+    const P = secp256k1.Point.BASE.multiply(toNum(node.subarray(0, 32)))
+    assert(bytesToHex(P.toBytes(true).slice(1)) === b.branchPubkey, `${b.host}: branchPubkey`)
+    assert((P.y % 2n === 0n ? 'even' : 'odd') === b.branchParity, `${b.host}: branchParity`)
+    assert(bytesToHex(node.subarray(32)) === b.chainCode, `${b.host}: chainCode`)
+  }
+  assert(part2.branches.some(b => b.branchParity === 'odd'), 'no odd-parity branch, so the negation goes untested')
+})
+
+check('part2: a watcher holding only the cx1 derives every note key', () => {
+  const tag = sha256(utf8ToBytes('LNURLcash/derive'))
+  for (const b of part2.branches) {
+    const P = secp256k1.Point.fromBytes(cat(Uint8Array.of(0x02), hexToBytes(b.branchPubkey)))
+    for (const n of b.notes) {
+      const i = new Uint8Array(4)
+      new DataView(i.buffer).setUint32(0, n.index, false)
+      const t = toNum(sha256(cat(tag, tag, hexToBytes(b.branchPubkey), hexToBytes(b.chainCode), i)))
+      const pk = P.add(secp256k1.Point.BASE.multiply(t)).toBytes(true).slice(1)
+      assert(bytesToHex(pk) === n.notePubkey, `${b.host} #${n.index}: watch-only pk`)
+      const sk = toNum(hexToBytes(n.noteSecretKey))
+      assert(sk > 0n && sk < N2, `${b.host} #${n.index}: sk out of range`)
+      assert(
+        bytesToHex(secp256k1.Point.BASE.multiply(sk).toBytes(true).slice(1)) === n.notePubkey,
+        `${b.host} #${n.index}: sk does not match pk`
+      )
+      const cp1 = decode2('cp', n.cp1, 32)
+      assert(cp1 && bytesToHex(cp1) === n.notePubkey, `${b.host} #${n.index}: cp1`)
+    }
+  }
+})
+
+check('part2: every ck1 is an ownership signature that recovers its note key', () => {
+  const digest = hexToBytes(part2.conventions.ownershipDigest)
+  for (const b of part2.branches) {
+    for (const n of b.notes) {
+      const sig = decode2('ck', n.ck1, 65)
+      assert(sig && bytesToHex(sig) === n.ownershipSignature, `${b.host} #${n.index}: ck1`)
+      assert(sig[64] <= 3, `${b.host} #${n.index}: recovery id`)
+      assert(toNum(sig.subarray(32, 64)) <= N2 / 2n, `${b.host} #${n.index}: high-S`)
+      assert(bytesToHex(recoverX(sig, digest)) === n.notePubkey, `${b.host} #${n.index}: recovery`)
+    }
+  }
+})
+
+check('part2: every certificate is the mint key over its message', () => {
+  const mintX = bytesToHex(hexToBytes(part2.mint.mintPubkey).slice(1))
+  assert(
+    bytesToHex(secp256k1.getPublicKey(hexToBytes(part2.mint.privateKey), true)) === part2.mint.mintPubkey,
+    'mint key pair'
+  )
+  for (const c of part2.certificates) {
+    assert(c.message === `LNURLcash:${c.amountMsat}:${c.notePubkey}`, `${c.amountMsat}: message`)
+    assert(bytesToHex(lsmDigest(c.message)) === c.digest, `${c.amountMsat}: digest`)
+    const sig = decode2('cs', c.cs1, 65)
+    assert(sig && bytesToHex(sig) === c.signature, `${c.amountMsat}: cs1`)
+    assert(bytesToHex(recoverX(sig, hexToBytes(c.digest))) === mintX, `${c.amountMsat}: recovers to the mint key`)
+  }
+})
+
+check('part2: the valid strings decode and the invalid ones do not, for the reason given', () => {
+  for (const v of part2.valid) {
+    const [hrp, length] = LENGTHS[v.type]
+    const bytes = decode2(hrp, v.value, length)
+    assert(bytes && bytesToHex(bytes) === v.bytes, `valid ${v.type}: ${v.why}`)
+  }
+  for (const v of part2.invalid) {
+    const [hrp, length] = LENGTHS[v.type]
+    assert(decode2(hrp, v.value, length) === null, `invalid ${v.type} decoded: ${v.why}`)
+    assert(typeof v.why === 'string' && v.why.length > 0, `invalid ${v.type}: no reason given`)
+  }
+})
+
+// ---- the Nostr-key branch extension ----
+
+const nostrSeed = load('nostr-seed.json')
+
+check('nostr-seed: marked as an extension, not LUD-25', () => {
+  assert(nostrSeed.extension === true && nostrSeed.label === 'LNURLcash/nostr-seed', 'extension/label')
+})
+
+check('nostr-seed: every seed, branch and note recomputes', () => {
+  const tag = sha256(utf8ToBytes('LNURLcash/derive'))
+  const digest = hexToBytes(part2.conventions.ownershipDigest)
+  for (const c of nostrSeed.cases) {
+    const identity = hexToBytes(c.identity)
+    assert(bytesToHex(hmac(sha256, identity, utf8ToBytes(nostrSeed.label))) === c.seed, `${c.host}: seed`)
+    assert(
+      bytesToHex(secp256k1.Point.BASE.multiply(toNum(identity)).toBytes(true).slice(1)) === c.identityPubkey,
+      `${c.host}: identityPubkey`
+    )
+    const node = hexToBytes(c.addressNode)
+    const P = secp256k1.Point.BASE.multiply(toNum(node.subarray(0, 32)))
+    const x = P.toBytes(true).slice(1)
+    const cx = decode2('cx', c.cx1, 64)
+    assert(cx && bytesToHex(cx) === bytesToHex(x) + bytesToHex(node.subarray(32)), `${c.host}: cx1`)
+    const lifted = secp256k1.Point.fromBytes(cat(Uint8Array.of(0x02), x))
+    for (const n of c.notes) {
+      const i = new Uint8Array(4)
+      new DataView(i.buffer).setUint32(0, n.index, false)
+      const t = toNum(sha256(cat(tag, tag, x, node.subarray(32), i)))
+      const pk = bytesToHex(lifted.add(secp256k1.Point.BASE.multiply(t)).toBytes(true).slice(1))
+      assert(pk === n.notePubkey, `${c.host} #${n.index}: watch-only pk`)
+      const sig = decode2('ck', n.ck1, 65)
+      assert(sig && bytesToHex(recoverX(sig, digest)) === n.notePubkey, `${c.host} #${n.index}: ck1 recovery`)
+    }
+  }
 })
 
 console.log(

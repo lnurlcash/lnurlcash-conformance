@@ -4,6 +4,27 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## Unreleased
+
+**Part 2 vectors.** `vectors/part2.json` covers LUD-25 Part 2, notes keyed by
+a public key and spent by a recoverable signature: the four bech32m strings
+(`cp1`, `ck1`, `cs1`, `cx1`, strict per BIP-350), the per-note key tweak
+(watch-only and held), ownership signatures and mint certificates, over 8
+branches (two mnemonics, four hosts including one with a port, both branch
+parities) and 7 indices up to `u32::MAX`. The generator builds them from the
+primitives like every other file here, and they match, byte for byte,
+vectors generated from lnurl-wallet's `src/lib` and confirmed by lnurl-mint.
+The address branch is the reference wallet's `m/139'/1'/d1..d4`, not the
+draft text's `m/139'/d1..d4`; `conventions` records both. The self-check
+recomputes every value, including recovering each `ck1` to its key and each
+`cs1` to the mint's.
+
+`vectors/nostr-seed.json` is an extension, not LUD-25, marked as such: a Part
+2 address branch rooted in a Nostr identity key (`HMAC-SHA256(key,
+"LNURLcash/nostr-seed")`, then the same path), for a holder with no BIP39
+words. heartwood-esp32 derives it on the device and lnurlcash-kit exports
+it; the generated file is identical to the one both already grade against.
+
 ## 0.8.0 - 2026-09-09
 
 **A spent note must say so.** LUD-25 [#307][307] settled the hash lookup's

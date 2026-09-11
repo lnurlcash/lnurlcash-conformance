@@ -47,6 +47,8 @@ for (const c of cases) {
 | --- | --- |
 | `signature.json` | offline verification, both recovery-id orderings, malformed input |
 | `derivation.json` | deterministic note secrets from a BIP39 seed |
+| `cash-derivation.json` | LUD-25's seed-recoverable note secrets under `m/139'`, with BIP-32's own vector 1 |
+| `part2.json` | Part 2: `cp1`/`ck1`/`cs1`/`cx1`, the per-note key tweak, ownership signatures and mint certificates, on the reference wallet's `m/139'/1'` address path |
 | `bech32.json` | LUD-01 encoding, round trips, corrupted checksums |
 | `url-admission.json` | which URLs may be fetched, and why `data:` must never be |
 | `input-resolution.json` | bech32, LUD-17, Lightning Addresses, bare domains |
@@ -61,6 +63,7 @@ for (const c of cases) {
 | `settle-for-value.json` | the decision table a server works through to take a note as payment |
 | `retried-mutation.json` | what makes a repeated mutation a retry rather than a double-spend |
 | `mint-to-hash.json` | additive `mintToHash` compatibility and optional bound LUD-21 receipts; not baseline LUD-25 |
+| `nostr-seed.json` | a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words (heartwood-esp32, lnurlcash-kit); an extension, not LUD-25 |
 | `lifecycle.json` | behavioural requirements, as scenarios to drive |
 | `threat-suite.json` | the transport/exposure scorecard — candidate spec options against fixed attacks (non-normative) |
 
