@@ -4,7 +4,7 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
-## Unreleased
+## 0.9.0 - 2026-09-11
 
 **Part 2 vectors.** `vectors/part2.json` covers LUD-25 Part 2, notes keyed by
 a public key and spent by a recoverable signature: the four bech32m strings

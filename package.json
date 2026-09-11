@@ -1,6 +1,6 @@
 {
   "name": "lnurlcash-conformance",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Language-neutral conformance vectors, an adversarial mock mint, and a grader for LNURLcash (LUD-25) implementations",
   "author": "TheCryptoDonkey",
   "license": "MIT",
