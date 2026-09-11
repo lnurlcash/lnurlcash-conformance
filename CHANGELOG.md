@@ -4,6 +4,39 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## 0.10.0 - 2026-09-11
+
+**Signatures belong to cp1 notes.** The Part 2 rewrite of LUD-25 signs a
+`cp1` note only: a plain hash has nothing to attest to without disclosing
+the secret, so a plain note is unsigned by design. The grader follows it.
+
+- `signs the notes it issues` is gone. In its place, `a plain note carries
+  no signature, or one that verifies`: a hash rotate answered with a bare
+  `{"status":"OK"}` passes, and a mint still issuing the old Part 1
+  signature over the hash passes as long as the signature is a true one.
+  `mintPubkey` is no longer demanded of a mint that issues no signature.
+- New, last in the note run: `certifies a cp1 note it issues (Part 2)`.
+  The grader rotates the note into a fresh `cp1` key, requires a `cs1` in
+  `sig` that recovers to `mintPubkey` (or a published previous key) over
+  the key and amount, requires the same certificate again on the
+  informational GET by `ck1`, then rotates home to a plain secret by that
+  `ck1`. A mint that refuses the `cp1` output warns, never fails: Part 2 is
+  optional. The mock mint has no Part 2 yet, so it warns here.
+- `vectors/responses.json` follows: a bare `{"status":"OK"}` to a hash
+  output is now `ok` (it was `unverifiable`), and so is a split that signs
+  only its first hash output. Three cases are new, and carry `output` or
+  `change: "cp1"` to say which kind of note the call mints: a `cp1` output
+  confirmed without a certificate is `unverifiable`, one certified with a
+  `cs1` is `ok`, and a `cp1` change left uncertified is `unverifiable`. A
+  consumer driving these cases picks the output by that field; a hash
+  where it is absent. Other vector prose that called the hash-note
+  signature mandatory now says which output is owed one.
+- CI runs on Node 24.
+
+The withdraw-info vector still rejects a `withdrawRequest` with no
+`mintPubkey`; relaxing that for Part 1-only mints is a wallet-side change
+across every kit and is not in this release.
+
 ## 0.9.0 - 2026-09-11
 
 **Part 2 vectors.** `vectors/part2.json` covers LUD-25 Part 2, notes keyed by

@@ -833,7 +833,7 @@ const noteUrl = {
   version: VERSION,
   spec: SPEC,
   description:
-    'A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. A SERVICE returning a rotate, split or merge MUST include the offline-verification signature in `sig` (and `sig2` for the second split output).',
+    'A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. A SERVICE returning a rotate, split or merge to a cp1 output MUST include its certificate in `sig` (and `sig2` for the second split output); a plain hash output carries none, and a legacy Part 1 signature on one is harmless where it verifies.',
   parse: [
     {
       url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000',
@@ -1282,7 +1282,7 @@ const responses = {
     'Classifying a SERVICE response. The distinction that matters for funds is definitive-rejection versus ambiguous-outcome: a parsed {"status":"ERROR"} means the request was processed and refused, while a transport failure, an unparseable body, or a 200 that does not confirm means the mutation MAY have landed - and for rotate/split/merge the WALLET-generated secrets are then the only copy of the outputs, so they must ride the error rather than be discarded. A confirmed mutation carrying no signature is its own outcome: it definitely landed, so the secrets matter more than ever, and the SERVICE is non-conforming. `op` says which call each case is driven through - a melt is the one mutation with no signature to return.',
   outcomes: {
     ok: 'the operation is confirmed',
-    unverifiable: 'the mutation is confirmed but carries no signature. LUD-25 requires one on every rotate, split and merge, so this SERVICE is non-conforming - but the note EXISTS at the hash the WALLET disclosed, and its secret is the only key to that value. Keep the secret; report the mint',
+    unverifiable: 'the mutation is confirmed but a cp1 output came back without its cs1 certificate. LUD-25 Part 2 requires one on every cp1 output of a rotate, split or merge, so this SERVICE is non-conforming - but the note EXISTS at the key the WALLET disclosed, and its private key is the only key to that value. Keep the key; report the mint. A plain hash output is unsigned by design and is never this outcome',
     pending: 'this k1 has another operation in flight (a melt); retry shortly',
     spent: 'the SERVICE is authoritative that the note is already burned; a holder may lock it as spent',
     unknown: 'the SERVICE does not recognise this note; surface it, do not silently lock it',
@@ -1295,8 +1295,35 @@ const responses = {
       op: 'mutation',
       http: 200,
       body: {status: 'OK'},
+      expect: 'ok',
+      why: 'a bare OK is the conforming answer for a plain hash output since the Part 2 rewrite: the note is real, the WALLET keeps its secret, and nobody the holder hands it to can check it offline, which is what a plain note is. Only a cp1 output is owed a certificate'
+    },
+    {
+      name: 'cp1 output confirmed without a certificate',
+      op: 'mutation',
+      output: 'cp1',
+      http: 200,
+      body: {status: 'OK'},
       expect: 'unverifiable',
-      why: 'a bare OK was a conforming rotate answer while offline verification was optional. It is not one now: the note is real and the WALLET must keep its secret, but nobody the holder hands it to can check it'
+      why: 'a cp1 output is owed a cs1 certificate in sig; without one the note it names cannot be verified offline, which is the whole reason to hold a cp1 note. The note exists at the key the WALLET disclosed'
+    },
+    {
+      name: 'cp1 output certified',
+      op: 'mutation',
+      output: 'cp1',
+      http: 200,
+      body: {status: 'OK', sig: bech32mOf('cs', hexToBytes('ab'.repeat(65)))},
+      expect: 'ok',
+      signature: bech32mOf('cs', hexToBytes('ab'.repeat(65)))
+    },
+    {
+      name: 'a split to a cp1 change that certifies only its first output',
+      op: 'split',
+      change: 'cp1',
+      http: 200,
+      body: {status: 'OK', sig: 'ab'.repeat(65)},
+      expect: 'unverifiable',
+      why: 'the change is a cp1 note and is owed its certificate in sig2 exactly as the first output would be; the change is not a lesser note'
     },
     {
       name: 'success with an offline-verification signature',
@@ -1320,8 +1347,9 @@ const responses = {
       op: 'split',
       http: 200,
       body: {status: 'OK', sig: 'ab'.repeat(65)},
-      expect: 'unverifiable',
-      why: 'both outputs of a split are notes and both need a signature; the change is not a lesser note'
+      expect: 'ok',
+      signature: 'ab'.repeat(65),
+      why: 'both outputs are plain hash notes, owed nothing; a mint may still issue the old Part 1 signature over one of them, and that is harmless where it verifies'
     },
     {
       name: 'melt success with a LUD-21 style proof',
@@ -1737,7 +1765,7 @@ const lifecycle = {
         'the HTTP stack silently resends the identical request'
       ],
       requirement:
-        'a SERVICE MUST recognize the byte-identical retry from the same k1 set, h, h2 and amount, and return the original success with the same sig and sig2 without moving balance again. A WALLET still persists every fresh output secret before sending the first request and keeps it across an ambiguous transport failure. A request that changes any recorded field is a genuine double-spend attempt and gets the ordinary already-spent refusal.'
+        'a SERVICE MUST recognize the byte-identical retry from the same k1 set, h, h2 and amount, and return the original success, with the same sig and sig2 where the outputs had any, without moving balance again. A WALLET still persists every fresh output secret before sending the first request and keeps it across an ambiguous transport failure. A request that changes any recorded field is a genuine double-spend attempt and gets the ordinary already-spent refusal.'
     },
     {
       name: 'settle a merge or split output',
@@ -2115,7 +2143,7 @@ const retriedMutation = {
     'Recorded, never inferred. A SERVICE links the burned inputs to the outputs they minted and matches against that. Matching on "a note exists at h" alone would let anyone holding a burned k1 and any outstanding note id pull a success out of the SERVICE.',
   outcomes: {
     replay:
-      'the original success, byte for byte: the same status, the same sig and sig2, and no balance moved',
+      'the original success, byte for byte: the same status, the same sig and sig2 where the outputs had any, and no balance moved',
     'double-spend':
       'refused exactly as any other attempt to spend a burned secret, with the reason string unchanged'
   },
