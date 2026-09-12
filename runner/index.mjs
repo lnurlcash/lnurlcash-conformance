@@ -253,7 +253,32 @@ export const resolveMint = input => {
 
 // ---- read-only checks -----------------------------------------------------
 
-export const gradeMint = async (payUrl, report) => {
+// `registeredAddress` grades the target as a LUD-25 Part 2 Lightning
+// Address rather than a mint payLink. The two are the same document to a
+// wallet - both advertise commentAllowed and a withdrawLink, and both
+// mint on payment - but the draft's comment rules are written for the
+// payLink, which has no key to mint under but the one the comment names.
+// A cx1-registered address always has one, the next unused key on its
+// branch, so there a comment naming no output is the ordinary free text
+// LUD-12 invites and is ignored rather than refused (lnurl-mint #46,
+// after every Wallet of Satoshi and Primal payment to such an address
+// failed on a typed message).
+//
+// Deliberately a flag and not a probe. "Returned an invoice for a comment
+// naming no output" is also exactly what a mint falling back to a
+// preimage-keyed note does, and that mint is dangerous - the preimage
+// race the draft's Security considerations describes. Nothing on the wire
+// tells the two apart before settlement: they differ only in what key the
+// note lands under. Guessing would wave the dangerous one through, so the
+// strict payLink rules stay the default and an address is declared.
+//
+// The cost of that is real and worth stating: this flag takes the
+// operator's word, and a preimage-keyed fallback passes under it. It
+// relaxes the comment rules and nothing else, and the draft gives an
+// address no way to say what it is on the wire. A signal it could
+// advertise - so this became detectable rather than declared - is worth
+// raising against LUD-25 Part 2.
+export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}) => {
   let pay
   let mintAddress
   await report.check('payRequest resolves and is well-formed', async () => {
@@ -579,6 +604,19 @@ export const gradeMint = async (payUrl, report) => {
     }
     const spelt = spelling => (spelling === 'comment' ? 'a LUD-12 comment' : 'an h parameter')
 
+    // The behaviour #46 fixed, asserted rather than assumed. Asked once,
+    // not once per malformed value: on an address a quote claims the next
+    // branch index as it is issued, so every probe costs the holder a key
+    // whether or not anyone pays. `gm` is short enough that no mint could
+    // read it as a commitment of any spelling.
+    if (registeredAddress) {
+      const freeText = await quoteAt('comment', 'gm')
+      assert(
+        freeText.status !== 'ERROR' && typeof freeText.pr === 'string',
+        `refused a comment naming no output: ${freeText.reason} - this address mints on its own branch, so an ordinary LUD-12 message must not fail the payment`
+      )
+    }
+
     const advertised = spellingsOf(pay)
     const corroborated = spellingsOf(mintAddress)
     const claimed = [...new Set([...advertised, ...corroborated])]
@@ -655,6 +693,11 @@ export const gradeMint = async (payUrl, report) => {
 
     for (const spelling of probed) {
       for (const [what, value] of malformed) {
+        // Every one of these names no output, which on an address is free
+        // text, already covered above. `h` stays probed either way: it is
+        // a parameter invented for this one purpose, so a malformed one is
+        // a wallet error wherever it is sent.
+        if (spelling === 'comment' && registeredAddress) continue
         const body = await quoteAt(spelling, value)
         if (spelling === 'h') {
           if (!hClaimed) continue
@@ -679,10 +722,20 @@ export const gradeMint = async (payUrl, report) => {
     const bare = new URL(pay.callback)
     bare.searchParams.set('amount', String(amount))
     const unnamed = await get(bare)
-    assert(
-      unnamed.status === 'ERROR' && !unnamed.pr,
-      'issued an invoice for a quote carrying no comment - current LUD-25 requires rejection before invoicing'
-    )
+    if (registeredAddress) {
+      // The draft is explicit that a registered address needs no comment
+      // at all: it derives the next key from its own cx1. Refusing here
+      // would break every plain Lightning payment to the address.
+      assert(
+        unnamed.status !== 'ERROR' && typeof unnamed.pr === 'string',
+        `refused a quote carrying no comment: ${unnamed.reason} - a registered address mints on its own branch, so a payment to it must not need one`
+      )
+    } else {
+      assert(
+        unnamed.status === 'ERROR' && !unnamed.pr,
+        'issued an invoice for a quote carrying no comment - current LUD-25 requires rejection before invoicing'
+      )
+    }
 
     if (hClaimed) {
       const mismatch = new URL(pay.callback)
@@ -739,6 +792,9 @@ export const gradeMint = async (payUrl, report) => {
       }
     }
     if (problems.length > 0) throw soft(problems.join('; '))
+    if (registeredAddress) {
+      return `registered Lightning Address, minting on its own branch: named by ${probed.join(' and ')}; claimed by ${claimedBy.join(', ')}; bound a quote to a hash of the runner's own secret, and honoured one carrying free text and one carrying no comment at all`
+    }
     return `named by ${probed.join(' and ')}; claimed by ${claimedBy.join(', ')}; bound a quote to a hash of the runner's own secret and handled four malformed ones as the draft requires`
   })
 

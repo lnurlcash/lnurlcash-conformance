@@ -17,14 +17,14 @@ import {
   parseAdvertisedMintFee
 } from '../runner/index.mjs'
 
-const grade = async (mockOptions, {previousPubkeys, payPath} = {}) => {
+const grade = async (mockOptions, {previousPubkeys, payPath, registeredAddress} = {}) => {
   const mint = await createMockMint(mockOptions)
   try {
     const k1 = bytesToHex(randomBytes(32))
     mint.state.creditNote(k1, 21_000)
     const report = createReport()
     const payUrl = payPath ? `${mint.url}${payPath}` : `${mint.url}/.well-known/lnurlp/mint`
-    const pay = await gradeMint(payUrl, report)
+    const pay = await gradeMint(payUrl, report, {registeredAddress: Boolean(registeredAddress)})
     const options =
       pay && typeof pay.metadata === 'string'
         ? {mintFee: parseAdvertisedMintFee(pay.metadata)}
@@ -387,6 +387,43 @@ if (statusOf(noCommentCapability, MINT_TO_HASH_CHECK) !== 'fail') {
   die(`a mint missing commentAllowed did not fail: ${statusOf(noCommentCapability, MINT_TO_HASH_CHECK)}`)
 }
 console.log('ok   a mint that cannot accept the mandatory comment fails')
+
+// LUD-25 Part 2: a registered Lightning Address is not a mint payLink. It
+// mints on the next unused key of its own branch, so a comment naming no
+// output is the free text LUD-12 invites. Grading one under the payLink
+// rules calls correct behaviour non-conformant - which is what the suite
+// did to the reference mint after lnurl-mint #46.
+const addressUngraded = await grade({registeredAddress: true})
+if (statusOf(addressUngraded, MINT_TO_HASH_CHECK) !== 'fail') {
+  die(
+    `a registered address graded as a mint payLink did not fail: ${statusOf(addressUngraded, MINT_TO_HASH_CHECK)}`
+  )
+}
+console.log('ok   a registered address graded as a payLink fails, so the flag is not cosmetic')
+
+const address = await grade({registeredAddress: true}, {registeredAddress: true})
+if (statusOf(address, MINT_TO_HASH_CHECK) !== 'pass') {
+  die(`a registered address failed its own rules: ${detailOf(address, MINT_TO_HASH_CHECK)}`)
+}
+if (address.failed > 0) die('a registered address FAILED the grade')
+if (!/registered Lightning Address/.test(detailOf(address, MINT_TO_HASH_CHECK))) {
+  die(`the report did not name what it graded: ${detailOf(address, MINT_TO_HASH_CHECK)}`)
+}
+console.log('ok   a registered address passes under --address, and the report names it')
+
+// The flag relaxes the comment rules and nothing else. It cannot separate
+// an address from a preimage-keyed fallback - both answer free text with
+// an invoice, and they differ only in what key the note lands under, which
+// no read-only probe can see. So it is a declaration of trust, and the
+// value of pinning it here is that it stays a narrow one: an address
+// broken in any other way must still fail.
+const addressTooShort = await grade({commentAllowed: 32}, {registeredAddress: true})
+if (statusOf(addressTooShort, MINT_TO_HASH_CHECK) !== 'fail') {
+  die(
+    `an address that cannot carry a 64-character comment did not fail: ${statusOf(addressTooShort, MINT_TO_HASH_CHECK)}`
+  )
+}
+console.log('ok   --address relaxes the comment rules only, not the rest of the grade')
 
 const binding = await grade({mintToHash: true})
 if (binding.failed > 0) {

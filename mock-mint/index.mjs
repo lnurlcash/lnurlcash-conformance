@@ -244,6 +244,13 @@ const DEFAULTS = {
   // the draft's line 80 behaviour and is now the defect - see
   // docs/COMMENT-IS-MANDATORY.md.
   commentFallsBack: false,
+  // LUD-25 Part 2: a registered Lightning Address with a cx1 against it.
+  // Not a defect - this mint has a key to mint under whatever the comment
+  // says (the next unused one on its branch), so a comment naming no
+  // output is the free text LUD-12 invites and is ignored, not refused.
+  // The note still lands under a branch key and never under the payment
+  // preimage, which is the whole difference from `commentFallsBack`.
+  registeredAddress: false,
   // non-compliant, and narrower: refuse a malformed comment - an empty value
   // included - but fall back when the key is absent entirely. That is the
   // distinction the malformed loop cannot reach, and the commonest way to
@@ -719,6 +726,11 @@ export const createMockMint = async (options = {}) => {
             // only models an extension implementation that ignores or fails
             // to compare h.
             boundTo = h
+            namedByComment = true
+          } else if (opts.registeredAddress) {
+            // The next unused key on the branch. Claimed as the quote is
+            // issued, so two free-text quotes never name one output.
+            boundTo = noteId(bytesToHex(randomBytes(32)))
             namedByComment = true
           } else if (
             !opts.commentFallsBack &&
