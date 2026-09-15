@@ -1205,12 +1205,12 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       : 'the signature does not verify against the advertised mintPubkey and amount'
 
   await report.check('a legacy hash mutation signature verifies when present', async () => {
-    // The reference mint can operate without a signing backend and then has
-    // no signature to return. That mode remains usable by tolerant clients,
-    // but the committed reference wallet requires a signature after a
-    // successful mutation, so omission is an interoperability warning.
+    // Part 1 signatures are optional: a plain hash has no public note
+    // identifier to certify without disclosing its bearer secret. Older
+    // SERVICE implementations may still return one, and every signature
+    // that is present must verify.
     if (currentSig === null) {
-      throw soft('unsigned legacy output: accepted as no-signer mode, but strict reference-wallet clients may refuse it')
+      return 'unsigned legacy Part 1 output accepted'
     }
     assert(info.mintPubkey, 'a sig with no mintPubkey advertised verifies against nothing')
     assert(isCompressedPubkey(info.mintPubkey), 'mintPubkey is not a 33-byte compressed secp256k1 key')

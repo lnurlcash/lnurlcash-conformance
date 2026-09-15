@@ -4,6 +4,13 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## Unreleased
+
+- Unsigned plain-hash Part 1 mutation outputs now pass the live grader cleanly
+  instead of producing an interoperability warning. Any optional legacy
+  signature that is returned must still verify; Part 2 `cp1` outputs still
+  require an amount-bearing `cs1` certificate.
+
 ## 0.11.0 - 2026-09-15
 
 **Amount-bearing certificates and internal-transfer discovery.** Part 2 now

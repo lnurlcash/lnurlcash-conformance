@@ -95,7 +95,7 @@ must survive:
 | `--echoWrongK1` | answers the informational GET with a different `k1` |
 | `--lieAboutValue=N` | reports a `maxWithdrawable` it never signed |
 | `--signatureLayout=leading` | emits the recovery id at the other end |
-| `--signatures=false` | issues no Part 1 signatures. Accepted as the reference mint's degraded no-signer mode; the reference wallet will refuse an unsigned successful mutation |
+| `--signatures=false` | issues no optional Part 1 signatures. Unsigned plain-hash outputs are conforming; Part 2 `cp1` outputs still require certificates |
 | `--serverGeneratedSecrets` | hands back a secret it generated — the exposure `h` exists to close |
 | `--meltNeverSettles` | holds every melt in flight, so notes stay `pending` |
 | `--meltAlwaysFails` | fails every payment, restoring the note |
