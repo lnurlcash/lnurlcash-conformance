@@ -4,7 +4,7 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
-## 0.11.0 - unreleased
+## 0.11.0 - 2026-09-15
 
 **Amount-bearing certificates and internal-transfer discovery.** Part 2 now
 follows the current `lnurl-wallet` and `lnurl-mint` reference implementations;
