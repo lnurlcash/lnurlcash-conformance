@@ -11,6 +11,7 @@
 // Usable as a library (createMockMint) or standalone (npm start).
 
 import {createServer} from 'node:http'
+import {bech32m} from '@scure/base'
 import {sha256} from '@noble/hashes/sha2.js'
 import {secp256k1} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
@@ -19,6 +20,27 @@ import {realpathSync} from 'node:fs'
 import {pathToFileURL} from 'node:url'
 
 const LSM_PREFIX = 'Lightning Signed Message:'
+
+const concat = (...parts) => {
+  const out = new Uint8Array(parts.reduce((size, part) => size + part.length, 0))
+  let offset = 0
+  for (const part of parts) {
+    out.set(part, offset)
+    offset += part.length
+  }
+  return out
+}
+
+const taggedHash = (tag, ...parts) => {
+  const tagHash = sha256(utf8ToBytes(tag))
+  return sha256(concat(tagHash, tagHash, ...parts))
+}
+
+const ser32 = value => {
+  const out = new Uint8Array(4)
+  new DataView(out.buffer).setUint32(0, value, false)
+  return out
+}
 
 const noteId = k1 => bytesToHex(sha256(hexToBytes(k1)))
 
@@ -193,7 +215,9 @@ const DEFAULTS = {
   //   'hidesSpent'     - non-compliant: hides a retained burned h as unknown
   //   'revealsSpent'   - legacy alias for the now-compliant true behaviour
   //   'acceptsBoth'    - non-compliant: accepts k1 and h together
-  hashLookup: false,
+  // Current reference wallet and mint use secret-free informational
+  // lookups by default. Set false only to model an older SERVICE.
+  hashLookup: true,
   // LUD-25 lets a SERVICE refuse an oversized merge outright rather than
   // let the URL be mangled upstream. 0 is no explicit cap; a positive number
   // refuses more than that many k1 with the draft's own reason string.
@@ -244,6 +268,13 @@ const DEFAULTS = {
   // the draft's line 80 behaviour and is now the defect - see
   // docs/COMMENT-IS-MANDATORY.md.
   commentFallsBack: false,
+  // LUD-25 Part 2: a registered Lightning Address with a cx1 against it.
+  // Not a defect - this mint has a key to mint under whatever the comment
+  // says (the next unused one on its branch), so a comment naming no
+  // output is the free text LUD-12 invites and is ignored, not refused.
+  // The note still lands under a branch key and never under the payment
+  // preimage, which is the whole difference from `commentFallsBack`.
+  registeredAddress: false,
   // non-compliant, and narrower: refuse a malformed comment - an empty value
   // included - but fall back when the key is absent entirely. That is the
   // distinction the malformed loop cannot reach, and the commonest way to
@@ -306,6 +337,20 @@ export const createMockMint = async (options = {}) => {
   // below asks exactly what it asked before.
   const boundOutputs = new Map()
 
+  // A deterministic watch-only branch for the registered-address fixture.
+  // It is public test material, not a secret used for value. The mock uses
+  // the actual LUD-25 tweak so its text/xpub hint names the same output its
+  // next quote reserves.
+  const registeredBranchSecret = hexToBytes('44'.repeat(32))
+  const registeredBranchPubkey = secp256k1.getPublicKey(registeredBranchSecret, true).slice(1)
+  const registeredChainCode = sha256(utf8ToBytes('lnurlcash-conformance registered address'))
+  const registeredCx1 = bech32m.encode(
+    'cx',
+    bech32m.toWords(concat(registeredBranchPubkey, registeredChainCode)),
+    200
+  )
+  let registeredIndex = 0
+
   // An id is spoken for if it is a note in any state, the payment hash of
   // an invoice this mint issued, or the output a bound quote is waiting
   // to credit. Minting over any of them hands the output to somebody who
@@ -313,6 +358,19 @@ export const createMockMint = async (options = {}) => {
   // land.
   const outputIdInUse = id =>
     notes.has(id) || invoices.has(id) || boundOutputs.has(id)
+
+  const nextRegisteredOutput = () => {
+    const branch = secp256k1.Point.fromBytes(concat(Uint8Array.of(0x02), registeredBranchPubkey))
+    for (;;) {
+      const index = registeredIndex++
+      const tweak = BigInt(
+        `0x${bytesToHex(taggedHash('LNURLcash/derive', registeredBranchPubkey, registeredChainCode, ser32(index)))}`
+      )
+      if (tweak >= secp256k1.Point.Fn.ORDER) continue
+      const output = bytesToHex(branch.add(secp256k1.Point.BASE.multiply(tweak)).toBytes(true).slice(1))
+      if (!outputIdInUse(output)) return output
+    }
+  }
 
   // What makes a request the same request: the same input k1 set, the
   // same h, the same h2, the same amount. The inputs are a set rather
@@ -495,6 +553,9 @@ export const createMockMint = async (options = {}) => {
       ]
       if (opts.baseFeeMsat > 0 || opts.feePpm > 0) {
         metadata.push(['text/plain', `Mint fees: ${opts.baseFeeMsat},${opts.feePpm}`])
+      }
+      if (opts.registeredAddress) {
+        metadata.push(['text/xpub', `${registeredCx1}:${registeredIndex}`])
       }
       return send({
         tag: 'payRequest',
@@ -720,6 +781,11 @@ export const createMockMint = async (options = {}) => {
             // to compare h.
             boundTo = h
             namedByComment = true
+          } else if (opts.registeredAddress) {
+            // The next unused key on the branch. Claimed as the quote is
+            // issued, so two free-text quotes never name one output.
+            boundTo = nextRegisteredOutput()
+            namedByComment = true
           } else if (
             !opts.commentFallsBack &&
             !(opts.commentFallsBackWhenAbsent && sent === null)
@@ -826,6 +892,16 @@ export const createMockMint = async (options = {}) => {
           minWithdrawable: 0,
           maxWithdrawable: (held?.amountMsat ?? 21000) + opts.lieAboutValue,
           defaultDescription: 'an LNURLcash note',
+          // Keep the mock's optional way-home extension identical for
+          // secret-free and raw-secret lookups. This is test fixture policy,
+          // not a requirement imposed on a reference mint.
+          ...(opts.noteInfoPayLink
+            ? {
+                payLink: opts.payLinkOffOrigin
+                  ? 'https://elsewhere.example/.well-known/lnurlp/mint'
+                  : `${origin}/.well-known/lnurlp/${opts.username}`
+              }
+            : {}),
           mintPubkey: pubkey
         })
       }
@@ -842,12 +918,10 @@ export const createMockMint = async (options = {}) => {
         minWithdrawable: 0,
         maxWithdrawable: note.amountMsat + opts.lieAboutValue,
         defaultDescription: 'an LNURLcash note',
-        // The way home, as the reference mint publishes it. A holder with
-        // nothing but a note can reach the document carrying this mint's
-        // terms and its retired signing keys; without it a wallet that only
-        // ever received notes cannot tell an announced key rotation from a
-        // substituted key, because the document lives under a username the
-        // note never mentions.
+        // Optional way-home extension used by consumer policy tests. A holder
+        // with nothing but a note can then reach the document carrying this
+        // mint's terms and retired signing keys. Reference implementations do
+        // not make this field mandatory on an informational note response.
         ...(opts.noteInfoPayLink
           ? {
               payLink: opts.payLinkOffOrigin

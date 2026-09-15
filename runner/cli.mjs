@@ -27,9 +27,26 @@ if (positional.length === 0 && !noteArg) {
   lnurlcash-conform <mint> --note=<url> --pr=<invoice>  same, paid amount from the invoice
   lnurlcash-conform <mint> --note=<url> --preimage=<hex> + the bound-mint checks
   lnurlcash-conform <mint> --note=<url> --spend         + the full mutating checks
+  lnurlcash-conform <address> --address              grade a Part 2 registered address
 
 <mint> may be a Lightning Address (mint@example.com), a bare domain, or a
 payRequest URL.
+
+--address says the target is a LUD-25 Part 2 Lightning Address with a cx1
+registered against it, not a mint payLink. Such an address mints on the next
+unused key of its own branch, so a comment naming no output is the ordinary
+free text LUD-12 invites and must not fail the payment; without this flag the
+stricter payLink rules apply, which require every quote to name its output.
+Declared rather than detected, and it cannot be otherwise: a mint that
+unsafely falls back to a preimage-keyed note answers a free-text comment
+exactly the same way, and the two differ only in what key the note lands
+under, which nothing reveals before settlement. So --address takes the
+operator's word for it. Use it on an address you control or trust; without
+it the strict rules catch the unsafe mint, with it they cannot.
+
+Note that each quote the checks issue claims the next key on the branch,
+whether or not anyone pays it, so grading an address in use costs it a few
+indices.
 
 --paid/--pr name what the note's mint invoice was paid at, and require the
 note to be freshly minted and never rotated: the check compares its value
@@ -52,7 +69,7 @@ let pay
 if (positional[0]) {
   const payUrl = resolveMint(positional[0])
   console.log(`grading ${payUrl}\n`)
-  pay = await gradeMint(payUrl, report)
+  pay = await gradeMint(payUrl, report, {registeredAddress: flags.has('--address')})
 }
 
 const mintFee =

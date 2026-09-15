@@ -525,6 +525,26 @@ const signRecoverable = (secretKey, digest) => {
 
 const OWNERSHIP_DIGEST = lightningSignedDigest('LNURLcash')
 
+// BOLT-11's amount suffix, reused verbatim by cs1's human-readable part.
+// Pick the coarsest unit that can express the integer msat amount exactly.
+const AMOUNT_MSAT_PER_UNIT = [
+  ['', 100_000_000_000],
+  ['m', 100_000_000],
+  ['u', 100_000],
+  ['n', 100],
+  ['p', 0.1]
+]
+const amountSuffix = amountMsat => {
+  if (!Number.isSafeInteger(amountMsat) || amountMsat < 0) {
+    throw new Error('amount_msat must be a non-negative safe integer')
+  }
+  for (const [unit, per] of AMOUNT_MSAT_PER_UNIT) {
+    const digits = amountMsat / per
+    if (Number.isInteger(digits)) return `${digits}${unit}`
+  }
+  throw new Error('amount_msat could not be encoded')
+}
+
 const addressRootOf = seed => ckdPriv(cashRootOf(seed), 1 + HARDENED)
 
 const addressDomainIndices = (addressRoot, host) => {
@@ -607,7 +627,7 @@ const part2Certificate = (notePubkey, amountMsat) => {
     message,
     digest: bytesToHex(digest),
     signature: bytesToHex(signature),
-    cs1: bech32mOf('cs', signature)
+    cs1: bech32mOf(`cs${amountSuffix(amountMsat)}`, signature)
   }
 }
 
@@ -615,12 +635,31 @@ const firstNotes = part2Branches[0].notes
 const samplePubkey = hexToBytes(firstNotes[0].notePubkey)
 const sampleCp1 = firstNotes[0].cp1
 const mixedCase = value => value.slice(0, 8) + value.slice(8, 20).toUpperCase() + value.slice(20)
+const part2Certificates = [
+  part2Certificate(firstNotes[0].notePubkey, 1000),
+  part2Certificate(firstNotes[1].notePubkey, 21000),
+  part2Certificate(firstNotes[2].notePubkey, 99999),
+  part2Certificate(firstNotes[3].notePubkey, 100000000)
+]
+const addressProof = (action, username) => {
+  const message = `LNURLcash:${action}:${username}`
+  const digest = lightningSignedDigest(message)
+  return {
+    action,
+    username,
+    message,
+    digest: bytesToHex(digest),
+    indexZeroSecretKey: firstNotes[0].noteSecretKey,
+    indexZeroPubkey: firstNotes[0].notePubkey,
+    signature: bytesToHex(signRecoverable(hexToBytes(firstNotes[0].noteSecretKey), digest))
+  }
+}
 
 const part2 = {
   version: VERSION,
   spec: SPEC,
   description:
-    'LUD-25 Part 2: notes keyed by a public key and spent by a recoverable signature. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/1\'/0, msg = utf8(host)), and addressNode is m/139\'/1\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is RFC6979 ECDSA, low-S, over sha256(sha256("Lightning Signed Message:" || "LNURLcash")), laid out r || s || recovery id, and ck1 is its bech32m("ck") encoding: the value that spends the note. A certificate is the same signature shape by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")), encoded bech32m("cs"). All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350). Values match vectors generated from lnurl-wallet src/lib and confirmed against lnurl-mint.',
+    'LUD-25 Part 2: notes keyed by a public key and spent by a recoverable signature. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/1\'/0, msg = utf8(host)), and addressNode is m/139\'/1\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is RFC6979 ECDSA, low-S, over sha256(sha256("Lightning Signed Message:" || "LNURLcash")), laid out r || s || recovery id, and ck1 is its bech32m("ck") encoding: the value that spends the note. Register/update/unregister proofs use that same signature shape from index zero over "LNURLcash:<action>:<username>", separating both action and name. A certificate is the same signature shape by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350). Values match vectors generated from lnurl-wallet src/lib and confirmed against lnurl-mint.',
   conventions: {
     addressBranch: "m/139'/1'/d1/d2/d3/d4",
     hashingKey: "m/139'/1'/0",
@@ -630,19 +669,17 @@ const part2 = {
     ownershipMessage: 'LNURLcash',
     ownershipDigest: bytesToHex(OWNERSHIP_DIGEST),
     signatureLayout: 'r || s || recovery id (0..3), RFC6979, low-S',
-    certificateMessage: 'LNURLcash:<amount_msat>:<hex(pk)>'
+    addressProofMessage: 'LNURLcash:<register|unregister>:<username>',
+    certificateMessage: 'LNURLcash:<amount_msat>:<hex(pk)>',
+    certificateHrp: 'cs || BOLT11_amount_suffix(amount_msat)'
   },
   mint: {
     privateKey: bytesToHex(PART2_MINT_KEY),
     mintPubkey: bytesToHex(secp256k1.getPublicKey(PART2_MINT_KEY, true))
   },
   branches: part2Branches,
-  certificates: [
-    part2Certificate(firstNotes[0].notePubkey, 1000),
-    part2Certificate(firstNotes[1].notePubkey, 21000),
-    part2Certificate(firstNotes[2].notePubkey, 99999),
-    part2Certificate(firstNotes[3].notePubkey, 100000000)
-  ],
+  certificates: part2Certificates,
+  addressProofs: [addressProof('register', 'alice'), addressProof('unregister', 'alice'), addressProof('register', 'bob')],
   valid: [
     {type: 'cp1', value: sampleCp1.toUpperCase(), bytes: bytesToHex(samplePubkey), why: 'all uppercase is the same string (BIP-350)'}
   ],
@@ -655,6 +692,7 @@ const part2 = {
     {type: 'ck1', value: sampleCp1, why: 'a cp1 is not a ck1'},
     {type: 'ck1', value: bech32mOf('ck', hexToBytes(firstNotes[0].ownershipSignature).slice(0, 64)), why: '64 bytes, not 65'},
     {type: 'cs1', value: firstNotes[0].ck1, why: 'a ck1 is not a cs1'},
+    {type: 'cs1', value: bech32mOf('cs', hexToBytes(part2Certificates[0].signature)), why: 'legacy fixed cs HRP carries no amount'},
     {type: 'cx1', value: bech32mOf('cx', samplePubkey), why: '32 bytes, not 64'}
   ]
 }
@@ -833,7 +871,7 @@ const noteUrl = {
   version: VERSION,
   spec: SPEC,
   description:
-    'A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. A SERVICE returning a rotate, split or merge to a cp1 output MUST include its certificate in `sig` (and `sig2` for the second split output); a plain hash output carries none, and a legacy Part 1 signature on one is harmless where it verifies.',
+    'A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. An amount-bearing cs1 carries that same declared amount itself, so the current reference wallet omits the duplicate `amount` query parameter and reads it from `sig`. A SERVICE returning a rotate, split or merge to a cp1 output MUST include that certificate in `sig` (and `sig2` for the second split output). A legacy hash output may instead carry the reference mint\'s raw Part 1 signature when a signer is available; it never carries cs1.',
   parse: [
     {
       url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000',
@@ -853,6 +891,13 @@ const noteUrl = {
       k1: K1_A,
       declaredAmountMsat: 21000,
       signature: 'ab'.repeat(65)
+    },
+    {
+      url: 'https://mint.example/w?k1=' + K1_A + '&sig=' + part2Certificates[1].cs1,
+      k1: K1_A,
+      declaredAmountMsat: 21000,
+      signature: part2Certificates[1].cs1,
+      why: 'an amount-bearing cs1 carries the declared amount without a duplicate amount query parameter'
     },
     {
       url: 'https://mint.example/w',
@@ -910,6 +955,14 @@ const noteUrl = {
       amountMsat: 5000,
       signature: 'cd'.repeat(65),
       expect: 'https://mint.example/w?k1=' + K1_B + '&amount=5000&sig=' + 'cd'.repeat(65)
+    },
+    {
+      url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000',
+      k1: K1_B,
+      amountMsat: 21000,
+      signature: part2Certificates[1].cs1,
+      expect: 'https://mint.example/w?k1=' + K1_B + '&sig=' + part2Certificates[1].cs1,
+      why: 'the cs1 already carries amount_msat, so the current reference wallet omits the duplicate amount parameter'
     }
   ],
   withoutK1: [
@@ -919,6 +972,13 @@ const noteUrl = {
       signature: null,
       expect: 'https://mint.example/w?amount=5000',
       why: 'a device-backed note keeps the URL template but never the secret'
+    },
+    {
+      url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000',
+      amountMsat: 21000,
+      signature: part2Certificates[1].cs1,
+      expect: 'https://mint.example/w?sig=' + part2Certificates[1].cs1,
+      why: 'a secret-free mirror also avoids duplicating the amount already encoded in cs1'
     }
   ]
 }
@@ -1279,10 +1339,10 @@ const responses = {
   version: VERSION,
   spec: SPEC,
   description:
-    'Classifying a SERVICE response. The distinction that matters for funds is definitive-rejection versus ambiguous-outcome: a parsed {"status":"ERROR"} means the request was processed and refused, while a transport failure, an unparseable body, or a 200 that does not confirm means the mutation MAY have landed - and for rotate/split/merge the WALLET-generated secrets are then the only copy of the outputs, so they must ride the error rather than be discarded. A confirmed mutation carrying no signature is its own outcome: it definitely landed, so the secrets matter more than ever, and the SERVICE is non-conforming. `op` says which call each case is driven through - a melt is the one mutation with no signature to return.',
+    'Classifying a SERVICE response. The distinction that matters for funds is definitive-rejection versus ambiguous-outcome: a parsed {"status":"ERROR"} means the request was processed and refused, while a transport failure, an unparseable body, or a 200 that does not confirm means the mutation MAY have landed - and for rotate/split/merge the WALLET-generated secrets are then the only copy of the outputs, so they must ride the error rather than be discarded. A confirmed mutation missing a signature the output or caller requires is its own outcome: it definitely landed, so the secrets matter more than ever. `op` says which call each case is driven through - a melt is the one mutation with no signature to return.',
   outcomes: {
     ok: 'the operation is confirmed',
-    unverifiable: 'the mutation is confirmed but a cp1 output came back without its cs1 certificate. LUD-25 Part 2 requires one on every cp1 output of a rotate, split or merge, so this SERVICE is non-conforming - but the note EXISTS at the key the WALLET disclosed, and its private key is the only key to that value. Keep the key; report the mint. A plain hash output is unsigned by design and is never this outcome',
+    unverifiable: 'the mutation is confirmed but a cp1 output came back without its required cs1 certificate, or a legacy hash output came back without the raw signature a strict caller required. The note EXISTS at the output the WALLET disclosed, so keep its secret even while reporting the missing proof',
     pending: 'this k1 has another operation in flight (a melt); retry shortly',
     spent: 'the SERVICE is authoritative that the note is already burned; a holder may lock it as spent',
     unknown: 'the SERVICE does not recognise this note; surface it, do not silently lock it',
@@ -1349,7 +1409,7 @@ const responses = {
       body: {status: 'OK', sig: 'ab'.repeat(65)},
       expect: 'ok',
       signature: 'ab'.repeat(65),
-      why: 'both outputs are plain hash notes, owed nothing; a mint may still issue the old Part 1 signature over one of them, and that is harmless where it verifies'
+      why: 'both outputs are legacy hash notes; tolerant callers can retain a landed output without proof, while a strict caller may require both raw Part 1 signatures'
     },
     {
       name: 'melt success with a LUD-21 style proof',

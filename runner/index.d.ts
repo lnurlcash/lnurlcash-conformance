@@ -57,8 +57,31 @@ export declare const applyMintFee: (gross: number, fee: MintFee | null) => numbe
 /** the `Mint fees: base,ppm` line out of a payRequest's metadata array */
 export declare const parseAdvertisedMintFee: (metadata: string) => MintFee | null
 
+export interface InternalTransferHint {
+  cx1: string
+  index: number
+  pubkeyXOnly: Uint8Array
+  chainCode: Uint8Array
+}
+
+/** the `text/xpub` branch and next-index hint out of registered-address metadata */
+export declare const parseInternalTransferHint: (
+  metadata: string
+) => InternalTransferHint | null
+
 /** the read-only mint checks: payRequest, withdrawLink, fees, verify, extensions */
-export declare const gradeMint: (payUrl: string, report: Report) => Promise<void>
+export declare const gradeMint: (
+  payUrl: string,
+  report: Report,
+  options?: {
+    /** Grade as a LUD-25 Part 2 registered Lightning Address rather than a
+     * mint payLink: it mints on the next unused key of its own branch, so a
+     * comment naming no output is free text and must not fail the payment.
+     * Declared, not detected - an unsafe preimage-keyed fallback looks
+     * identical before settlement. */
+    registeredAddress?: boolean
+  }
+) => Promise<void>
 
 /**
  * Read-only. Needs a freshly minted, never-rotated note and what its mint

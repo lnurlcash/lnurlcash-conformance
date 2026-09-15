@@ -1125,7 +1125,24 @@ const decode2 = (hrp, value, length) => {
     return null
   }
 }
-const LENGTHS = {cp1: ['cp', 32], ck1: ['ck', 65], cs1: ['cs', 65], cx1: ['cx', 64]}
+const LENGTHS = {cp1: ['cp', 32], ck1: ['ck', 65], cx1: ['cx', 64]}
+const AMOUNT_MSAT_PER_UNIT = {'': 100_000_000_000, m: 100_000_000, u: 100_000, n: 100, p: 0.1}
+const decodeAmountSuffix = suffix => {
+  const match = suffix.match(/^(\d+)([munp])?$/)
+  if (!match) return null
+  const amount = Number(match[1]) * AMOUNT_MSAT_PER_UNIT[match[2] ?? '']
+  return Number.isSafeInteger(amount) ? amount : null
+}
+const decodeCertificate = value => {
+  if (typeof value !== 'string') return null
+  const lower = value.toLowerCase()
+  const sep = lower.lastIndexOf('1')
+  if (sep < 3 || !lower.startsWith('cs')) return null
+  const amountMsat = decodeAmountSuffix(lower.slice(2, sep))
+  if (amountMsat === null) return null
+  const signature = decode2(lower.slice(0, sep), value, 65)
+  return signature ? {amountMsat, signature} : null
+}
 const lsmDigest = message =>
   sha256(sha256(cat(utf8ToBytes('Lightning Signed Message:'), utf8ToBytes(message))))
 const recoverX = (signature, digest) => {
@@ -1194,21 +1211,43 @@ check('part2: every certificate is the mint key over its message', () => {
   for (const c of part2.certificates) {
     assert(c.message === `LNURLcash:${c.amountMsat}:${c.notePubkey}`, `${c.amountMsat}: message`)
     assert(bytesToHex(lsmDigest(c.message)) === c.digest, `${c.amountMsat}: digest`)
-    const sig = decode2('cs', c.cs1, 65)
-    assert(sig && bytesToHex(sig) === c.signature, `${c.amountMsat}: cs1`)
-    assert(bytesToHex(recoverX(sig, hexToBytes(c.digest))) === mintX, `${c.amountMsat}: recovers to the mint key`)
+    const decoded = decodeCertificate(c.cs1)
+    assert(decoded && decoded.amountMsat === c.amountMsat, `${c.amountMsat}: cs1 amount`)
+    assert(bytesToHex(decoded.signature) === c.signature, `${c.amountMsat}: cs1 signature`)
+    assert(bytesToHex(recoverX(decoded.signature, hexToBytes(c.digest))) === mintX, `${c.amountMsat}: recovers to the mint key`)
   }
+})
+
+check('part2: every address proof is action- and username-bound to index zero', () => {
+  for (const proof of part2.addressProofs) {
+    assert(['register', 'unregister'].includes(proof.action), `${proof.action}: action`)
+    assert(proof.message === `LNURLcash:${proof.action}:${proof.username}`, `${proof.action}: message`)
+    assert(bytesToHex(lsmDigest(proof.message)) === proof.digest, `${proof.action}: digest`)
+    const signature = hexToBytes(proof.signature)
+    assert(signature.length === 65, `${proof.action}: signature length`)
+    assert(
+      bytesToHex(recoverX(signature, hexToBytes(proof.digest))) === proof.indexZeroPubkey,
+      `${proof.action}: recovers to index zero`
+    )
+  }
+  assert(part2.addressProofs[0].signature !== part2.addressProofs[1].signature, 'action separation')
+  assert(part2.addressProofs[0].signature !== part2.addressProofs[2].signature, 'username separation')
 })
 
 check('part2: the valid strings decode and the invalid ones do not, for the reason given', () => {
   for (const v of part2.valid) {
-    const [hrp, length] = LENGTHS[v.type]
-    const bytes = decode2(hrp, v.value, length)
+    const fixed = LENGTHS[v.type]
+    const bytes = v.type === 'cs1'
+      ? decodeCertificate(v.value)?.signature
+      : decode2(fixed[0], v.value, fixed[1])
     assert(bytes && bytesToHex(bytes) === v.bytes, `valid ${v.type}: ${v.why}`)
   }
   for (const v of part2.invalid) {
-    const [hrp, length] = LENGTHS[v.type]
-    assert(decode2(hrp, v.value, length) === null, `invalid ${v.type} decoded: ${v.why}`)
+    const fixed = LENGTHS[v.type]
+    const bytes = v.type === 'cs1'
+      ? decodeCertificate(v.value)?.signature ?? null
+      : decode2(fixed[0], v.value, fixed[1])
+    assert(bytes === null, `invalid ${v.type} decoded: ${v.why}`)
     assert(typeof v.why === 'string' && v.why.length > 0, `invalid ${v.type}: no reason given`)
   }
 })

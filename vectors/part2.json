@@ -1,7 +1,7 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "LUD-25 Part 2: notes keyed by a public key and spent by a recoverable signature. Every branch is the reference wallet's address path under a BIP39 seed (no passphrase): cashRoot is m/139', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139'/1'/0, msg = utf8(host)), and addressNode is m/139'/1'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m(\"cx\", branchPubkey || chainCode). Each note: t = tagged_hash(\"LNURLcash/derive\", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is RFC6979 ECDSA, low-S, over sha256(sha256(\"Lightning Signed Message:\" || \"LNURLcash\")), laid out r || s || recovery id, and ck1 is its bech32m(\"ck\") encoding: the value that spends the note. A certificate is the same signature shape by the mint key over sha256(sha256(\"Lightning Signed Message:\" || \"LNURLcash:<amount_msat>:<hex(notePubkey)>\")), encoded bech32m(\"cs\"). All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350). Values match vectors generated from lnurl-wallet src/lib and confirmed against lnurl-mint.",
+  "description": "LUD-25 Part 2: notes keyed by a public key and spent by a recoverable signature. Every branch is the reference wallet's address path under a BIP39 seed (no passphrase): cashRoot is m/139', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139'/1'/0, msg = utf8(host)), and addressNode is m/139'/1'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m(\"cx\", branchPubkey || chainCode). Each note: t = tagged_hash(\"LNURLcash/derive\", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is RFC6979 ECDSA, low-S, over sha256(sha256(\"Lightning Signed Message:\" || \"LNURLcash\")), laid out r || s || recovery id, and ck1 is its bech32m(\"ck\") encoding: the value that spends the note. Register/update/unregister proofs use that same signature shape from index zero over \"LNURLcash:<action>:<username>\", separating both action and name. A certificate is the same signature shape by the mint key over sha256(sha256(\"Lightning Signed Message:\" || \"LNURLcash:<amount_msat>:<hex(notePubkey)>\")); its bech32m HRP is \"cs\" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350). Values match vectors generated from lnurl-wallet src/lib and confirmed against lnurl-mint.",
   "conventions": {
     "addressBranch": "m/139'/1'/d1/d2/d3/d4",
     "hashingKey": "m/139'/1'/0",
@@ -11,7 +11,9 @@
     "ownershipMessage": "LNURLcash",
     "ownershipDigest": "c92e46d0c00a23e46b68442e4c0e22d8983bc74158da73d6c33b6f0fdc970e6e",
     "signatureLayout": "r || s || recovery id (0..3), RFC6979, low-S",
-    "certificateMessage": "LNURLcash:<amount_msat>:<hex(pk)>"
+    "addressProofMessage": "LNURLcash:<register|unregister>:<username>",
+    "certificateMessage": "LNURLcash:<amount_msat>:<hex(pk)>",
+    "certificateHrp": "cs || BOLT11_amount_suffix(amount_msat)"
   },
   "mint": {
     "privateKey": "da6ec5c4342514114ee493a55ddc06d085d61eb78f0b7163e07cdb7f1f66ac05",
@@ -626,7 +628,7 @@
       "message": "LNURLcash:1000:b52e0b9dcd39edd137cf4b6794d0d2a55f13c9aa968078394d49159651b5a02f",
       "digest": "3234532c63de08043753a7b7404f4c243a540f378d4865dd16a2f5c71bec1e31",
       "signature": "b2c850964a82eee8d33ed8ca321fe500c15f9fa42e7e57416542e27596aacfb67c3e8206fff2acf0260c7d27d2b63f0fa9e36a1bfc2b19924d5e9db6c1187b5300",
-      "cs1": "cs1kty9p9j2sthw35e7mr9ry8l9qrq4l8ay9el9wst9gt38t942e7m8c05zqmll9t8sycx86f7jkclsl20rdgdlc2cejfx4a8dkcyv8k5cqte7psz"
+      "cs1": "cs10n1kty9p9j2sthw35e7mr9ry8l9qrq4l8ay9el9wst9gt38t942e7m8c05zqmll9t8sycx86f7jkclsl20rdgdlc2cejfx4a8dkcyv8k5cqaqz8vc"
     },
     {
       "notePubkey": "068a32f78dd15c688a9972f6507e1b9d9ca6f97317095997c3bf1dde53a78db9",
@@ -634,7 +636,7 @@
       "message": "LNURLcash:21000:068a32f78dd15c688a9972f6507e1b9d9ca6f97317095997c3bf1dde53a78db9",
       "digest": "4fe334bdb45cecd25336877cba4319a00444bca5ae97bbb2f29874e0c0baaee1",
       "signature": "09605e77950bce2f2739288d4d0b4871e9aa8e7009e198a55c706c1ef886167023d54dceb4ecf72f33ee066a87b7a97a11a1003056ef5454cd04555b510ea66c01",
-      "cs1": "cs1p9s9uau4p08z7fee9zx56z6gw8564rnsp8se3f2uwpkpa7yxzecz842de66weae0x0hqv658k75h5ydpqqc9dm652nxsg42m2y82vmqp3yj3cv"
+      "cs1": "cs210n1p9s9uau4p08z7fee9zx56z6gw8564rnsp8se3f2uwpkpa7yxzecz842de66weae0x0hqv658k75h5ydpqqc9dm652nxsg42m2y82vmqp9qy0pt"
     },
     {
       "notePubkey": "831613eb24856343694e81cb8e1b0b1b5582f76f0bd3db5443cfcb6d96eb8fb7",
@@ -642,7 +644,7 @@
       "message": "LNURLcash:99999:831613eb24856343694e81cb8e1b0b1b5582f76f0bd3db5443cfcb6d96eb8fb7",
       "digest": "95f155dc7805a62e459359668cd4bdb3c95d38fd21276067f9fc33307f28059e",
       "signature": "a9160631f5f10517161335160b004d7828191731c536431ca07f2109e1e9fb7d157a0d8863b343653aaa16574dac9813db100341fb61c08950a01137a5c9ac9a01",
-      "cs1": "cs14ytqvv047yz3w9snx5tqkqzd0q5pj9e3c5myx89q0ussnc0fld7327sd3p3mxsm9824pv46d4jvp8kcsqdqlkcwq39g2qyfh5hy6exspa2guz2"
+      "cs1": "cs999990p14ytqvv047yz3w9snx5tqkqzd0q5pj9e3c5myx89q0ussnc0fld7327sd3p3mxsm9824pv46d4jvp8kcsqdqlkcwq39g2qyfh5hy6exsp5x36tn"
     },
     {
       "notePubkey": "2d0a844a516b08def2cfb284142542c8775dcffd88768180986bc03a1d489bf4",
@@ -650,7 +652,36 @@
       "message": "LNURLcash:100000000:2d0a844a516b08def2cfb284142542c8775dcffd88768180986bc03a1d489bf4",
       "digest": "100eb3e508b8a2d32733d7ac3846ea477a5f9120c93071eb4521057a916dce0e",
       "signature": "8b2daf986ad84609246c87227c6f92bc2b24b660f72487a7afc5e21f0594aaaf0ab85c79e7a934499e0f9b4e5ae74123946f915c5ba928537e35829d18655cf900",
-      "cs1": "cs13vk6lxr2mprqjfrvsu38cmujhs4jfdnq7ujg0fa0ch3p7pv542hs4wzu08n6jdzfnc8eknj6uaqj89r0j9w9h2fg2dlrtq5arpj4e7gqmdth9n"
+      "cs1": "cs1m13vk6lxr2mprqjfrvsu38cmujhs4jfdnq7ujg0fa0ch3p7pv542hs4wzu08n6jdzfnc8eknj6uaqj89r0j9w9h2fg2dlrtq5arpj4e7gqrmgxlj"
+    }
+  ],
+  "addressProofs": [
+    {
+      "action": "register",
+      "username": "alice",
+      "message": "LNURLcash:register:alice",
+      "digest": "0344528a8e7629117ae8d369e279614848df2551132ca060d646806529d94977",
+      "indexZeroSecretKey": "c809325604f901c494bebab0f02d74d43cb3d58c143b753c2b749d1733288f64",
+      "indexZeroPubkey": "b52e0b9dcd39edd137cf4b6794d0d2a55f13c9aa968078394d49159651b5a02f",
+      "signature": "18037cd57993de939a5edec704319dd6221650878c5682b98108d7869ae447366210853b212dbf2b48202a22b3371c6e5635444d726edef2c7db472fdd8df3b200"
+    },
+    {
+      "action": "unregister",
+      "username": "alice",
+      "message": "LNURLcash:unregister:alice",
+      "digest": "6a6679a4bf19a30ef180677f873140cad9d3929ec3ee7937f9da00a72251ca73",
+      "indexZeroSecretKey": "c809325604f901c494bebab0f02d74d43cb3d58c143b753c2b749d1733288f64",
+      "indexZeroPubkey": "b52e0b9dcd39edd137cf4b6794d0d2a55f13c9aa968078394d49159651b5a02f",
+      "signature": "351af0eaad099b834cc7019207de9fe87e2b384653c87d406d8dc5e1c88fa95d3b48149403cf5d223136c29756861cb397778aac93a2265e8b28ef0cd934ac5301"
+    },
+    {
+      "action": "register",
+      "username": "bob",
+      "message": "LNURLcash:register:bob",
+      "digest": "3994b99587e99411398be24188193db7a7e8e682b45574448019890c36c4b2c5",
+      "indexZeroSecretKey": "c809325604f901c494bebab0f02d74d43cb3d58c143b753c2b749d1733288f64",
+      "indexZeroPubkey": "b52e0b9dcd39edd137cf4b6794d0d2a55f13c9aa968078394d49159651b5a02f",
+      "signature": "4864ac3e78ecdffded8e764527489e684e4caef30edb0c5cb11106e70022711f4d495f4fa35bcb6dfe3e92e93301ae7f307bf1e94a40514bc4249c20e0ec0d2a00"
     }
   ],
   "valid": [
@@ -701,6 +732,11 @@
       "type": "cs1",
       "value": "ck18pf5gt7jfqyrxkyy5ssk7y4t9lauyknjpzjnaf2wppq4y3a68vnn92xvfama804vp27hjyn6h6dy5qz6j5vwy4st8uhe3tqv6thyhfgq0xh4cd",
       "why": "a ck1 is not a cs1"
+    },
+    {
+      "type": "cs1",
+      "value": "cs1kty9p9j2sthw35e7mr9ry8l9qrq4l8ay9el9wst9gt38t942e7m8c05zqmll9t8sycx86f7jkclsl20rdgdlc2cejfx4a8dkcyv8k5cqte7psz",
+      "why": "legacy fixed cs HRP carries no amount"
     },
     {
       "type": "cx1",
