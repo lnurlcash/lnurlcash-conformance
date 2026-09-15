@@ -15,7 +15,7 @@ import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {bech32, bech32m, base64urlnopad} from '@scure/base'
 import {sha256, sha512} from '@noble/hashes/sha2.js'
-import {secp256k1} from '@noble/curves/secp256k1.js'
+import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {hmac} from '@noble/hashes/hmac.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {mnemonicToSeedSync} from '@scure/bip39'
@@ -481,12 +481,12 @@ const cashDerivation = {
   ]
 }
 
-// ---- vectors: Part 2, recoverable signatures -----------------------------
+// ---- vectors: Part 2, ownership proofs and certificates ------------------
 //
 // LUD-25 Part 2 keys a note by a public key. The holder keeps sk, discloses
-// `cp1<pk>`, and spends the note with `ck1`, a recoverable signature by sk
-// over the fixed message "LNURLcash"; the mint recovers pk from it. The mint
-// certifies each note with `cs1`, the same 65-byte shape over
+// `cp1<pk>`, and spends the note with `ck1`, the x-only pk followed by a
+// BIP-340 Schnorr signature over the fixed message "LNURLcash". The mint
+// certifies each note with `cs1`, a 65-byte recoverable ECDSA signature over
 // "LNURLcash:<amount_msat>:<hex(pk)>". A watch-only `cx1` (the branch's
 // x-only key and chain code) lets a mint derive every pk on a branch and so
 // mint straight to a holder's next key.
@@ -523,7 +523,12 @@ const signRecoverable = (secretKey, digest) => {
   return concat(sig.subarray(1), sig.subarray(0, 1))
 }
 
-const OWNERSHIP_DIGEST = lightningSignedDigest('LNURLcash')
+const OWNERSHIP_MESSAGE = utf8ToBytes('LNURLcash')
+// BIP-340 permits auxiliary randomness. Fixed zeroes keep published vectors
+// reproducible; implementations may use fresh randomness and still verify.
+const SCHNORR_AUX = new Uint8Array(32)
+const signSchnorr = (secretKey, message) =>
+  schnorr.sign(utf8ToBytes(message), secretKey, SCHNORR_AUX)
 
 // BOLT-11's amount suffix, reused verbatim by cs1's human-readable part.
 // Pick the coarsest unit that can express the integer msat amount exactly.
@@ -600,14 +605,14 @@ const part2Branch = (mnemonic, host) => {
     cx1: bech32mOf('cx', concat(branchPubkey, node.chainCode)),
     notes: PART2_INDICES.map(index => {
       const {secretKey, pubkey} = noteKeysAt(node, index)
-      const ownershipSignature = signRecoverable(secretKey, OWNERSHIP_DIGEST)
+      const ownershipSignature = schnorr.sign(OWNERSHIP_MESSAGE, secretKey, SCHNORR_AUX)
       return {
         index,
         notePubkey: bytesToHex(pubkey),
         cp1: bech32mOf('cp', pubkey),
         noteSecretKey: bytesToHex(secretKey),
         ownershipSignature: bytesToHex(ownershipSignature),
-        ck1: bech32mOf('ck', ownershipSignature)
+        ck1: bech32mOf('ck', concat(pubkey, ownershipSignature))
       }
     })
   }
@@ -643,15 +648,13 @@ const part2Certificates = [
 ]
 const addressProof = (action, username) => {
   const message = `LNURLcash:${action}:${username}`
-  const digest = lightningSignedDigest(message)
   return {
     action,
     username,
     message,
-    digest: bytesToHex(digest),
     indexZeroSecretKey: firstNotes[0].noteSecretKey,
     indexZeroPubkey: firstNotes[0].notePubkey,
-    signature: bytesToHex(signRecoverable(hexToBytes(firstNotes[0].noteSecretKey), digest))
+    signature: bytesToHex(signSchnorr(hexToBytes(firstNotes[0].noteSecretKey), message))
   }
 }
 
@@ -659,7 +662,7 @@ const part2 = {
   version: VERSION,
   spec: SPEC,
   description:
-    'LUD-25 Part 2: notes keyed by a public key and spent by a recoverable signature. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/1\'/0, msg = utf8(host)), and addressNode is m/139\'/1\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is RFC6979 ECDSA, low-S, over sha256(sha256("Lightning Signed Message:" || "LNURLcash")), laid out r || s || recovery id, and ck1 is its bech32m("ck") encoding: the value that spends the note. Register/update/unregister proofs use that same signature shape from index zero over "LNURLcash:<action>:<username>", separating both action and name. A certificate is the same signature shape by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350). Values match vectors generated from lnurl-wallet src/lib and confirmed against lnurl-mint.',
+    'LUD-25 Part 2: notes keyed by a public key and spent by a BIP-340 Schnorr proof. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/1\'/0, msg = utf8(host)), and addressNode is m/139\'/1\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is a 64-byte BIP-340 Schnorr signature over the UTF-8 bytes of "LNURLcash" with no application prehash, and ck1 is bech32m("ck", notePubkey || ownershipSignature): the value that spends the note. Register/update/unregister proofs are Schnorr signatures from index zero over the UTF-8 bytes of "LNURLcash:<action>:<username>", separating both action and name. A certificate remains a recoverable ECDSA signature by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).',
   conventions: {
     addressBranch: "m/139'/1'/d1/d2/d3/d4",
     hashingKey: "m/139'/1'/0",
@@ -667,8 +670,9 @@ const part2 = {
     noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t >= n is unusable, use the next index',
     indexWidth: '4 bytes, big-endian, any uint32, never hardened',
     ownershipMessage: 'LNURLcash',
-    ownershipDigest: bytesToHex(OWNERSHIP_DIGEST),
-    signatureLayout: 'r || s || recovery id (0..3), RFC6979, low-S',
+    ownershipMessageEncoding: 'UTF-8 bytes, no application prehash',
+    ownershipSignature: 'BIP-340 Schnorr, 64 bytes; vectors use 32 zero auxiliary bytes',
+    ck1Payload: '32-byte x-only public key || 64-byte Schnorr signature',
     addressProofMessage: 'LNURLcash:<register|unregister>:<username>',
     certificateMessage: 'LNURLcash:<amount_msat>:<hex(pk)>',
     certificateHrp: 'cs || BOLT11_amount_suffix(amount_msat)'
@@ -690,7 +694,7 @@ const part2 = {
     {type: 'cp1', value: sampleCp1.slice(0, -1) + (sampleCp1.endsWith('q') ? 'p' : 'q'), why: 'the checksum does not verify'},
     {type: 'cp1', value: mixedCase(sampleCp1), why: 'mixed case (BIP-350)'},
     {type: 'ck1', value: sampleCp1, why: 'a cp1 is not a ck1'},
-    {type: 'ck1', value: bech32mOf('ck', hexToBytes(firstNotes[0].ownershipSignature).slice(0, 64)), why: '64 bytes, not 65'},
+    {type: 'ck1', value: bech32mOf('ck', hexToBytes(firstNotes[0].ownershipSignature)), why: '64-byte signature without the 32-byte public key'},
     {type: 'cs1', value: firstNotes[0].ck1, why: 'a ck1 is not a cs1'},
     {type: 'cs1', value: bech32mOf('cs', hexToBytes(part2Certificates[0].signature)), why: 'legacy fixed cs HRP carries no amount'},
     {type: 'cx1', value: bech32mOf('cx', samplePubkey), why: '32 bytes, not 64'}
@@ -728,7 +732,7 @@ const nostrSeedCase = (identityHex, host) => {
         noteSecretKey: bytesToHex(secretKey),
         notePubkey: bytesToHex(pubkey),
         cp1: bech32mOf('cp', pubkey),
-        ck1: bech32mOf('ck', signRecoverable(secretKey, OWNERSHIP_DIGEST))
+        ck1: bech32mOf('ck', concat(pubkey, schnorr.sign(OWNERSHIP_MESSAGE, secretKey, SCHNORR_AUX)))
       }
     })
   }
