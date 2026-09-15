@@ -1,7 +1,7 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. A SERVICE returning a rotate, split or merge to a cp1 output MUST include its certificate in `sig` (and `sig2` for the second split output); a plain hash output carries none, and a legacy Part 1 signature on one is harmless where it verifies.",
+  "description": "A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. An amount-bearing cs1 carries that same declared amount itself, so the current reference wallet omits the duplicate `amount` query parameter and reads it from `sig`. A SERVICE returning a rotate, split or merge to a cp1 output MUST include that certificate in `sig` (and `sig2` for the second split output). A legacy hash output may instead carry the reference mint's raw Part 1 signature when a signer is available; it never carries cs1.",
   "parse": [
     {
       "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000",
@@ -21,6 +21,13 @@
       "k1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "declaredAmountMsat": 21000,
       "signature": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+    },
+    {
+      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&sig=cs210n1p9s9uau4p08z7fee9zx56z6gw8564rnsp8se3f2uwpkpa7yxzecz842de66weae0x0hqv658k75h5ydpqqc9dm652nxsg42m2y82vmqp9qy0pt",
+      "k1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "declaredAmountMsat": 21000,
+      "signature": "cs210n1p9s9uau4p08z7fee9zx56z6gw8564rnsp8se3f2uwpkpa7yxzecz842de66weae0x0hqv658k75h5ydpqqc9dm652nxsg42m2y82vmqp9qy0pt",
+      "why": "an amount-bearing cs1 carries the declared amount without a duplicate amount query parameter"
     },
     {
       "url": "https://mint.example/w",
@@ -78,6 +85,14 @@
       "amountMsat": 5000,
       "signature": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
       "expect": "https://mint.example/w?k1=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&amount=5000&sig=cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    },
+    {
+      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000",
+      "k1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "amountMsat": 21000,
+      "signature": "cs210n1p9s9uau4p08z7fee9zx56z6gw8564rnsp8se3f2uwpkpa7yxzecz842de66weae0x0hqv658k75h5ydpqqc9dm652nxsg42m2y82vmqp9qy0pt",
+      "expect": "https://mint.example/w?k1=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&sig=cs210n1p9s9uau4p08z7fee9zx56z6gw8564rnsp8se3f2uwpkpa7yxzecz842de66weae0x0hqv658k75h5ydpqqc9dm652nxsg42m2y82vmqp9qy0pt",
+      "why": "the cs1 already carries amount_msat, so the current reference wallet omits the duplicate amount parameter"
     }
   ],
   "withoutK1": [
@@ -87,6 +102,13 @@
       "signature": null,
       "expect": "https://mint.example/w?amount=5000",
       "why": "a device-backed note keeps the URL template but never the secret"
+    },
+    {
+      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000",
+      "amountMsat": 21000,
+      "signature": "cs210n1p9s9uau4p08z7fee9zx56z6gw8564rnsp8se3f2uwpkpa7yxzecz842de66weae0x0hqv658k75h5ydpqqc9dm652nxsg42m2y82vmqp9qy0pt",
+      "expect": "https://mint.example/w?sig=cs210n1p9s9uau4p08z7fee9zx56z6gw8564rnsp8se3f2uwpkpa7yxzecz842de66weae0x0hqv658k75h5ydpqqc9dm652nxsg42m2y82vmqp9qy0pt",
+      "why": "a secret-free mirror also avoids duplicating the amount already encoded in cs1"
     }
   ]
 }

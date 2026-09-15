@@ -1,10 +1,10 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "Classifying a SERVICE response. The distinction that matters for funds is definitive-rejection versus ambiguous-outcome: a parsed {\"status\":\"ERROR\"} means the request was processed and refused, while a transport failure, an unparseable body, or a 200 that does not confirm means the mutation MAY have landed - and for rotate/split/merge the WALLET-generated secrets are then the only copy of the outputs, so they must ride the error rather than be discarded. A confirmed mutation carrying no signature is its own outcome: it definitely landed, so the secrets matter more than ever, and the SERVICE is non-conforming. `op` says which call each case is driven through - a melt is the one mutation with no signature to return.",
+  "description": "Classifying a SERVICE response. The distinction that matters for funds is definitive-rejection versus ambiguous-outcome: a parsed {\"status\":\"ERROR\"} means the request was processed and refused, while a transport failure, an unparseable body, or a 200 that does not confirm means the mutation MAY have landed - and for rotate/split/merge the WALLET-generated secrets are then the only copy of the outputs, so they must ride the error rather than be discarded. A confirmed mutation missing a signature the output or caller requires is its own outcome: it definitely landed, so the secrets matter more than ever. `op` says which call each case is driven through - a melt is the one mutation with no signature to return.",
   "outcomes": {
     "ok": "the operation is confirmed",
-    "unverifiable": "the mutation is confirmed but a cp1 output came back without its cs1 certificate. LUD-25 Part 2 requires one on every cp1 output of a rotate, split or merge, so this SERVICE is non-conforming - but the note EXISTS at the key the WALLET disclosed, and its private key is the only key to that value. Keep the key; report the mint. A plain hash output is unsigned by design and is never this outcome",
+    "unverifiable": "the mutation is confirmed but a cp1 output came back without its required cs1 certificate, or a legacy hash output came back without the raw signature a strict caller required. The note EXISTS at the output the WALLET disclosed, so keep its secret even while reporting the missing proof",
     "pending": "this k1 has another operation in flight (a melt); retry shortly",
     "spent": "the SERVICE is authoritative that the note is already burned; a holder may lock it as spent",
     "unknown": "the SERVICE does not recognise this note; surface it, do not silently lock it",
@@ -91,7 +91,7 @@
       },
       "expect": "ok",
       "signature": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
-      "why": "both outputs are plain hash notes, owed nothing; a mint may still issue the old Part 1 signature over one of them, and that is harmless where it verifies"
+      "why": "both outputs are legacy hash notes; tolerant callers can retain a landed output without proof, while a strict caller may require both raw Part 1 signatures"
     },
     {
       "name": "melt success with a LUD-21 style proof",

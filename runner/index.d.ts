@@ -57,6 +57,18 @@ export declare const applyMintFee: (gross: number, fee: MintFee | null) => numbe
 /** the `Mint fees: base,ppm` line out of a payRequest's metadata array */
 export declare const parseAdvertisedMintFee: (metadata: string) => MintFee | null
 
+export interface InternalTransferHint {
+  cx1: string
+  index: number
+  pubkeyXOnly: Uint8Array
+  chainCode: Uint8Array
+}
+
+/** the `text/xpub` branch and next-index hint out of registered-address metadata */
+export declare const parseInternalTransferHint: (
+  metadata: string
+) => InternalTransferHint | null
+
 /** the read-only mint checks: payRequest, withdrawLink, fees, verify, extensions */
 export declare const gradeMint: (
   payUrl: string,

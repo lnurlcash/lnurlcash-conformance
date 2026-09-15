@@ -216,7 +216,7 @@ console.log('ok   pre-settlement verify leak caught')
 
 const MINT_INFO_CHECK = 'publishes a mint address (experimental, optional)'
 const LIABILITIES_CHECK = 'publishes liabilities (optional)'
-const SIGNATURE_CHECK = 'a plain note carries no signature, or one that verifies'
+const SIGNATURE_CHECK = 'a legacy hash mutation signature verifies when present'
 const PART2_CHECK = 'certifies a cp1 note it issues (Part 2)'
 
 // a real npub, decoded rather than pattern-matched by the grader
@@ -312,14 +312,15 @@ if (statusOf(unpublished, SIGNATURE_CHECK) !== 'fail') {
 }
 console.log('ok   a signature under an unpublished key still caught')
 
-// Since the Part 2 rewrite a plain note is unsigned by design: the mint's
-// signature belongs on cp1 notes, and the mock does not issue those.
+// A no-signer reference mint may omit the legacy raw signature, but the
+// committed reference wallet will refuse that successful mutation. Grade the
+// service as degraded rather than pretending the two references interoperate.
 const unsigned = await grade({signatures: false})
-if (statusOf(unsigned, SIGNATURE_CHECK) !== 'pass' || !/unsigned/.test(detailOf(unsigned, SIGNATURE_CHECK))) {
-  die(`a mint issuing unsigned plain notes was graded down: ${detailOf(unsigned, SIGNATURE_CHECK)}`)
+if (statusOf(unsigned, SIGNATURE_CHECK) !== 'warn' || !/no-signer|strict reference-wallet/.test(detailOf(unsigned, SIGNATURE_CHECK))) {
+  die(`a no-signer mint was not reported as degraded: ${detailOf(unsigned, SIGNATURE_CHECK)}`)
 }
 if (unsigned.failed > 0) die('a mint issuing unsigned plain notes FAILED the grade')
-console.log('ok   an unsigned plain note is not graded down')
+console.log('ok   a no-signer legacy mutation warns but does not fail')
 if (statusOf(good, PART2_CHECK) !== 'warn' || !/Part 2 not offered/.test(detailOf(good, PART2_CHECK))) {
   die(`a Part 1 mint refusing a cp1 output did not warn: ${statusOf(good, PART2_CHECK)} ${detailOf(good, PART2_CHECK)}`)
 }
@@ -701,7 +702,7 @@ console.log('ok   the two spellings of one output hash name one note')
 // must be caught, because a wallet asking by hash is trusting the answer.
 const HASH_CHECK = 'answers a note lookup by hash without the secret (optional)'
 
-const silentOnHash = await grade({})
+const silentOnHash = await grade({hashLookup: false})
 if (statusOf(silentOnHash, HASH_CHECK) === 'fail') {
   die('a mint not offering the hash lookup FAILED - the check is not optional')
 }

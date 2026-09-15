@@ -48,7 +48,7 @@ for (const c of cases) {
 | `signature.json` | offline verification, both recovery-id orderings, malformed input |
 | `derivation.json` | deterministic note secrets from a BIP39 seed |
 | `cash-derivation.json` | LUD-25's seed-recoverable note secrets under `m/139'`, with BIP-32's own vector 1 |
-| `part2.json` | Part 2: `cp1`/`ck1`/`cs1`/`cx1`, the per-note key tweak, ownership signatures and mint certificates, on the reference wallet's `m/139'/1'` address path |
+| `part2.json` | Part 2: `cp1`/`ck1`/amount-bearing `cs1`/`cx1`, the per-note key tweak, note ownership and mint certificates, on the reference wallet's `m/139'/1'` address path |
 | `bech32.json` | LUD-01 encoding, round trips, corrupted checksums |
 | `url-admission.json` | which URLs may be fetched, and why `data:` must never be |
 | `input-resolution.json` | bech32, LUD-17, Lightning Addresses, bare domains |
@@ -95,7 +95,7 @@ must survive:
 | `--echoWrongK1` | answers the informational GET with a different `k1` |
 | `--lieAboutValue=N` | reports a `maxWithdrawable` it never signed |
 | `--signatureLayout=leading` | emits the recovery id at the other end |
-| `--signatures=false` | issues no Part 1 signatures. Allowed since the Part 2 rewrite: a plain note is unsigned by design, so the grader passes it |
+| `--signatures=false` | issues no Part 1 signatures. Accepted as the reference mint's degraded no-signer mode; the reference wallet will refuse an unsigned successful mutation |
 | `--serverGeneratedSecrets` | hands back a secret it generated — the exposure `h` exists to close |
 | `--meltNeverSettles` | holds every melt in flight, so notes stay `pending` |
 | `--meltAlwaysFails` | fails every payment, restoring the note |
@@ -136,7 +136,7 @@ conforming default explicit. Optional fields stay absent unless requested:
 | `--previousPrivateKey=<hex>` | an old signing key the mock still holds. Its public half joins `previousPubkeys` on its own |
 | `--signWithPreviousKey` | issues every note under that old key while still advertising the new one: the mid-rotation state a mint passes through when the advertisement moves before the signer |
 | `--retriedMutation=replay` | answers a byte-identical repeat of a mutation with the original success. This is the conforming default; use `refuse` only as an adversarial fixture |
-| `--hashLookup=true` | accepts an informational lookup by `h=sha256(k1)` without returning the bearer secret. Off by default because the capability is optional |
+| `--hashLookup=false` | models an older SERVICE with no secret-free informational lookup. The current reference mock accepts `h=sha256(k1)` by default |
 | `--mintToHash` | accepts `h` alongside the mandatory identical comment and enables the additive quote/receipt fields. Off by default; baseline comment-bound minting remains on |
 | `--mintReceipt` | with `--mintToHash`, adds the optional quote commitment and signed LUD-21 settlement receipt |
 | `--mintToHashAdvertisedOn=quote` | narrows which of the three places claim it (`payRequest`, `mintAddress`, `quote`); all three by default. Changes only what is claimed, never what the mint does |

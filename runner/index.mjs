@@ -37,8 +37,8 @@ const recoversTo = (digest, sig, pubkeyHex) => {
   return false
 }
 
-// A Part 1 signature, over the note's hash. The spec no longer asks for
-// one, but a mint that still issues them must at least issue true ones.
+// The legacy raw Part 1 signature over a note's hash. Current reference mints
+// issue one when a signer is available, and every one received must be true.
 const verifySignature = (k1, amountMsat, signatureHex, pubkeyHex) => {
   let sig
   try {
@@ -54,7 +54,8 @@ const verifyCertificate = (pubkeyHex32, amountMsat, sig, mintPubkeyHex) =>
   recoversTo(signedMessageDigest(`LNURLcash:${amountMsat}:${pubkeyHex32}`), sig, mintPubkeyHex)
 
 // Part 2's bech32m strings: cp1 (32-byte key), ck1 and cs1 (65-byte
-// signature). Longer than BIP-173's 90 characters by design.
+// signature). cs1 has a variable HRP: "cs" plus the amount under BOLT-11's
+// amount rules. Longer than BIP-173's 90 characters by design.
 const BECH32M_LIMIT = 200
 const encodeCash = (hrp, bytes) => bech32m.encode(hrp, bech32m.toWords(bytes), BECH32M_LIMIT)
 const decodeCash = (hrp, value, length) => {
@@ -67,6 +68,25 @@ const decodeCash = (hrp, value, length) => {
   } catch {
     return null
   }
+}
+
+const AMOUNT_MSAT_PER_UNIT = {'': 1e11, m: 1e8, u: 1e5, n: 100, p: 0.1}
+const amountSuffixMsat = suffix => {
+  const match = suffix.match(/^(\d+)([munp])?$/)
+  if (!match) return null
+  const amount = Number(match[1]) * AMOUNT_MSAT_PER_UNIT[match[2] ?? '']
+  return Number.isSafeInteger(amount) ? amount : null
+}
+
+const decodeCertificate = value => {
+  if (typeof value !== 'string') return null
+  const lower = value.trim().toLowerCase()
+  const sep = lower.lastIndexOf('1')
+  if (sep < 3 || !lower.startsWith('cs')) return null
+  const amountMsat = amountSuffixMsat(lower.slice(2, sep))
+  if (amountMsat === null) return null
+  const signature = decodeCash(lower.slice(0, sep), lower, 65)
+  return signature ? {amountMsat, signature} : null
 }
 
 // The bearer secret of a cp1 note: the key's signature over the fixed
@@ -235,6 +255,31 @@ export const parseAdvertisedMintFee = metadata => {
   return null
 }
 
+// A registered Part 2 address advertises the safe-to-share branch and its
+// best-known next index as ["text/xpub", "cx1...:<i>"]. Parsing it here
+// makes --address assert the actual discovery signal rather than merely
+// trusting the operator's flag.
+export const parseInternalTransferHint = metadata => {
+  let entries
+  try {
+    entries = JSON.parse(metadata)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(entries)) return null
+  for (const entry of entries) {
+    if (!Array.isArray(entry) || entry[0] !== 'text/xpub' || typeof entry[1] !== 'string') continue
+    const sep = entry[1].lastIndexOf(':')
+    if (sep < 0) continue
+    const cx1 = entry[1].slice(0, sep)
+    const index = Number(entry[1].slice(sep + 1))
+    const branch = decodeCash('cx', cx1.toLowerCase(), 64)
+    if (!branch || !Number.isInteger(index) || index < 0 || index > 0xffffffff) continue
+    return {cx1, index, pubkeyXOnly: branch.slice(0, 32), chainCode: branch.slice(32)}
+  }
+  return null
+}
+
 // Resolves what the user typed - a Lightning Address, a bare domain, or a
 // URL - to the payRequest URL to grade.
 export const resolveMint = input => {
@@ -331,6 +376,14 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
     )
     return `${match[1]} msat + ${match[2]} ppm`
   })
+
+  if (registeredAddress) {
+    await report.check('advertises its cx1 and next index for internal transfers', async () => {
+      const hint = parseInternalTransferHint(pay.metadata)
+      assert(hint, 'no valid ["text/xpub", "cx1...:<i>"] metadata entry')
+      return `index ${hint.index}`
+    })
+  }
 
   let verifyUrl
   await report.check('issues an invoice for the amount requested', async () => {
@@ -1151,17 +1204,19 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       ? 'the signature verifies against neither the advertised mintPubkey nor any published previous key'
       : 'the signature does not verify against the advertised mintPubkey and amount'
 
-  await report.check('a plain note carries no signature, or one that verifies', async () => {
-    // LUD-25 Part 2 signs cp1 notes only: a hash has nothing to attest to
-    // without disclosing the secret, so a plain note is unsigned by
-    // design. A mint that still issues the old Part 1 signature over the
-    // hash is harmless, as long as the signature is a true one.
-    if (currentSig === null) return 'unsigned, as Part 2 specifies for a plain note'
+  await report.check('a legacy hash mutation signature verifies when present', async () => {
+    // The reference mint can operate without a signing backend and then has
+    // no signature to return. That mode remains usable by tolerant clients,
+    // but the committed reference wallet requires a signature after a
+    // successful mutation, so omission is an interoperability warning.
+    if (currentSig === null) {
+      throw soft('unsigned legacy output: accepted as no-signer mode, but strict reference-wallet clients may refuse it')
+    }
     assert(info.mintPubkey, 'a sig with no mintPubkey advertised verifies against nothing')
     assert(isCompressedPubkey(info.mintPubkey), 'mintPubkey is not a 33-byte compressed secp256k1 key')
     const signedBy = signerOf(key => verifySignature(current, info.maxWithdrawable, currentSig, key))
     assert(signedBy, unverified())
-    return `a legacy Part 1 signature, ${describeSigner(signedBy)}`
+    return `legacy Part 1 signature ${describeSigner(signedBy)}`
   })
 
   await report.check('reports a spent hash distinguishably from an unknown hash', async () => {
@@ -1532,9 +1587,13 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     assert(info.mintPubkey, 'issued a cp1 note with no mintPubkey advertised - nothing to verify its certificate against')
     assert(isCompressedPubkey(info.mintPubkey), 'mintPubkey is not a 33-byte compressed secp256k1 key')
     const pubkeyHex = bytesToHex(pubkey)
-    const certificate = decodeCash('cs', body.sig, 65)
-    assert(certificate, `the rotate to a cp1 output returned no cs1 certificate in sig (got ${JSON.stringify(body.sig)})`)
-    const signedBy = signerOf(key => verifyCertificate(pubkeyHex, info.maxWithdrawable, certificate, key))
+    const certificate = decodeCertificate(body.sig)
+    assert(certificate, `the rotate to a cp1 output returned no amount-bearing cs1 certificate in sig (got ${JSON.stringify(body.sig)})`)
+    assert(
+      certificate.amountMsat === info.maxWithdrawable,
+      `the cs1 says ${certificate.amountMsat} msat but the note is worth ${info.maxWithdrawable} msat`
+    )
+    const signedBy = signerOf(key => verifyCertificate(pubkeyHex, certificate.amountMsat, certificate.signature, key))
     assert(signedBy, unverified())
 
     // The informational GET by ck1 delivers the certificate again, so a
@@ -1547,10 +1606,14 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       lookup.maxWithdrawable === info.maxWithdrawable,
       `value changed across a rotate to cp1: ${info.maxWithdrawable} -> ${lookup.maxWithdrawable}`
     )
-    const again = decodeCash('cs', lookup.sig, 65)
-    assert(again, 'the informational GET by ck1 returned no cs1 certificate')
+    const again = decodeCertificate(lookup.sig)
+    assert(again, 'the informational GET by ck1 returned no amount-bearing cs1 certificate')
     assert(
-      signerOf(key => verifyCertificate(pubkeyHex, info.maxWithdrawable, again, key)),
+      again.amountMsat === lookup.maxWithdrawable,
+      `the informational cs1 says ${again.amountMsat} msat but the note is worth ${lookup.maxWithdrawable} msat`
+    )
+    assert(
+      signerOf(key => verifyCertificate(pubkeyHex, again.amountMsat, again.signature, key)),
       'the certificate on the informational GET does not verify'
     )
 

@@ -4,6 +4,26 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## 0.11.0 - unreleased
+
+**Amount-bearing certificates and internal-transfer discovery.** Part 2 now
+follows the current `lnurl-wallet` and `lnurl-mint` reference implementations;
+the draft LUD-25 prose may lag this release.
+
+- `cs1` carries `amount_msat` in its human-readable part using BOLT-11's
+  amount suffix rules. The vectors reject the legacy fixed `cs` HRP, and
+  the live grader requires the encoded amount to equal the note's
+  authoritative `maxWithdrawable` before verifying the certificate.
+- `--address` now requires a valid `text/xpub` metadata entry carrying the
+  registered `cx1` plus its next-index hint. The mock address publishes a
+  real branch and advances outputs with the LUD-25 public derivation.
+- Legacy hash mutation outputs are signed by the current references. The
+  grader still accepts an omitted signature because the reference mint may
+  run without an available signer, but verifies every signature it receives.
+- The compliant mock enables secret-free hash lookup by default, matching
+  the current reference wallet and mint. `hashLookup: false` remains an
+  explicit older-SERVICE fixture.
+
 ## 0.10.0 - 2026-09-11
 
 **Signatures belong to cp1 notes.** The Part 2 rewrite of LUD-25 signs a
