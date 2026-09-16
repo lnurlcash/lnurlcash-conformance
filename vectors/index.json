@@ -24,6 +24,7 @@
     "retried-mutation.json",
     "mint-to-hash.json",
     "part2.json",
-    "nostr-seed.json"
+    "nostr-seed.json",
+    "spec-vectors.json"
   ]
 }
