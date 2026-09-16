@@ -4,7 +4,7 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
-## Unreleased
+## 0.12.0 - 2026-09-16
 
 **`ck1` now carries a BIP-340 Schnorr ownership proof.** This follows the
 current LUD-25 draft and is intentionally incompatible with the former
@@ -18,6 +18,12 @@ recoverable-ECDSA bearer encoding.
 - The live grader now spends its Part 2 probe with the new 96-byte `ck1`.
 - Address proof vectors use Schnorr signatures over their raw UTF-8 messages,
   matching the draft while address-management design remains under review.
+- Part 2's address branch is now the literal `m/139'/d1/d2/d3/d4` path the
+  draft specifies, with no separate `m/139'/1'` purpose. The earlier hop only
+  existed to dodge a collision with a reference-wallet extension that
+  deterministically derived Part 1 secrets off the same root; that extension
+  is gone, so there is nothing left to collide with. Adds `spec-vectors.json`,
+  transcribing LUD-25's own published "Test Vectors" section.
 
 ## 0.11.1 - 2026-09-15
 
