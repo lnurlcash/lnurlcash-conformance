@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "spec": "LUD-25 draft (lnurl/luds#301)",
+  "description": "LUD-25's own published \"Test Vectors\" section (25.md), transcribed here so every implementation checks itself against the exact numbers the spec document publishes, not just this project's own internally-generated fixtures. Vectors 1 and 2 reuse BIP-32's own published test vector 1 and 2 seeds deliberately, and deliberately land on opposite branch-key parities (vector 1 odd, vector 2 even) so both halves of the sk_i formula are exercised. t and Q are shown for each note alongside pk/sk so every intermediate step, not just the final hex, is independently checkable.",
+  "vector1": {
+    "seedHex": "000102030405060708090a0b0c0d0e0f",
+    "domain": "mint.example",
+    "cashHashingKey": "45a46de715668a4250ddb7420e71f8cb2a165047095edda920c0bfeb7c4ab7a6",
+    "domainIndices": [
+      2728808236,
+      3900943163,
+      3604736224,
+      1452184550
+    ],
+    "branchPrivateKey": "7bbab40e4a022ea909cfee28eb1c7a9f56cf746feea94ff73f155a14f2c57d1e",
+    "branchPubkeyCompressed": "03b783d2930dc053a971f019054ca43e7c9de50e0769de872dd1ddde5d0bf4c9d1",
+    "branchPubkeyXOnly": "b783d2930dc053a971f019054ca43e7c9de50e0769de872dd1ddde5d0bf4c9d1",
+    "branchParity": "odd",
+    "chainCode": "ab91cc11aea395ea6b62292a6147f51ef4150ebea04e745137b68719e238f904",
+    "cx1": "cx1k7pa9ycdcpf6ju0sryz5efp70jw72rs8d80gwtw3mh096zl5e8g6hywvzxh28902dd3zj2npgl63aaq4p6l2qnn52ymmdpceugu0jpqes280t",
+    "notes": [
+      {
+        "index": 0,
+        "t": "10054a4025dc5678a26e16087703ac1af6be92dab9cc20f10c5a5ae0ffbd057c",
+        "Q": "02aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
+        "pk": "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
+        "sk": "944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f",
+        "cp1": "cp14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6qh2fkky"
+      },
+      {
+        "index": 1,
+        "t": "08c401f6e9646a046291700ec99fa5181f46b241cb4667cd1aa7b86ed30fde19",
+        "Q": "02f0c1ea9aede945b9cf84f3bf8df27ac65154a937e4d10cb8a5865df0583b1083",
+        "pk": "f0c1ea9aede945b9cf84f3bf8df27ac65154a937e4d10cb8a5865df0583b1083",
+        "sk": "8d094de89f623b5b58c181e5de832a7783261ab88be5b8119b64bce6b080a23c",
+        "cp1": "cp17rq74xhda9zmnnuy7wlcmun6ceg4f2fhungsew99sewlqkpmzzpsf28ex8"
+      },
+      {
+        "index": 2,
+        "t": "b17b1b45fb64a2d70009c968f965790e11a6b9879041eb9730fda21ca199181f",
+        "Q": "03c1e51bc2b8ad1c6ecfe382fe201c322506e2783a2e4d3eae0da47fece2eab078",
+        "pk": "c1e51bc2b8ad1c6ecfe382fe201c322506e2783a2e4d3eae0da47fece2eab078",
+        "sk": "35c06737b162742df639db400e48fe6ebad74517a1989b9ff1e84807aed39b01",
+        "cp1": "cp1c8j3hs4c45wxanlrstlzq8pjy5rwy7p69exnatsd53l7ech2kpuqsypsv2"
+      },
+      {
+        "index": 5,
+        "t": "468c1cdcf8fe1194f33d2b4c543c9a6000423bddc9b8a83f17c3ace9b0796568",
+        "Q": "02c2b6a6d230d3ca51cc680bf84948c416eab70109542a0cf4fd1fbebbd647891a",
+        "pk": "c2b6a6d230d3ca51cc680bf84948c416eab70109542a0cf4fd1fbebbd647891a",
+        "sk": "cad168ceaefbe2ebe96d3d2369201fbf6421a4548a57f8839880b1618dea298b",
+        "cp1": "cp1c2m2d53s6099rnrgp0uyjjxyzm4twqgf2s4qea8ar7lth4j83ydqcznzj6"
+      }
+    ]
+  },
+  "vector2": {
+    "seedHex": "fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542",
+    "domain": "cash.example.com",
+    "cashHashingKey": "7d6d06012307b130432c5ab845fc746f72d4703a91981a6c012a420b83176dd8",
+    "domainIndices": [
+      2886871684,
+      4226627351,
+      2748717696,
+      1002847463
+    ],
+    "branchPrivateKey": "6f1d381ccdda9a69f966b492b19de687930c19b19e7f8d581088402d6a3b7818",
+    "branchPubkeyCompressed": "0264885a9cab93ec051761b8a0b80e1854a61865878d58f72a365dfd640850f675",
+    "branchPubkeyXOnly": "64885a9cab93ec051761b8a0b80e1854a61865878d58f72a365dfd640850f675",
+    "branchParity": "even",
+    "chainCode": "6b95795f9807ada85c8ca50ec93c921483a183abfed4a3b4abe6b95c89880306",
+    "cx1": "cx1vjy9489tj0kq29mphzstsrsc2jnpsev834v0w23kth7kgzzs7e6kh9tet7vq0tdgtjx22rkf8jfpfqapsw4la49rkj47dw2u3xyqxpspgvxpa",
+    "notes": [
+      {
+        "index": 0,
+        "t": "4d010c0ae5b4e0def5d0eb651d5e08de7fc36aef5703231480372b24688d2711",
+        "Q": "0223bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130",
+        "pk": "23bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130",
+        "sk": "bc1e4427b38f7b48ef379ff7cefbef6612cf84a0f582b06c90bf6b51d2c89f29",
+        "cp1": "cp1ywljdk2rxkm9ap9c8qltp296ajxr9chtc4s6yp9rs6ahyz6v6ycqvtd8z5"
+      },
+      {
+        "index": 1,
+        "t": "370d05e7dca3f107e7ec061de1ea81a51f2a7f5756330317d1a662fdfd35f618",
+        "Q": "03b1ab49e8ca397385ccb6d17d611bf8afc75390513bdcdfe3d760e0bb9860e0aa",
+        "pk": "b1ab49e8ca397385ccb6d17d611bf8afc75390513bdcdfe3d760e0bb9860e0aa",
+        "sk": "a62a3e04aa7e8b71e152bab09388682cb2369908f4b2906fe22ea32b67716e30",
+        "cp1": "cp1kx45n6x289ectn9k697kzxlc4lr48yz380wdlc7hvrsthxrquz4qtpysaz"
+      },
+      {
+        "index": 2,
+        "t": "3d978b10770f8566e6630d978f46a79cb2d237ab0f6168123154dc83c3dc1392",
+        "Q": "039cf00b60589f863cedd2773b42341e6f5102d6bd23d04559a3103d50611b2ada",
+        "pk": "9cf00b60589f863cedd2773b42341e6f5102d6bd23d04559a3103d50611b2ada",
+        "sk": "acb4c32d44ea1fd0dfc9c22a40e48e2445de515cade0f56a41dd1cb12e178baa",
+        "cp1": "cp1nncqkczcn7rremwjwua5ydq7dags944ay0gy2kdrzq74qcgm9tdq37e4dd"
+      }
+    ],
+    "addressProofs": [
+      {
+        "action": "register",
+        "username": "alice",
+        "message": "LNURLcash:register:alice",
+        "signature": "0dfda272f0b92dd5c3645eddcbbc7ac6eb758dfb9f689915c6492682f3d8016f2bb19f69624e8269a32c212b67b663c7f7ce49f23dbf3bb8c279947fe743fc6e"
+      },
+      {
+        "action": "unregister",
+        "username": "alice",
+        "message": "LNURLcash:unregister:alice",
+        "signature": "5a26ff5d17aa24707c5f6720ea97247251d16ea1f7d05c618bd275eeecd8e19f30e276dda2e620017f4523b0891c7231f5f4159167fb9798c33cd70b7b8f1424"
+      }
+    ]
+  },
+  "vector3": {
+    "secretKey": "944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f",
+    "pubkeyXOnly": "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
+    "ownershipSignature": "2895fb42c606565adac387881e867881afb616062ec1b8673c149fee19a88cc2722958dbc0395cb6980f9180e3845f0984a4c9a94f798f99ea553d6a12386039",
+    "ck1": "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6z390mgtrqv4j6mtpc0zq7seugrtakzcrzasdcvu7pf8lwrx5gesnj99vdhspetjmfsru3sr3cghcfsjjvn2200x8en6j4844pywrq8yr7xmet"
+  },
+  "vector4": {
+    "mintSeedLabel": "LUD-25 test vector mint node",
+    "mintPrivateKey": "a8358061952ee158b42ffe1607c00adda3e63098247f837f08a4ef9492b4f798",
+    "mintPubkey": "035acdbd57663f858be6d61ec4bfcbc99492699010f1451e30a6550f26295e813d",
+    "notePubkey": "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
+    "otherNotePubkey": "f0c1ea9aede945b9cf84f3bf8df27ac65154a937e4d10cb8a5865df0583b1083",
+    "certificates": [
+      {
+        "amountMsat": 1000,
+        "message": "LNURLcash:1000:aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
+        "digest": "30894ad113df18b1e00a27015ed62e8b94a87498c8da7997ddac48e4cd7bb20f",
+        "signature": "41a69c2e826555b1c5c099b3166e8d50cc3bbba3ccb9b87c377e96ae070d532c3b6230194ae97d322d663fb38266abd26f3553c62a7d5a528ce9c72d3838fffc01",
+        "cs1": "cs10n1gxnfct5zv42mr3wqnxe3vm5d2rxrhwarejumslph06t2upcd2vkrkc3sr99wjlfj94nrlvuzv64ayme420rz5l2622xwn3ed8qu0llqpeg9n5x"
+      },
+      {
+        "amountMsat": 21000000,
+        "message": "LNURLcash:21000000:aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
+        "digest": "6186fd2c1c258a6c0a3627e895efbc3d0988325c4f36f0050b52b4c4751ab13d",
+        "signature": "b5c6c3dd151708501bc8820ae00ef3d6439cdcca8bac00fb2675fee6b89a7767079e37f62c2502c6744a56295c459d52c0475e27a0eb34745790b44c54b9386200",
+        "cs1": "cs210u1khrv8hg4zuy9qx7gsg9wqrhn6epeehx23wkqp7exwhlwdwy6wans083h7ckz2qkxw399v22ugkw49sz8tcn6p6e5w3tepdzv2junscsqwvvr03"
+      }
+    ]
+  }
+}

@@ -653,6 +653,163 @@ const addressProof = (action, username) => {
   }
 }
 
+// ---- vectors: LUD-25's own published "Test Vectors" section --------------
+//
+// Transcribed from 25.md itself (https://github.com/lnurl/luds/blob/lnurlcash/25.md#test-vectors),
+// not derived independently: this file exists so every implementation can
+// check itself against the exact numbers the spec document publishes,
+// generated here from the same primitives everything else in this script
+// uses, so a spec edit and a generator bug can never silently agree with
+// each other.
+
+const withPublicKey = node => ({
+  ...node,
+  publicKey: secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey)).toBytes(true)
+})
+
+const specNoteVector = (branch, index) => {
+  const branchXonly = branch.publicKey.slice(1)
+  const t = bytesToNumber(taggedHash('LNURLcash/derive', branchXonly, branch.chainCode, ser32(index))) % CURVE_N
+  const {pubkey, secretKey} = noteKeysAt(branch, index)
+  const Q = secp256k1.Point.fromBytes(concat(Uint8Array.of(0x02), branchXonly))
+    .add(secp256k1.Point.BASE.multiply(t))
+    .toBytes(true)
+  return {
+    index,
+    t: numberTo32(t),
+    Q,
+    pk: pubkey,
+    sk: secretKey,
+    cp1: bech32mOf('cp', pubkey)
+  }
+}
+
+const specVector1 = () => {
+  const seed = hexToBytes('000102030405060708090a0b0c0d0e0f')
+  const domain = 'mint.example'
+  const cashRoot = cashRootOf(seed)
+  const hashingNode = ckdPriv(cashRoot, 0)
+  const domainIndices = cashDomainIndices(cashRoot, domain)
+  const branch = withPublicKey(cashDomainNode(cashRoot, domain))
+  const notes = [0, 1, 2, 5].map(i => specNoteVector(branch, i))
+  return {
+    seedHex: bytesToHex(seed),
+    domain,
+    cashHashingKey: bytesToHex(hashingNode.privateKey),
+    domainIndices,
+    branchPrivateKey: bytesToHex(branch.privateKey),
+    branchPubkeyCompressed: bytesToHex(branch.publicKey),
+    branchPubkeyXOnly: bytesToHex(branch.publicKey.slice(1)),
+    branchParity: branch.publicKey[0] === 2 ? 'even' : 'odd',
+    chainCode: bytesToHex(branch.chainCode),
+    cx1: bech32mOf('cx', concat(branch.publicKey.slice(1), branch.chainCode)),
+    notes: notes.map(n => ({
+      index: n.index,
+      t: bytesToHex(n.t),
+      Q: bytesToHex(n.Q),
+      pk: bytesToHex(n.pk),
+      sk: bytesToHex(n.sk),
+      cp1: n.cp1
+    }))
+  }
+}
+
+const specVector2 = () => {
+  const seed = hexToBytes(
+    'fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542'
+  )
+  const domain = 'cash.example.com'
+  const cashRoot = cashRootOf(seed)
+  const hashingNode = ckdPriv(cashRoot, 0)
+  const domainIndices = cashDomainIndices(cashRoot, domain)
+  const branch = withPublicKey(cashDomainNode(cashRoot, domain))
+  const notes = [0, 1, 2].map(i => specNoteVector(branch, i))
+  const {secretKey: sk0} = noteKeysAt(branch, 0)
+  const username = 'alice'
+  const addressProofOf = action => ({
+    action,
+    username,
+    message: `LNURLcash:${action}:${username}`,
+    signature: bytesToHex(signSchnorr(sk0, `LNURLcash:${action}:${username}`))
+  })
+  return {
+    seedHex: bytesToHex(seed),
+    domain,
+    cashHashingKey: bytesToHex(hashingNode.privateKey),
+    domainIndices,
+    branchPrivateKey: bytesToHex(branch.privateKey),
+    branchPubkeyCompressed: bytesToHex(branch.publicKey),
+    branchPubkeyXOnly: bytesToHex(branch.publicKey.slice(1)),
+    branchParity: branch.publicKey[0] === 2 ? 'even' : 'odd',
+    chainCode: bytesToHex(branch.chainCode),
+    cx1: bech32mOf('cx', concat(branch.publicKey.slice(1), branch.chainCode)),
+    notes: notes.map(n => ({
+      index: n.index,
+      t: bytesToHex(n.t),
+      Q: bytesToHex(n.Q),
+      pk: bytesToHex(n.pk),
+      sk: bytesToHex(n.sk),
+      cp1: n.cp1
+    })),
+    addressProofs: [addressProofOf('register'), addressProofOf('unregister')]
+  }
+}
+
+const specVector3 = () => {
+  // sk_0/pk_0 from vector 1
+  const v1 = specVector1()
+  const sk = hexToBytes(v1.notes[0].sk)
+  const pk = hexToBytes(v1.notes[0].pk)
+  const signature = signSchnorr(sk, 'LNURLcash')
+  return {
+    secretKey: bytesToHex(sk),
+    pubkeyXOnly: bytesToHex(pk),
+    ownershipSignature: bytesToHex(signature),
+    ck1: bech32mOf('ck', concat(pk, signature))
+  }
+}
+
+const specVector4 = () => {
+  const mintSeedLabel = 'LUD-25 test vector mint node'
+  const mintKey = sha256(utf8ToBytes(mintSeedLabel))
+  const mintPubkey = bytesToHex(secp256k1.getPublicKey(mintKey, true))
+  // pk_0/pk_1 from vector 1
+  const v1 = specVector1()
+  const pk = v1.notes[0].pk
+  const otherPk = v1.notes[1].pk
+  const certificateAt = amountMsat => {
+    const message = `LNURLcash:${amountMsat}:${pk}`
+    const digest = lightningSignedDigest(message)
+    const signature = signRecoverable(mintKey, digest)
+    return {
+      amountMsat,
+      message,
+      digest: bytesToHex(digest),
+      signature: bytesToHex(signature),
+      cs1: bech32mOf(`cs${amountSuffix(amountMsat)}`, signature)
+    }
+  }
+  return {
+    mintSeedLabel,
+    mintPrivateKey: bytesToHex(mintKey),
+    mintPubkey,
+    notePubkey: pk,
+    otherNotePubkey: otherPk,
+    certificates: [certificateAt(1000), certificateAt(21000000)]
+  }
+}
+
+const specVectors = {
+  version: VERSION,
+  spec: SPEC,
+  description:
+    "LUD-25's own published \"Test Vectors\" section (25.md), transcribed here so every implementation checks itself against the exact numbers the spec document publishes, not just this project's own internally-generated fixtures. Vectors 1 and 2 reuse BIP-32's own published test vector 1 and 2 seeds deliberately, and deliberately land on opposite branch-key parities (vector 1 odd, vector 2 even) so both halves of the sk_i formula are exercised. t and Q are shown for each note alongside pk/sk so every intermediate step, not just the final hex, is independently checkable.",
+  vector1: specVector1(),
+  vector2: specVector2(),
+  vector3: specVector3(),
+  vector4: specVector4()
+}
+
 const part2 = {
   version: VERSION,
   spec: SPEC,
@@ -3043,7 +3200,8 @@ const files = [
   write('retried-mutation.json', retriedMutation),
   write('mint-to-hash.json', mintToHash),
   write('part2.json', part2),
-  write('nostr-seed.json', nostrSeed)
+  write('nostr-seed.json', nostrSeed),
+  write('spec-vectors.json', specVectors)
 ]
 
 write('index.json', {
