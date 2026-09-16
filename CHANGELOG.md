@@ -4,6 +4,36 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## 0.13.0 - 2026-09-16
+
+**`ck1` and the LN-address register/unregister proof now sign a sha256
+digest, not the raw message.** BIP-340's own reference implementation, and
+most conforming Schnorr signers (`libsecp256k1`'s `schnorrsig` module
+included), only accept a 32-byte message; the previous vectors signed the
+raw UTF-8 bytes directly, which only worked because `@noble/curves`'
+`schnorr.sign` is more permissive than that, and would not have
+interoperated with an off-the-shelf signer (2026-09-16, `luds#6de59b2`).
+
+- `ownershipSignature` is now a 64-byte BIP-340 Schnorr signature over
+  `sha256("LNURLcash")`, a fixed 32-byte digest, instead of the raw 9-byte
+  string. `part2.json`'s `conventions.ownershipMessageEncoding` documents
+  this; `part2.conventions.ownershipMessage` itself is unchanged.
+- Address proof signatures are now over `sha256("LNURLcash:<action>:<username>")`
+  instead of the raw string - `username` is variable-length, so the raw
+  message would otherwise only rarely land on the required 32 bytes.
+  `addressProofs` entries gain a `digest` field alongside `message`.
+- `spec-vectors.json`'s vectors 2 and 3 are regenerated to match 25.md's own
+  published values, and gain `digest`/`register digest`/`unregister digest`
+  fields transcribing the spec's own hex.
+- Nostr-seed vectors are regenerated to match; their `ck1`s use the same new
+  digest scheme.
+- This is a read/verify-side compatibility break for any consumer still
+  checking `Verify(pk, "LNURLcash", sig)` directly - a note signed under
+  0.12.0's scheme no longer verifies under these vectors' convention text,
+  though nothing stops an implementation from independently keeping a
+  transitional fallback read path for notes minted before this change (see
+  `lnurl-wallet`'s own `legacy`-flagged `recoverNoteOwnershipPubkey`).
+
 ## 0.12.0 - 2026-09-16
 
 **`ck1` now carries a BIP-340 Schnorr ownership proof.** This follows the

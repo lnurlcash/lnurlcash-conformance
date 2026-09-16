@@ -1150,9 +1150,13 @@ const recoverX = (signature, digest) => {
   return secp256k1.recoverPublicKey(recIdFirst, digest, {prehash: false}).slice(1)
 }
 
-check('part2: the ownership message is raw UTF-8 with no application prehash', () => {
+check('part2: the ownership message is sha256-hashed before signing', () => {
   assert(part2.conventions.ownershipMessage === 'LNURLcash', 'ownershipMessage')
-  assert(part2.conventions.ownershipMessageEncoding === 'UTF-8 bytes, no application prehash', 'ownershipMessageEncoding')
+  assert(
+    part2.conventions.ownershipMessageEncoding ===
+      'UTF-8 bytes, sha256-hashed to a 32-byte digest before signing (2026-09-16, luds#6de59b2)',
+    'ownershipMessageEncoding'
+  )
 })
 
 check('part2: every cx1 is its branch key and chain code', () => {
@@ -1191,7 +1195,7 @@ check('part2: a watcher holding only the cx1 derives every note key', () => {
 })
 
 check('part2: every ck1 embeds its note key and a valid Schnorr ownership signature', () => {
-  const message = utf8ToBytes(part2.conventions.ownershipMessage)
+  const message = sha256(utf8ToBytes(part2.conventions.ownershipMessage))
   for (const b of part2.branches) {
     for (const n of b.notes) {
       const ck1 = decode2('ck', n.ck1, 96)
@@ -1225,7 +1229,7 @@ check('part2: every address proof is action- and username-bound to index zero', 
     const signature = hexToBytes(proof.signature)
     assert(signature.length === 64, `${proof.action}: signature length`)
     assert(
-      schnorr.verify(signature, utf8ToBytes(proof.message), hexToBytes(proof.indexZeroPubkey)),
+      schnorr.verify(signature, sha256(utf8ToBytes(proof.message)), hexToBytes(proof.indexZeroPubkey)),
       `${proof.action}: verifies against index zero`
     )
   }
@@ -1261,7 +1265,7 @@ check('nostr-seed: marked as an extension, not LUD-25', () => {
 
 check('nostr-seed: every seed, branch and note recomputes', () => {
   const tag = sha256(utf8ToBytes('LNURLcash/derive'))
-  const message = utf8ToBytes(part2.conventions.ownershipMessage)
+  const message = sha256(utf8ToBytes(part2.conventions.ownershipMessage))
   for (const c of nostrSeed.cases) {
     const identity = hexToBytes(c.identity)
     assert(bytesToHex(hmac(sha256, identity, utf8ToBytes(nostrSeed.label))) === c.seed, `${c.host}: seed`)

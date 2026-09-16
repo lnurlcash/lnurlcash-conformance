@@ -526,11 +526,16 @@ const signRecoverable = (secretKey, digest) => {
 }
 
 const OWNERSHIP_MESSAGE = utf8ToBytes('LNURLcash')
+const OWNERSHIP_DIGEST = sha256(OWNERSHIP_MESSAGE)
 // BIP-340 permits auxiliary randomness. Fixed zeroes keep published vectors
 // reproducible; implementations may use fresh randomness and still verify.
 const SCHNORR_AUX = new Uint8Array(32)
+// Signs sha256(message), a 32-byte digest, rather than the raw message
+// bytes: BIP-340's own reference implementation, and most conforming
+// Schnorr signers (libsecp256k1's schnorrsig module included), only accept
+// a 32-byte message (2026-09-16, luds#6de59b2).
 const signSchnorr = (secretKey, message) =>
-  schnorr.sign(utf8ToBytes(message), secretKey, SCHNORR_AUX)
+  schnorr.sign(sha256(utf8ToBytes(message)), secretKey, SCHNORR_AUX)
 
 // BOLT-11's amount suffix, reused verbatim by cs1's human-readable part.
 // Pick the coarsest unit that can express the integer msat amount exactly.
@@ -600,7 +605,7 @@ const part2Branch = (mnemonic, host) => {
     cx1: bech32mOf('cx', concat(branchPubkey, node.chainCode)),
     notes: PART2_INDICES.map(index => {
       const {secretKey, pubkey} = noteKeysAt(node, index)
-      const ownershipSignature = schnorr.sign(OWNERSHIP_MESSAGE, secretKey, SCHNORR_AUX)
+      const ownershipSignature = schnorr.sign(OWNERSHIP_DIGEST, secretKey, SCHNORR_AUX)
       return {
         index,
         notePubkey: bytesToHex(pubkey),
@@ -647,6 +652,7 @@ const addressProof = (action, username) => {
     action,
     username,
     message,
+    digest: bytesToHex(sha256(utf8ToBytes(message))),
     indexZeroSecretKey: firstNotes[0].noteSecretKey,
     indexZeroPubkey: firstNotes[0].notePubkey,
     signature: bytesToHex(signSchnorr(hexToBytes(firstNotes[0].noteSecretKey), message))
@@ -730,6 +736,7 @@ const specVector2 = () => {
     action,
     username,
     message: `LNURLcash:${action}:${username}`,
+    digest: bytesToHex(sha256(utf8ToBytes(`LNURLcash:${action}:${username}`))),
     signature: bytesToHex(signSchnorr(sk0, `LNURLcash:${action}:${username}`))
   })
   return {
@@ -764,6 +771,7 @@ const specVector3 = () => {
   return {
     secretKey: bytesToHex(sk),
     pubkeyXOnly: bytesToHex(pk),
+    digest: bytesToHex(sha256(utf8ToBytes('LNURLcash'))),
     ownershipSignature: bytesToHex(signature),
     ck1: bech32mOf('ck', concat(pk, signature))
   }
@@ -814,7 +822,7 @@ const part2 = {
   version: VERSION,
   spec: SPEC,
   description:
-    'LUD-25 Part 2: notes keyed by a public key and spent by a BIP-340 Schnorr proof. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/0, msg = utf8(host)), and addressNode is m/139\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is a 64-byte BIP-340 Schnorr signature over the UTF-8 bytes of "LNURLcash" with no application prehash, and ck1 is bech32m("ck", notePubkey || ownershipSignature): the value that spends the note. Register/update/unregister proofs are Schnorr signatures from index zero over the UTF-8 bytes of "LNURLcash:<action>:<username>", separating both action and name. A certificate remains a recoverable ECDSA signature by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).',
+    'LUD-25 Part 2: notes keyed by a public key and spent by a BIP-340 Schnorr proof. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/0, msg = utf8(host)), and addressNode is m/139\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is a 64-byte BIP-340 Schnorr signature over sha256("LNURLcash") - a 32-byte digest, not the raw 9-byte string, since most conforming Schnorr signers (libsecp256k1\'s schnorrsig module included) only accept a 32-byte message (2026-09-16, luds#6de59b2) - and ck1 is bech32m("ck", notePubkey || ownershipSignature): the value that spends the note. Register/update/unregister proofs are Schnorr signatures from index zero over sha256("LNURLcash:<action>:<username>"), same reasoning, separating both action and name. A certificate remains a recoverable ECDSA signature by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).',
   conventions: {
     addressBranch: "m/139'/d1/d2/d3/d4",
     hashingKey: "m/139'/0",
@@ -822,10 +830,11 @@ const part2 = {
     noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t >= n is unusable, use the next index',
     indexWidth: '4 bytes, big-endian, any uint32, never hardened',
     ownershipMessage: 'LNURLcash',
-    ownershipMessageEncoding: 'UTF-8 bytes, no application prehash',
+    ownershipMessageEncoding: 'UTF-8 bytes, sha256-hashed to a 32-byte digest before signing (2026-09-16, luds#6de59b2)',
     ownershipSignature: 'BIP-340 Schnorr, 64 bytes; vectors use 32 zero auxiliary bytes',
     ck1Payload: '32-byte x-only public key || 64-byte Schnorr signature',
     addressProofMessage: 'LNURLcash:<register|unregister>:<username>',
+    addressProofMessageEncoding: 'UTF-8 bytes, sha256-hashed to a 32-byte digest before signing, same reasoning as ownershipMessageEncoding',
     certificateMessage: 'LNURLcash:<amount_msat>:<hex(pk)>',
     certificateHrp: 'cs || BOLT11_amount_suffix(amount_msat)'
   },
@@ -883,7 +892,7 @@ const nostrSeedCase = (identityHex, host) => {
         noteSecretKey: bytesToHex(secretKey),
         notePubkey: bytesToHex(pubkey),
         cp1: bech32mOf('cp', pubkey),
-        ck1: bech32mOf('ck', concat(pubkey, schnorr.sign(OWNERSHIP_MESSAGE, secretKey, SCHNORR_AUX)))
+        ck1: bech32mOf('ck', concat(pubkey, schnorr.sign(OWNERSHIP_DIGEST, secretKey, SCHNORR_AUX)))
       }
     })
   }
