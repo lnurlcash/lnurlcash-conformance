@@ -4,6 +4,15 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## 0.13.1 - 2026-09-16
+
+- The grader's own `ck1` (the one the Part 2 certification check spends
+  with) now signs `sha256("LNURLcash")`, like the vectors. It still signed
+  the raw 9-byte message, so a mint that dropped that older form would have
+  failed the check, and a mint that only read the older form would have
+  passed it. `ownershipProof` is exported, and the selfcheck holds it to the
+  digest.
+
 ## 0.13.0 - 2026-09-16
 
 **`ck1` and the LN-address register/unregister proof now sign a sha256
