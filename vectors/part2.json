@@ -1,7 +1,7 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "LUD-25 Part 2: notes keyed by a public key and spent by a BIP-340 Schnorr proof. Every branch is the reference wallet's address path under a BIP39 seed (no passphrase): cashRoot is m/139', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139'/0, msg = utf8(host)), and addressNode is m/139'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m(\"cx\", branchPubkey || chainCode). Each note: t = tagged_hash(\"LNURLcash/derive\", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is a 64-byte BIP-340 Schnorr signature over the UTF-8 bytes of \"LNURLcash\" with no application prehash, and ck1 is bech32m(\"ck\", notePubkey || ownershipSignature): the value that spends the note. Register/update/unregister proofs are Schnorr signatures from index zero over the UTF-8 bytes of \"LNURLcash:<action>:<username>\", separating both action and name. A certificate remains a recoverable ECDSA signature by the mint key over sha256(sha256(\"Lightning Signed Message:\" || \"LNURLcash:<amount_msat>:<hex(notePubkey)>\")); its bech32m HRP is \"cs\" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).",
+  "description": "LUD-25 Part 2: notes keyed by a public key and spent by a BIP-340 Schnorr proof. Every branch is the reference wallet's address path under a BIP39 seed (no passphrase): cashRoot is m/139', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139'/0, msg = utf8(host)), and addressNode is m/139'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m(\"cx\", branchPubkey || chainCode). Each note: t = tagged_hash(\"LNURLcash/derive\", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is a 64-byte BIP-340 Schnorr signature over sha256(\"LNURLcash\") - a 32-byte digest, not the raw 9-byte string, since most conforming Schnorr signers (libsecp256k1's schnorrsig module included) only accept a 32-byte message (2026-09-16, luds#6de59b2) - and ck1 is bech32m(\"ck\", notePubkey || ownershipSignature): the value that spends the note. Register/update/unregister proofs are Schnorr signatures from index zero over sha256(\"LNURLcash:<action>:<username>\"), same reasoning, separating both action and name. A certificate remains a recoverable ECDSA signature by the mint key over sha256(sha256(\"Lightning Signed Message:\" || \"LNURLcash:<amount_msat>:<hex(notePubkey)>\")); its bech32m HRP is \"cs\" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).",
   "conventions": {
     "addressBranch": "m/139'/d1/d2/d3/d4",
     "hashingKey": "m/139'/0",
@@ -9,10 +9,11 @@
     "noteTweak": "tagged_hash(\"LNURLcash/derive\", P || chainCode || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t >= n is unusable, use the next index",
     "indexWidth": "4 bytes, big-endian, any uint32, never hardened",
     "ownershipMessage": "LNURLcash",
-    "ownershipMessageEncoding": "UTF-8 bytes, no application prehash",
+    "ownershipMessageEncoding": "UTF-8 bytes, sha256-hashed to a 32-byte digest before signing (2026-09-16, luds#6de59b2)",
     "ownershipSignature": "BIP-340 Schnorr, 64 bytes; vectors use 32 zero auxiliary bytes",
     "ck1Payload": "32-byte x-only public key || 64-byte Schnorr signature",
     "addressProofMessage": "LNURLcash:<register|unregister>:<username>",
+    "addressProofMessageEncoding": "UTF-8 bytes, sha256-hashed to a 32-byte digest before signing, same reasoning as ownershipMessageEncoding",
     "certificateMessage": "LNURLcash:<amount_msat>:<hex(pk)>",
     "certificateHrp": "cs || BOLT11_amount_suffix(amount_msat)"
   },
@@ -43,56 +44,56 @@
           "notePubkey": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
           "cp1": "cp12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qesd2rcha",
           "noteSecretKey": "e63e4e8109b3f54d1322942723fd786de2d56e2885f8098e2e9bd5067b2b6de0",
-          "ownershipSignature": "6f8d27262ea8a1329bc4bada88d22e9cdf2192f34743c8c180bba0e5d50497745ced29aac8c6aa64e9c7be3c94ba508aafdf187bed72adb9ebca70d14303c579",
-          "ck1": "ck12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qeklrf8ych23gfjn0zt4k5g6ghfehepjte5ws7gcxqthg8965zfwazua5564jxx4fjwn3a78j2t55y24l03s7ldw2kmn672wrg5xq790yz4088e"
+          "ownershipSignature": "85c10402ee6799ddef4a4330be2072879fbc5ffdb23b4468b97c7ea50162acc38d67f0bd18c6e59ebe8854f3e40f57a1588fb6ef919a96ef7ae80f877ae3cf8a",
+          "ck1": "ck12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qectsgyqthx0xwaaa9yxv97ypeg08autl7myw6ydzuhcl49q932esudvlct6xxxuk0tazz570jq74aptz8mdmu3n2tw77hgp7rh4c703ghav8wl"
         },
         {
           "index": 1,
           "notePubkey": "2a1f9b556ca944e20f4281613c286f68f257f7d8b9dec18be5c79e2eae9dc3c6",
           "cp1": "cp19g0ek4tv49zwyr6zs9snc2r0dre90a7ch80vrzl9c70zat5ac0rqmuurur",
           "noteSecretKey": "cba6d9bf45839f3a409e9a3b8d2260a9489e4a5cea121eb2b65e31b8fe69288c",
-          "ownershipSignature": "7ecf8fde80b7af8d1eaffecaa0508744a3e0ce798437a645d9299b561028f9708153f568735f0b83a433f83ac044b0436415331b6e456cf1d5b7952b198d6ee0",
-          "ck1": "ck19g0ek4tv49zwyr6zs9snc2r0dre90a7ch80vrzl9c70zat5ac0r8anu0m6qt0tudr6hlaj4q2zr5fglqeeucgdaxghvjnx6kzq50juyp206ksu6lpwp6gvlc8tqyfvzrvs2nxxmwg4k0r4dhj543nrtwuqwt2ke2"
+          "ownershipSignature": "b081860b78d3b0b1243bf477d9a73a56a99909c38eecdd71f50a39cf5b85e588bf6fa03e1df1090126fafc1a0c57eaccf2074cb139f24562b424feade66b3da0",
+          "ck1": "ck19g0ek4tv49zwyr6zs9snc2r0dre90a7ch80vrzl9c70zat5ac0rtpqvxpdud8v93ysalga7e5ua9d2vep8pcamxaw86s5ww0twz7tz9ld7sru803pyqjd7hurgx906kv7gr5evfe7fzk9dpyl6k7v6ea5q5pe7ae"
         },
         {
           "index": 2,
           "notePubkey": "921e17ce875fe9eeb0ade22d99d2e3d830e58d05fbff61a65ddb279db461099a",
           "cp1": "cp1jg0p0n58tl57av9dugken5hrmqcwtrg9l0lkrfjamvnemdrppxdqkcf7yv",
           "noteSecretKey": "4161e80150c8019d51e97c13c8c288ae5fbdfddfab4444ef0df221d8b1561e02",
-          "ownershipSignature": "0b822e6fe12865af1d0b9d78c4b1914a2cda7293621615726f6df4493846b056edc38acfee17adba679b7989b2f85f3bfc379ec4b8cf476892c11c54cfbf1f91",
-          "ck1": "ck1jg0p0n58tl57av9dugken5hrmqcwtrg9l0lkrfjamvnemdrppxdqhq3wdlsjsed0r59e67xykxg55tx6w2fky9s4wfhkmazf8prtq4hdcw9vlmsh4kax0xme3xe0shemlsmea39ceark3ykpr32vl0cljyg3flf2"
+          "ownershipSignature": "5aab9e7958e72f1e0aacba944ea4ffe837915fd0cae32aa827468b188c3add8604acdf8ac7df8fe3031c0b7330c8594af17e8f9903d4ed0f85c8e131d1208599",
+          "ck1": "ck1jg0p0n58tl57av9dugken5hrmqcwtrg9l0lkrfjamvnemdrppxd942u709vwwtc7p2kt49zw5nl7sdu3tlgv4ce24qn5dzcc3sadmpsy4n0c437l3l3sx8qtwvcvsk2279lglxgr6nkslpwguycazgy9nys6hrxy"
         },
         {
           "index": 1000,
           "notePubkey": "2c769a88d11f866116384757ef90be35c7736d9be171400b3d51847d9c40afa7",
           "cp1": "cp193mf4zx3r7rxz93cgat7ly97xhrhxmvmu9c5qzea2xz8m8zq47nsk7pfgu",
           "noteSecretKey": "606eaf1437cd8aeb73b54b9bb2eff8b0e6fe353850d1c7dc3d5251157e5fa665",
-          "ownershipSignature": "cff6aa58752c364eabc096e67f7155780d1b27ba216c3b270c450880a1a61fec346a5c23ba46a8fe51c3c00c6166f8f8be9968bdbadf02d612466931b22fefa1",
-          "ck1": "ck193mf4zx3r7rxz93cgat7ly97xhrhxmvmu9c5qzea2xz8m8zq47nula42tp6jcdjw40qfdenlw92hsrgmy7azzmpmyuxy2zyq5xnplmp5dfwz8wjx4rl9rs7qp3skd78ch6vk30d6mupdvyjxdycmytl05ykcydmh"
+          "ownershipSignature": "15523466fff4d18568fa74be70e58462e86ce34184120d11419c5851833515af3cd5ef73cd6f776642e1ea4b24ccf2eb1f99664c6ef32fca2bd8d8b9cd15f62a",
+          "ck1": "ck193mf4zx3r7rxz93cgat7ly97xhrhxmvmu9c5qzea2xz8m8zq47n32535vmllf5v9dra8f0nsukzx96rvudqcgysdz9qeckz3sv63tteu6hhh8nt0wany9c02fvjveuhtr7vkvnrw7vhu527cmzuu690k9g5f5z4k"
         },
         {
           "index": 2147483647,
           "notePubkey": "8ca1212b6cbcfe30a49887baad3a806517ff8f4862edfe77e784861306f27d56",
           "cp1": "cp13jsjz2mvhnlrpfycs7a26w5qv5tllr6gvtklual8sjrpxphj04tqpxqahk",
           "noteSecretKey": "ab03d34324d5b131e0ffd96fce818488d783a77920c2b5d708c8c6ab966fa586",
-          "ownershipSignature": "97b1a58a8e40ce4077d193313d4081b4cda7c27fdd7a6ee3a2a88a5431bcbd41cd8001b0b6f23771eb36311bb29c48ef6510354add9c03110e8ce1bc46d5135d",
-          "ck1": "ck13jsjz2mvhnlrpfycs7a26w5qv5tllr6gvtklual8sjrpxphj04tf0vd9328ypnjqwlgexvfagzqmfnd8cfla67nwuw323zj5xx7t6swdsqqmpdhjxac7kd33rwefcj80v5gr2jkansp3zr5vux7yd4gnt5kyakc0"
+          "ownershipSignature": "bbbd83501da571c9ebdef58859292ad0cd9468d5636c9c00da15bd2f65729f0dbcab7b2e41eaf0e9fa42fba61701c66d94fefd316942c69e60c4510b3b0d33a1",
+          "ck1": "ck13jsjz2mvhnlrpfycs7a26w5qv5tllr6gvtklual8sjrpxphj04tth0vr2qw62uwfa000tzze9y4dpnv5dr2kxmyuqrdpt0f0v4ef7rdu4dajus027r5l5shm5ctsr3ndjnl06vtfgtrfucxy2y9nkrfn5ykf262r"
         },
         {
           "index": 2147483648,
           "notePubkey": "9fc1d38d06e6ed8881b5d4d5037f339cdbba342fce6d2c776e608a4c2ffde14c",
           "cp1": "cp1nlqa8rgxumkc3qd46n2sxlennndm5dp0eekjcamwvz9yctlau9xqqnvxje",
           "noteSecretKey": "3f56766df08d3cc0257e99466519b089209d6e1a337b2b230b8df7d83ee5ebc0",
-          "ownershipSignature": "ba401b9491f456248284fefd01fcb68ce1904931babd0319fc0a18a29eb4bdd10cf719f14b53414166a127ee250907e02f2a39c2741b55945df29f46221da8a4",
-          "ck1": "ck1nlqa8rgxumkc3qd46n2sxlennndm5dp0eekjcamwvz9yctlau9xt5sqmjjglg43ys2z0algpljmgecvsfycm40grr87q5x9zn66tm5gv7uvlzj6ng9qkdgf8acjsjplq9u4rnsn5rd2egh0jnarzy8dg5spfh3wn"
+          "ownershipSignature": "06356ecc55536c97ff415ff0e182d746ed74c7da160b38c0f7e50b585e0cbd4b0690724c7b141ece9fcf69c3e1870ce7bfdad27a0543d559f680fd72cec1a9b2",
+          "ck1": "ck1nlqa8rgxumkc3qd46n2sxlennndm5dp0eekjcamwvz9yctlau9xqvdtwe324xmyhlaq4lu8pstt5dmt5cldpvzeccrm72z6ctcxt6jcxjpeyc7c5rm8flnmfc0scwr88hlddy7s9g024na5ql4evasdfkg5pc0jq"
         },
         {
           "index": 4294967295,
           "notePubkey": "71bbe0889494a2a4ddd1c84998ed44c7a4344977b70df30d9abe832845c839cc",
           "cp1": "cp1wxa7pzy5jj32fhw3epye3m2yc7jrgjthkuxlxrv6h6pjs3wg88xqjcmhz2",
           "noteSecretKey": "b649d4336a740ec90c5768bbcb9109711ee5da0477f7014d23ae13eb6253a199",
-          "ownershipSignature": "9ba80e4d351c61ff19840006ac1683244e1f1e13defae7829817c00298fe6d6766cf1241709002430be81f82ccea0f01446195344bd803c4320482829cd32e76",
-          "ck1": "ck1wxa7pzy5jj32fhw3epye3m2yc7jrgjthkuxlxrv6h6pjs3wg88xfh2qwf563cc0lrxzqqp4vz6pjgnslrcfaa7h8s2vp0sqznrlx6emxeufyzuysqfpsh6qlstxw5rcpg3se2dztmqpugvsys2pfe5ewwc5e8fgp"
+          "ownershipSignature": "fb8127ec404e4ebf18e04aca1c846d92ed312c6641d62415b1e75530e4a6299163f2346cc81f87858c9dfc0df240f8e7b2641e66c950a90d268956cd011ca20b",
+          "ck1": "ck1wxa7pzy5jj32fhw3epye3m2yc7jrgjthkuxlxrv6h6pjs3wg88x0hqf8a3qyun4lrrsy4jsus3ke9mf393nyr43yzkc7w4fsujnznytr7g6xejqls7zce80upheyp788kfjpuekf2z5s6f5f2mxsz89zpv83fzgt"
         }
       ]
     },
@@ -118,56 +119,56 @@
           "notePubkey": "dddd050c8567c8e4b03ce65544171ce0fd7e91081bde2c325176eb3f46342311",
           "cp1": "cp1mhws2ry9vlywfvpuue25g9cuur7hayggr00zcvj3wm4n7335yvgsl6nq56",
           "noteSecretKey": "63e2c0393a3a7080cee5c12cc5781ee00d9a564f4d38280f4662d9031480c0cf",
-          "ownershipSignature": "ff339e540d4e245ca31b1c70220286811e2aa8378a047e92fe697b105fb26d0fa40c522b06e0fac8c6242fd00f04a60faa83230b8f1999a8c27bf539fc9bcde6",
-          "ck1": "ck1mhws2ry9vlywfvpuue25g9cuur7hayggr00zcvj3wm4n7335yvgl7vu72sx5ufzu5vd3cupzq2rgz8324qmc5pr7jtlxj7cst7ex6rayp3fzkphqltyvvfp06q8sffs042pjxzu0rxv63snm75ulex7duc3swggn"
+          "ownershipSignature": "53f8a3c585d0396cf38f917db1c05db9ba20531af13c18f274fd72179f336d15aa5c5e735842e5abfbd8a1ccfb74808730b52c9e0565f5a9ab315aecca481534",
+          "ck1": "ck1mhws2ry9vlywfvpuue25g9cuur7hayggr00zcvj3wm4n7335yvg4879rckzaqwtv7w8ezld3cpwmnw3q2vd0z0qc7f606ushnuek69d2t308xkzzuk4lhk9penahfqy8xz6je8s9vh66n2e3ttkv5jq4xsxvclve"
         },
         {
           "index": 1,
           "notePubkey": "8124e72b9c2021a048ba60ab7984b85cf14269bfc168f0d1abc5d00f4e2d2753",
           "cp1": "cp1syjww2uuyqs6qj96vz4hnp9ctnc5y6dlc950p5dtchgq7n3dyafs54n84f",
           "noteSecretKey": "9ce01a15ad5bb400abf2fb24b24bf0cf4d30039cd9b679fd299b642250b4105c",
-          "ownershipSignature": "6e73c8e19bfb06150339043704b32fed980b866471b442c59cf4cfbf99b0b08ef0029044b177fe7dd6d7c3bef0c04e2f68c3a33c960b6dc5dbb9ab1176f77688",
-          "ck1": "ck1syjww2uuyqs6qj96vz4hnp9ctnc5y6dlc950p5dtchgq7n3dyafkuu7guxdlkps4qvusgdcykvh7mxqtsej8rdzzckw0fnalnxctprhsq2gyfvthle7ad47rhmcvqn30drp6x0ykpdkutkae4vghdamk3qrupu09"
+          "ownershipSignature": "0394f586263fa42d3479c203c4bda7fed31da441623252e8ca497c778be88275526af03c98f5629065c43a22685375a35ebaac549f40d0a82f30ebc9bba53a8c",
+          "ck1": "ck1syjww2uuyqs6qj96vz4hnp9ctnc5y6dlc950p5dtchgq7n3dyafs8984scnrlfpdx3uuyq7yhknla5ca53qkyvjjar9yjlrh305gya2jdtcrex84v2gxt3p6yf59xadrt6a2c4ylgrg2stesa0ymhff63sf7yf58"
         },
         {
           "index": 2,
           "notePubkey": "1532cf04af6541e51e545f41232b4e60acf342f6cb6a37b833381d89d0db58c9",
           "cp1": "cp1z5ev7p90v4q728j5taqjx26wvzk0xshked4r0wpn8qwcn5xmtrys3w3phe",
           "noteSecretKey": "7dea14510f7e706c4877c349d8ccdf0a6d75686dc31f64dbcc851b9ca6131590",
-          "ownershipSignature": "4bf8209f86d290a101f8cdc5b0a7b7d6c6c2de30dd397c778083cd0ac35f1b3efa84a4bead0eab8c1eb6c1cf329d0d8ce6dda60fa9e13698cb1500f0153a77fd",
-          "ck1": "ck1z5ev7p90v4q728j5taqjx26wvzk0xshked4r0wpn8qwcn5xmtry5h7pqn7rd9y9pq8uvm3ds57mad3kzmccd6wtuw7qg8ng2cd03k0h6sjjtatgw4wxpadkpeuef6rvvumw6vrafuymf3jc4qrcp2wnhl5z2kz29"
+          "ownershipSignature": "767856cab1e2abeea72b0d6dcf20268ed2120a536da226ada294aeb10c194bd7cc5ed95f7945d95a417fc4ed3627bff91597f3f6c5f9efdf5787f4175966a6ea",
+          "ck1": "ck1z5ev7p90v4q728j5taqjx26wvzk0xshked4r0wpn8qwcn5xmtryhv7zke2c792lw5u4s6mw0yqnga5sjpffkmg3x4k3fft43psv5h47vtmv47729m9dyzl7ya5mz00lezktl8ak9l8ha74u87st4je4xagdn69fr"
         },
         {
           "index": 1000,
           "notePubkey": "2f979fa09a26d0518aebb39f0024355d258872ea06d3cdc7a3b277d7e81be2ff",
           "cp1": "cp197telgy6ymg9rzhtkw0sqfp4t5jcsuh2qmfum3arkfma06qmutlsf2xpw4",
           "noteSecretKey": "eb3b0029f663016f3ccabe7b99d158b1bdb1ebf951609d9407942627ea4b12a5",
-          "ownershipSignature": "826c4039ef3619cc5ff9502d5827afbe0fb4024eb28f75e6f8a32e00901fbf0fa4467c4426916f9e16101f6633718ebc1887f8c4370fecf0fafa207eefa42d25",
-          "ck1": "ck197telgy6ymg9rzhtkw0sqfp4t5jcsuh2qmfum3arkfma06qmutlcymzq88hnvxwvtlu4qt2cy7hmura5qf8t9rm4umu2xtsqjq0m7rayge7ygf53d70pvyqlvcehrr4urzrl33phplk0p7h6yplwlfpdy5xaspla"
+          "ownershipSignature": "b0b50ed1bc11723fbd9375a4ab9f65279e57342c616929e269c134ccb42f9e64c6fcc627366ce5b992e3e40230c117854a31c3ff3d49c976186bdfa6cc2c6e9b",
+          "ck1": "ck197telgy6ymg9rzhtkw0sqfp4t5jcsuh2qmfum3arkfma06qmutlmpdgw6x7pzu3lhkfhtf9tnajj08jhxskxz6ffuf5uzdxvksheuexxlnrzwdnvukue9clyqgcvz9u9fgcu8leaf8yhvxrtm7nvctrwnvn7v7xm"
         },
         {
           "index": 2147483647,
           "notePubkey": "5c2d2fdc88f241d7306c328f95601eba1debac9f36670c31c890af42b4a4f108",
           "cp1": "cp1tskjlhyg7fqawvrvx28e2cq7hgw7htylxenscvwgjzh59d9y7yyqte7d6e",
           "noteSecretKey": "0ac7fd63c68b0181ab5f67165206385658e7e33d2b485e17bb025b19145f9ec3",
-          "ownershipSignature": "a07ff0856f42a5abf561ffe2b502d669e67020289c8b8af2545b12379c6fa0e67c681befcdf9897c9a99ff8683f8ef674db10784b5cdf87fd4bb60d78fff6138",
-          "ck1": "ck1tskjlhyg7fqawvrvx28e2cq7hgw7htylxenscvwgjzh59d9y7yy2qllss4h59fdt74sllc44qttxnensyq5fezu27f29ky3hn3h6penudqd7ln0e397f4x0ls6pl3mm8fkcs0p94ehu8l49mvrtcllmp8qsxfg6z"
+          "ownershipSignature": "ac2eb48f85a6b18b2045e4e9245a7a5cb0f65c19a9b19922aca24f70e0e2a8f4a677130c0c65fd9d40383de98aa8a59fc131448e4e873e8e90d97d5fdc2014bb",
+          "ck1": "ck1tskjlhyg7fqawvrvx28e2cq7hgw7htylxenscvwgjzh59d9y7yy2ct4537z6dvvtypz7f6fytfa9ev8ktsv6nvvey2k2ynmsur323a9xwufscrr9lkw5qwpaax923fvlcyc5frjwsulgayxe040acgq5hvnduwaj"
         },
         {
           "index": 2147483648,
           "notePubkey": "5cdd2118ccc7af7709ce26f9f46d5dab285b5a898aef8b9989d123465d895dd4",
           "cp1": "cp1tnwjzxxvc7hhwzwwymulgm2a4v59kk5f3thchxvf6y35vhvfth2qq4v69c",
           "noteSecretKey": "bda928700a7e62834c85edfdf0b7c3e8c79c131555ab8ae55844d145a333f6d7",
-          "ownershipSignature": "416ade04e7022e859b7051de8c057a34326c07242b54be1fadb25904c8a2d055bd8f66b0c04713cf1034e51070ff038c9d070da81588b107ca79778e69ccb305",
-          "ck1": "ck1tnwjzxxvc7hhwzwwymulgm2a4v59kk5f3thchxvf6y35vhvfth2yz6k7qnnsyt59ndc9rh5vq4argvnvqujzk497r7kmykgyez3dq4da3antpsz8z083qd89zpc07quvn5rsm2q43zcs0jnew78xnn9nq5r95akn"
+          "ownershipSignature": "10f36658eb612f51f53bb90075b148a06c9c54ed3c300d610824b2ea9190673cbb329cd752df0530d412892e0d2f144b9273a9372002314c38b7f213ba81ca76",
+          "ck1": "ck1tnwjzxxvc7hhwzwwymulgm2a4v59kk5f3thchxvf6y35vhvfth2ppumxtr4kzt6375amjqr4k9y2qmyu2nkncvqdvyyzfvh2jxgxw09mx2wdw5klq5cdgy5f9cxj79ztjfe6jdeqqgc5cw9h7gfm4qw2wcgyf33q"
         },
         {
           "index": 4294967295,
           "notePubkey": "c8fe18ceac5aa0f6fb670af38d8d2a7a4ef98ba80be5958ecce03a85cc6aef40",
           "cp1": "cp1erlp3n4vt2s0d7m8ptecmrf20f80nzagp0jetrkvuqagtnr2aaqqkdm2q6",
           "noteSecretKey": "643a68037db5ec03145fb6ac583635d2bb30e05d475f688db5346a139282f3b1",
-          "ownershipSignature": "71ab0f5721f427533a6f6c8f18961fd59de1e4a2d5702024434407b1306348289cf373f558534ef55e0e3551081f88dc16ea66d1a37e2bcdbb7539d9bb03b9d2",
-          "ck1": "ck1erlp3n4vt2s0d7m8ptecmrf20f80nzagp0jetrkvuqagtnr2aaq8r2c02uslgf6n8fhkerccjc0at80puj3d2upqy3p5gpa3xp35s2yu7del2kznfm64ur342yyplzxuzm4xd5dr0c4umwm488vmkqae6gkt8srw"
+          "ownershipSignature": "feb4092b678977420f003f95568bf9da8e5996c19f36af3c4e6a5eb8d8d9dbc9b7e617ad874bad24c217c1a7fe1acf114ff8e25b9abeb24585e29819f31a8f59",
+          "ck1": "ck1erlp3n4vt2s0d7m8ptecmrf20f80nzagp0jetrkvuqagtnr2aaq0adqf9dncja6zpuqrl92k30ua4rjejmqe7d40838x5h4cmrvahjdhuct6mp6t45jvy97p5llp4nc3fluwyku6h6eytp0znqvlxx50tymcylmf"
         }
       ]
     },
@@ -193,56 +194,56 @@
           "notePubkey": "5b1f483cd1a9dd69698545d64b7360a03eacd867224063ada94f5cad1e8974da",
           "cp1": "cp1tv05s0x348wkj6v9ghtykumq5ql2ekr8yfqx8tdffaw2685fwndqmf5xk4",
           "noteSecretKey": "8bfe12e5f4a91ad4f158bbfb87c24cc479f3124163aaee1c657183f2b1248fcd",
-          "ownershipSignature": "e3f8034d0f66da601914288d23d344a36ca02af47d698d8177f40755603c3b7e0c65fb7331bfd174c814fe609a671ff78b251fed7ddd4be81a8c75db8dc88358",
-          "ck1": "ck1tv05s0x348wkj6v9ghtykumq5ql2ekr8yfqx8tdffaw2685fwndw87qrf58kdknqry2z3rfr6dz2xm9q9t6866vds9mlgp64vq7rklsvvhahxvdl696vs987vzdxw8lh3vj3lmtam497sx5vwhdcmjyrtq9ur4le"
+          "ownershipSignature": "9f272ed731735addb07652459ca93ae23bd2b0e4d092fef8fbbf913d2620274a3e03c9cd5e23236ad78ed6ec10003094d8cd56304b11d8805b8d41a5e9059c66",
+          "ck1": "ck1tv05s0x348wkj6v9ghtykumq5ql2ekr8yfqx8tdffaw2685fwndf7few6uchxkkakpm9y3vu4yawyw7jkrjdpyh7lramlyfaycszwj37q0yu6h3ryd4d0rkkasgqqvy5mrx4vvztz8vgqkudgxj7jpvuvccmfv9w"
         },
         {
           "index": 1,
           "notePubkey": "363b2e76bfc38eaaeb2ee19ea0c9e5dbf02e26cd9cd7a21576b20a171af4e9ac",
           "cp1": "cp1xcajua4lcw8246ewux02pj09m0czufkdnnt6y9tkkg9pwxh5axkqc76vny",
           "noteSecretKey": "f4d9f5edb0ec36545f05eba9da357b3c1041aaf13ab4508831ffeb39664f6e9f",
-          "ownershipSignature": "94e73c1ae50739974342b797f4f5866d45fa16705923bc867465ceadbcca8bce57458b52898244a2b105c13386b6cf807ad2d3c03f52a6ec8fcdc3d5b1457177",
-          "ck1": "ck1xcajua4lcw8246ewux02pj09m0czufkdnnt6y9tkkg9pwxh5axkffeeurtjswwvhgdpt09l57krx6306zec9jgause6xtn4dhn9ghnjhgk949zvzgj3tzpwpxwrtdnuq0tfd8spl22nwer7dc02mz3t3wug73cpj"
+          "ownershipSignature": "efd33573760e4bb4a2d2e52851dfee5fea8107098ba2424bae5173876e21bb4744b54ff0797af15f8ea2e0a3d5af5311bd9d013f43392102da0b0832139c4a6e",
+          "ck1": "ck1xcajua4lcw8246ewux02pj09m0czufkdnnt6y9tkkg9pwxh5axkwl5e4wdmquja55tfw22z3mlh9l65pquychgjzfwh9zuu8dcsmk36yk48lq7t6790caghq502675c3hkwsz06r8yss9kstpqep88z2dcdkkmx3"
         },
         {
           "index": 2,
           "notePubkey": "93032e763ed5f04fbd768ff57842c23e4ac65dbb40bb653aa12c257d6afd204b",
           "cp1": "cp1jvpjua376hcyl0tk3l6hsskz8e9vvhdmgzak2w4p9sjh66hayp9sqrecm0",
           "noteSecretKey": "53c71bf03590bfc60410ea1f5f10adb41e797f73aa868a9f0224dd5628734a9b",
-          "ownershipSignature": "bc84b68bc79d5375770fce6381e9cb79a9b35a5c0109d1f69103a65e0def7a9a8c3c77cb4322342c939405346ff170fc40fb1ffb1e060950f8fe53d9c075a8d4",
-          "ck1": "ck1jvpjua376hcyl0tk3l6hsskz8e9vvhdmgzak2w4p9sjh66hayp9mep9k30re65m4wu8uucupa89hn2dntfwqzzw376gs8fj7phhh4x5v83muksezxskf89q9x3hlzu8ugra3l7c7qcy4p78720vuqadg6s8ffw40"
+          "ownershipSignature": "97ddd57762ffa4602542ed4bbdcccbac0a80f3574be1d87b520088d33a9aebf143478947e31f1c534c04a028da3f51f29a7e615404aa62ded1739c4d3a0c80f2",
+          "ck1": "ck1jvpjua376hcyl0tk3l6hsskz8e9vvhdmgzak2w4p9sjh66hayp9e0hw4wa30lfrqy4pw6jaaen96cz5q7dt5hcwc0dfqpzxn82dwhu2rg7y50cclr3f5cp9q9rdr750jnflxz4qy4f3da5tnn3xn5ryq7g42xn82"
         },
         {
           "index": 1000,
           "notePubkey": "3f31c20cf6a8c098eb352f6ad5fe1899cec0117aba538c28b5b22300596dda91",
           "cp1": "cp18ucuyr8k4rqf36e49a4dtlscn88vqyt6hffcc294kg3sqktdm2gstfxwlk",
           "noteSecretKey": "cbc0c8140f2123a96ceae88aea28cd94d91fa7ab2d87c0e876dfadd212c66211",
-          "ownershipSignature": "4a4e61f46e2a103dfa1f38b75bdf4f20a8928820f05259ca84660119ea99f0c08162f58d33905f9bd970a8e8f88a5775222bc13fb7ff1aaa2c3179ab8ea81211",
-          "ck1": "ck18ucuyr8k4rqf36e49a4dtlscn88vqyt6hffcc294kg3sqktdm2g55nnp73hz5ypalg0n3d6mma8jp2yj3qs0q5jee2zxvqgea2vlpsypvt6c6vust7daju9garug54m4yg4uz0ahlud25tp30x4ca2qjzyt0ly2w"
+          "ownershipSignature": "36b343528fffb3b2a352fdb3082bf2378dbb695afd6f949c517522336232640ae08b0c17cb20662d452430fd093434766d0726176bec0c5b180214aa74fc4af5",
+          "ck1": "ck18ucuyr8k4rqf36e49a4dtlscn88vqyt6hffcc294kg3sqktdm2gndv6r228llvaj5df0mvcg90er0rdmd9d06mu5n3gh2g3nvgexgzhq3vxp0jeqvck52fpsl5yngdrkd5rjv9mtasx9kxqzzj48flz2759rpryw"
         },
         {
           "index": 2147483647,
           "notePubkey": "bcfd0498b16da7ce1f115e8b99d66a241c223591e9709ce6c1a35e7f31047c8b",
           "cp1": "cp1hn7sfx93dknuu8c3t69en4n2yswzydv3a9cfeekp5d087vgy0j9snkxvxd",
           "noteSecretKey": "829dc129eb3b2fd713ef13626d69ea79e7b950cd2eba5af4c2cc5d9a38c3de27",
-          "ownershipSignature": "88c01c5cfcc3a10ba7864f164290eaea7e6f2c6e0c3d09f319277bf87eaa51493d8d1e3e2395f8a67f96057fce4aa7ab600226801e139c32af7ae717a6ff0b80",
-          "ck1": "ck1hn7sfx93dknuu8c3t69en4n2yswzydv3a9cfeekp5d087vgy0j9c3squtn7v8ggt57ry79jzjr4w5ln093hqc0gf7vvjw7lc0649zjfa350rugu4lzn8l9s90l8y4fatvqpzdqq7zwwr9tm6uut6dlctsq45k2e8"
+          "ownershipSignature": "1ff91557c5e77d6c5a9daf10b376c24562d2337d85277adaa5af6da3baefbb6c2bb63eac6993ecdd275b62166e4646ae4cd12d3b73a4ed1657fb986e5628bf0b",
+          "ck1": "ck1hn7sfx93dknuu8c3t69en4n2yswzydv3a9cfeekp5d087vgy0j93l7g42lz7wltvt2w67y9nwmpy2ckjxd7c2fm6m2j67mdrhthmkmptkcl2c6vnanwjwkmzzehyv34wfngj6wmn5nk3v4lmnph9v29lpvgeu429"
         },
         {
           "index": 2147483648,
           "notePubkey": "b5ca316fd6f7cb522b3c0866df32f72ed4f2c2364c55536eec552d4963937be9",
           "cp1": "cp1kh9rzm7k7l94y2euppnd7vhh9m209s3kf324xmhv25k5jcun005s3znr7x",
           "noteSecretKey": "a9c23b077abc0a992213800d0a0d55dc6ffeb9f4a1f83582799715627c8ca76c",
-          "ownershipSignature": "708cb1cba77021ee0dd3a907aa98009cbec6b80d7a779725607369b105a3a9d3dfde377649a1c3b520965f672a5427b433bd9e4e52cd824ea0b11d39d9de1efa",
-          "ck1": "ck1kh9rzm7k7l94y2euppnd7vhh9m209s3kf324xmhv25k5jcun005hpr93ewnhqg0wphf6jpa2nqqfe0kxhqxh5auhy4s8x6d3qk36n57lmcmhvjdpcw6jp9jlvu49gfa5xw7eunjjekpyag93r5uanhs7lgu54zyz"
+          "ownershipSignature": "41bc54cc1c94c21a224d1f37868132417020bd8d9538a22399e79c929aa541355ec373395b21db0382c343879459cda349470e1844b001beec9f377c2a52aa31",
+          "ck1": "ck1kh9rzm7k7l94y2euppnd7vhh9m209s3kf324xmhv25k5jcun0055r0z5eswffss6yfx37duxsyeyzupqhkxe2w9zywv708yjn2j5zd27cdenjkepmvpc9s6rs729nndrf9rsuxzykqqmamylxa7z5542xyv8xsll"
         },
         {
           "index": 4294967295,
           "notePubkey": "881946499ffb191818aafdba77f466ec42abb9ad0a92fb08d8b0f154cbd59cbd",
           "cp1": "cp13qv5vjvllvv3sx92lka80arxa3p2hwddp2f0kzxckrc4fj74nj7sfe7crh",
           "noteSecretKey": "27aaeece9e4ae4d021527956c99aa6b08aa55f4ba505f4ab02863289cbc29810",
-          "ownershipSignature": "5d9301ba9191151bd4092ee8cfdcdfb4eb7212f01e8cf1a72cbeaabd6a0dae297c13aac630a10b72f4e33ac99d0553cd3b629073bf882bb2804dd5ce21c9c0b7",
-          "ck1": "ck13qv5vjvllvv3sx92lka80arxa3p2hwddp2f0kzxckrc4fj74nj74mycph2gez9gm6syja6x0mn0mf6mjztcpar835ukta24adgx6u2tuzw4vvv9ppde0fce6exws257d8d3fqual3q4m9qzd6h8zrjwqku2wnx6v"
+          "ownershipSignature": "82fc5b9e6f803766f2ff548da1342b4d924661dbabbe93b1e1f16ecc63cb21487597a762df8643caee20dc8d2e7d674a371323ef2dc5c1843ff95f6e9cb1f07b",
+          "ck1": "ck13qv5vjvllvv3sx92lka80arxa3p2hwddp2f0kzxckrc4fj74nj7c9lzmnehcqdmx7tl4frdpxs45myjxv8d6h05nk8slzmkvv09jzjr4j7nk9huxg09wugxu35h86e62xufj8medchqcg0letahfev0s0vqmc3v0"
         }
       ]
     },
@@ -268,56 +269,56 @@
           "notePubkey": "875576bfc702fc8c5181d7c4fd26c15fa3208be72e432f884a184e47c53e23b4",
           "cp1": "cp1sa2hd078qt7gc5vp6lz06fkpt73jpzl89epjlzz2rp8y03f7yw6qxvs5qq",
           "noteSecretKey": "65b3559663b9003638bd6d6a9e58c035269f4fb7341f2316dbd2197050350af7",
-          "ownershipSignature": "d553d758b8e461d20bc8630bce26984b50065732c73a64b0c28bb65c31aac53cb11bc76ebd34efd5a61a798ba4da1b62cd71935027d202a19e43f56f01712bc4",
-          "ck1": "ck1sa2hd078qt7gc5vp6lz06fkpt73jpzl89epjlzz2rp8y03f7yw6d257htzuwgcwjp0yxxz7wy6vyk5qx2uevwwnykrpghdjuxx4v2093r0rka0f5al26vxne3wjd5xmze4cex5p86gp2r8jr74hszuftcsj4p9lu"
+          "ownershipSignature": "a52396d9a59eefe38f2f5a457cdb77806dcbdd4c162df53f744a5d48ef109dce293f1aa9850e20c03ce5b5603694c12175685465490e9f9cbe86a09eaf84a832",
+          "ck1": "ck1sa2hd078qt7gc5vp6lz06fkpt73jpzl89epjlzz2rp8y03f7yw622gukmxjeamlr3uh453tumdmcqmwtm4xpvt048a6y5h2gaugfmn3f8ud2npgwyrqreed4vqmffsfpw459ge2fp60ee05x5z02lp9gxghtmx2c"
         },
         {
           "index": 1,
           "notePubkey": "816e575f5408140366b94ef375f97b3ac603973b946fa3d6e74fde51ce078ddb",
           "cp1": "cp1s9h9wh65pq2qxe4efmeht7tm8trq89emj3h684h8fl09rns83hds5fxp8r",
           "noteSecretKey": "98b75c0a05e8f179ad8cdafbc462cf54e83fcd2c867c428031ab2fc116f97341",
-          "ownershipSignature": "17014288503a5da5149684871c6d04c13b2540ba5ae9d8eed2f0c4f0672e989b8579ca367bee5eed0ef5f62e25af0e207841f18dd9594266d6bdd402175492f8",
-          "ck1": "ck1s9h9wh65pq2qxe4efmeht7tm8trq89emj3h684h8fl09rns83hd3wq2z3pgr5hd9zjtgfpcud5zvzwe9gza946wcamf0p38svuhf3xu9089rv7lwtmksaa0k9cj67r3q0pqlrrwet9pxd44a6sppw4yjlqkg24g8"
+          "ownershipSignature": "e312c3f8bd7ed92c71e072b7ba862693811fe4cba5dc295979a2d744e473e77aa91e466a66686e1188c4b207124b4f25731f1b6537d3ce3ccbc8e9b786a11330",
+          "ck1": "ck1s9h9wh65pq2qxe4efmeht7tm8trq89emj3h684h8fl09rns83hd7xykrlz7hakfvw8s89da6scnf8qglun96thpft9u6946yu3e7w74frerx5engdcgc339jqufykne9wv03kefh608rej7gaxmcdggnxq2n4ezq"
         },
         {
           "index": 2,
           "notePubkey": "c6dd10a53c1b0fa0b157a062c4706b4348847b21fe1005d6fb4add339a9c3cf6",
           "cp1": "cp1cmw3pffurv86pv2h5p3vgurtgdygg7eplcgqt4hmftwn8x5u8nmq88ue0c",
           "noteSecretKey": "98edfbfe12df3c424770c02aeeac9ce8c841b17827a0e729c74364a4ea8c4342",
-          "ownershipSignature": "9cccbbe125dbb88d22e1e76d57de82a6b549f406f5dd768798d60e8df1c3dfe3a5d6b1aaefdb577a088c1d11e6aa0fc6620cb855b34ed55b99654fbcc3e9faca",
-          "ck1": "ck1cmw3pffurv86pv2h5p3vgurtgdygg7eplcgqt4hmftwn8x5u8nmfen9muyjahwydyts7wm2hm6p2dd2f7sr0thtks7vdvr5d78palca966c64m7m2aaq3rqaz8n25r7xvgxts4dnfm24hxt9f77v8606eg47znlj"
+          "ownershipSignature": "e3d32f3bbca335b01d859f0b1fd7d41e78844277d78fac2500bb35dd23bc25b883e11d3595d3d410d63cddfc587d2c8499ba508d69f16fc936dde2b862e8e2b6",
+          "ck1": "ck1cmw3pffurv86pv2h5p3vgurtgdygg7eplcgqt4hmftwn8x5u8nmw85e08w72xddsrkze7zcl6l2pu7yygfma0ravy5qtkdwayw7ztwyruywnt9wn6sgdv0xal3v86tyynxa9prtf79hujdkau2ux968zkcc0hmy9"
         },
         {
           "index": 1000,
           "notePubkey": "d624be2b89484dbc196a433372b03166837ef75c040312bae27e1012a3c5729a",
           "cp1": "cp16cjtu2uffpxmcxt2gveh9vp3v6phaa6uqsp39whz0cgp9g79w2dq2l6ep6",
           "noteSecretKey": "3d09315879724ee07b1aedb8688778d77a53270cb945a0bf8bd08b0c8ea50ac3",
-          "ownershipSignature": "eb76269ac77dea37c43169efd7453d3e4f07991a4ca2e8fb5feb121e92974a61cc99cc4dbed90d9456774bc19019c860bf483d0bc2ca372c9be33c9d00f8e686",
-          "ck1": "ck16cjtu2uffpxmcxt2gveh9vp3v6phaa6uqsp39whz0cgp9g79w2dwka3xntrhm63hcscknm7hg57nunc8nydyeghgld07kys7j2t55cwvn8xym0kepk29va6tcxgpnjrqhayr6z7zegmjexlr8jwsp78xsc3kwxpd"
+          "ownershipSignature": "f27f1103ac2759557280810ef5c303482e3e5418312ca73ba2d79c5faba4b23918f92a98a570e3735b7220d9628aa9abec12e3827fcb74d250af010cc075733d",
+          "ck1": "ck16cjtu2uffpxmcxt2gveh9vp3v6phaa6uqsp39whz0cgp9g79w2d0ylc3qwkzwk24w2qgzrh4cvp5st372svrzt988w3d08zl4wjtywgcly4f3ftsude4ku3qm93g42dtasfw8qnled6dy590qyxvqatn85nkrha3"
         },
         {
           "index": 2147483647,
           "notePubkey": "d7abbf83d30005b67e033b275d10532f428fd7dbbd97604ab1f19559cac0b84d",
           "cp1": "cp1674mlq7nqqzmvlsr8vn46yzn9apgl47mhktkqj437x24njkqhpxs8lejxk",
           "noteSecretKey": "eb3646de93bea75e530f169950bfc1e328420651827465ba5cbc5dda73394923",
-          "ownershipSignature": "2d10f43a105f848dd0704a46b84d27bb27afc9b6492ff3000e6843d762f2bb0e1277c20b9b9727505f43615fe3764432cb46b92fb927bd0f357c2fdfd4ad2361",
-          "ck1": "ck1674mlq7nqqzmvlsr8vn46yzn9apgl47mhktkqj437x24njkqhpxj6y858gg9lpyd6pcy534cf5nmkfa0exmyjtlnqq8xss7hvtetkrsjwlpqhxuhyag97smptl3hv3pjedrtjtaey77s7dtu9l0aftfrvydnfq3v"
+          "ownershipSignature": "fc07c057b097577d418ec56d9e4f09358aeb16bb27cf74a7d1d26ad8d4c0e1f8604998efd4875b8414300868286ae3d5f4e14f0501d8f2dd8b9ffb1c121ae2bb",
+          "ck1": "ck1674mlq7nqqzmvlsr8vn46yzn9apgl47mhktkqj437x24njkqhpxlcp7q27cfw4magx8v2mv7fuyntzhtz6aj0nm55lgay6kc6nqwr7rqfxvwl4y8twzpgvqgdq5x4c747ns57pgpmredmzullvwpyxhzhv02y9g5"
         },
         {
           "index": 2147483648,
           "notePubkey": "b07f4e7490a9d65bbe825f8925a247c01e6acb8a9ed0e04b5ad577560c76566d",
           "cp1": "cp1kpl5uays48t9h05zt7yjtgj8cq0x4ju2nmgwqj6664m4vrrk2eksu8k5k6",
           "noteSecretKey": "c2a3340d8a034229ff5be55c2cf21861d3eb85955e773245df1e85f9b07a91af",
-          "ownershipSignature": "c218f421eb04eab012a94b1a5c8de602abe0095e7b730b53c3dc07bc04ea6ac313447b2d2b364f247f74cccdbcde60a829aff3540e7d3fd2b0b06a14bd72e827",
-          "ck1": "ck1kpl5uays48t9h05zt7yjtgj8cq0x4ju2nmgwqj6664m4vrrk2ekuyx85y84sf64sz255kxju3hnq92lqp908kuct20pacpauqn4x4scng3aj62ekfuj87axvek7duc9g9xhlx4qw05la9v9sdg2t6uhgyuzd8hr3"
+          "ownershipSignature": "a12a03305364b00e030b0fb3bc3af8eddb4acb0be80505520b20a872bc6467b834c9a9275557d0e77ef2b8c7fbcd19121e4b07d5eb489a136be30543841631eb",
+          "ck1": "ck1kpl5uays48t9h05zt7yjtgj8cq0x4ju2nmgwqj6664m4vrrk2ek6z2srxpfkfvqwqv9slvau8tuwmk62ev97spg92g9jp2rjh3jx0wp5ex5jw42h6rnhau4cclau6xgjre9s040tfzdpx6lrq4pcg933avw9f2zz"
         },
         {
           "index": 4294967295,
           "notePubkey": "5471a39afe5452a132fa8d27404456e4c883a8cf2c9bf3f2cb79575ec74fd357",
           "cp1": "cp123c68xh723f2zvh635n5q3zkunyg82x09jdl8ukt09t4a3606dts57mqnq",
           "noteSecretKey": "e65c044e42c25f5cea76a367f2f9034a946f2f911f486b682508f34aa861209d",
-          "ownershipSignature": "fb8dc4f6ac741bd04613462f2551f0356be9a123ae25f7bcd0722ee7205c0ce45f087209ede623547b4a194dcfb83659c245dc89fc58f9f720720c9a41f63953",
-          "ck1": "ck123c68xh723f2zvh635n5q3zkunyg82x09jdl8ukt09t4a3606dtlhrwy76k8gx7sgcf5vte928cr26lf5y36uf0hhng8yth8ypwqeezlppeqnm0xyd28kjsefh8msdjecfzaez0utrulwgrjpjdyra3e2vcwzs20"
+          "ownershipSignature": "26c4c96a9c2576a54e567b48afbf880ab9a0bbf2093fe400066d202381e44aa32aeccfbc8d164049c89cda42f5a378d1f7959efd53367e9ce32df39fd20de5f2",
+          "ck1": "ck123c68xh723f2zvh635n5q3zkunyg82x09jdl8ukt09t4a3606dtjd3xfd2wz2a49fet8kj90h7yq4wdqh0eqj0lyqqrx6gprs8jy4ge2an8mergkgpyu38x6gt66x7x3772eal2nxelfeced7w0ayr097gkkjsdw"
         }
       ]
     },
@@ -343,56 +344,56 @@
           "notePubkey": "05950672290d9374d8e02b860c494a8407fa7e5917626ff4d983897b69acd5b2",
           "cp1": "cp1qk2svu3fpkfhfk8q9wrqcj22ssrl5ljeza3xlaxeswyhk6dv6keqf9h6lv",
           "noteSecretKey": "6f9a9325e6f338fcd67987936dd84b908263878c10f858af1d7143cf0844e460",
-          "ownershipSignature": "0072531552d2d5bb70564750fe1d7fb09b478bad02cf562529f30fc19d15a9a9b9a6ef192b74a0bfd24bd5b75fa398796496c273b8efc34a91772c4c8c8b985b",
-          "ck1": "ck1qk2svu3fpkfhfk8q9wrqcj22ssrl5ljeza3xlaxeswyhk6dv6keqqujnz4fd94dmwptyw587r4lmpx683wks9n6ky55lxr7pn526n2de5mh3j2m55zlayj74ka068xrevjtvyuacalp54yth93xgezuctvxlj3wg"
+          "ownershipSignature": "d8da53ea15e66d9c652ec936b4c78d8dafeae0300c0d6182b63f3af6c85d6b4676fc1d7dcf2502906e2d5cca2a1c686574a77c770ec2895b0654f21333be6ae1",
+          "ck1": "ck1qk2svu3fpkfhfk8q9wrqcj22ssrl5ljeza3xlaxeswyhk6dv6ked3kjnag27vmvuv5hvjd45c7xcmtl2uqcqcrtps2mr7whkepwkk3nklswhmne9q2gxut2ueg4pc6r9wjnhcacwc2y4kpj57gfn80n2uyr9tpk2"
         },
         {
           "index": 1,
           "notePubkey": "239e376d932f023ecbd002b6bb4ae5cdcbf66cc98e022318acd40acb6b4ce331",
           "cp1": "cp1yw0rwmvn9upraj7sq2mtkjh9eh9lvmxf3cpzxx9v6s9vk66vuvcsp43lgs",
           "noteSecretKey": "4f1b6c8c2466ed0e16e613b990e73d1b55fe8096da92562c11038f8d109b5e83",
-          "ownershipSignature": "a99ee1a2833701e287630781f5ed739cadf0e3c24cee0908f2365934bff5702431a783ac145683682b6c54fc736c46742ac83fe3eda89311d563475f52e64ed7",
-          "ck1": "ck1yw0rwmvn9upraj7sq2mtkjh9eh9lvmxf3cpzxx9v6s9vk66vuvc6n8hp52pnwq0zsa3s0q04a4eeet0su0pyemsfprervkf5hl6hqfp357p6c9zksd5zkmz5l3ekc3n59tyrlcld4zf3r4trga049ejw6uavd78w"
+          "ownershipSignature": "e5b4c97e47b557de63651b59709072c01a53f04c5fa9d65c1752dde25a08252cdb84ee08ffc0f64dddeea1d54d77d03a2e76916bb9244f8799e83b0c8804c93b",
+          "ck1": "ck1yw0rwmvn9upraj7sq2mtkjh9eh9lvmxf3cpzxx9v6s9vk66vuvc7tdxf0erm2477vdj3kktsjpevqxjn7px9l2wktst49h0ztgyz2txmsnhq3l7q7examm4p64xh05p69emfz6aey38c0x0g8vxgspxf8vtcgyzx"
         },
         {
           "index": 2,
           "notePubkey": "41d41bc4bd4d171e7772e3ac76fa06fcd03e713ec49c62d276003dd36164e23b",
           "cp1": "cp1g82ph39af5t3uamjuwk8d7sxlngruuf7cjwx95nkqq7axctyugas0g8awf",
           "noteSecretKey": "eff45be20b90660bb4c6ce81b764425051f11469f10c8a582f6526a85be96637",
-          "ownershipSignature": "44b89e7f97e490eb6e7fe44be41471bf580d51cb3e0ddf6a712d197b71a69d844e1a8626affc67abf9d7ab9c48c248d1bd038360c8fb839b700cfa5506913f43",
-          "ck1": "ck1g82ph39af5t3uamjuwk8d7sxlngruuf7cjwx95nkqq7axctyuga5fwy707t7fy8tdel7gjlyz3cm7kqd289nurwldfcj6xtmwxnfmpzwr2rzdtluv74ln4atn3yvyjx3h5pcxcxglwpekuqvlf2sdyflgvt8kna4"
+          "ownershipSignature": "7e6a553ce36220cf347d9bf846fb23a05a549480683c1680623ebfe27c2a289823e408fa8c2745a9c3ddf57d624f0c527064603c78347a75c97b820ae0f68517",
+          "ck1": "ck1g82ph39af5t3uamjuwk8d7sxlngruuf7cjwx95nkqq7axctyugahu6j48n3kygx0x37eh7zxlv36qkj5jjqxs0qksp3ra0lz0s4z3xprusy04rp8gk5u8h04043y7rzjwpjxq0rcx3a8tjtmsg9wpa59zu0awzmv"
         },
         {
           "index": 1000,
           "notePubkey": "c2b0508ca9121ba15257feea169e2c31c543b539e1aa8235b7f16b44ecfb0c3d",
           "cp1": "cp1c2c9pr9fzgd6z5jhlm4pd83vx8z58dfeux4gyddh7945fm8mps7s055jts",
           "noteSecretKey": "223b80bc6164e96bbdb8db17126a71bad9cf691b2cc80a2d92d5fa27ebf3f1f3",
-          "ownershipSignature": "b1ecdc69d0dbc209cc64cf2f9498a1b90d8f894d3a7b5d035d8e0228f524f2a3a72c38fa0f3ad2aa499eec559dfc92f0bbaeccb3fab24a5706127aa91a9b86e8",
-          "ck1": "ck1c2c9pr9fzgd6z5jhlm4pd83vx8z58dfeux4gyddh7945fm8mps7mrmxud8gdhssfe3jv7tu5nzsmjrv039xn576aqdwcuq3g75j09ga89su05re6624yn8hv2kwleyhshwhvevl6kf99wpsj02534xuxaqc4d4mr"
+          "ownershipSignature": "5bb77b40b80926be6b82b5f9514daa6ee47f6bf603a29ea48b5828caa432a50426905b3cb25c02ae06e94569ed6a71d73a71d8c6262e5d2ce1649e3699e06e66",
+          "ck1": "ck1c2c9pr9fzgd6z5jhlm4pd83vx8z58dfeux4gyddh7945fm8mps74hdmmgzuqjf47dwptt723fk4xaerld0mq8g575j94s2x25se22ppxjpdnevjuq2hqd629d8kk5uwh8fca333x9ewjectyncmfncrwvcehdhhe"
         },
         {
           "index": 2147483647,
           "notePubkey": "9876e769a068f1fbfb784dd7d0c942cdef095228212fb57e0657a88f006472e3",
           "cp1": "cp1npmww6dqdrclh7mcfhtapj2zehhsj53gyyhm2lsx275g7qrywt3s85h527",
           "noteSecretKey": "957356314d74639a2b00a31c45d554286997c5b605b9263a889d9cc4302fc93c",
-          "ownershipSignature": "fadb7dddcf700bf56b2373b46709798d0dbc749a4f4d59ba92548d3967f39e68d5ef75e52751ba1a14f0ad1bdd6f62d8d5cebd079d7194ff3d9a669b5a6e68ad",
-          "ck1": "ck1npmww6dqdrclh7mcfhtapj2zehhsj53gyyhm2lsx275g7qrywt3l4kmamh8hqzl4dv3h8dr8p9uc6rduwjdy7n2eh2f9frfevleeu6x4aa672f63hgdpfu9dr0wk7ckc6h8t6puawx2070v6v6d45mng45efjp8p"
+          "ownershipSignature": "640b5df33653b3df6b34a3fed97932a275d6ff32db607ebcae77e3df99a8fcc94f4d2ebbfe9f11be019ece24d4868bdd356b1cec871e7ef7ca48b34198ae4a6b",
+          "ck1": "ck1npmww6dqdrclh7mcfhtapj2zehhsj53gyyhm2lsx275g7qrywt3kgz6a7vm98v7ldv628lke0ye2yawkluedkcr7hjh80c7lnx50ej20f5hthl5lzxlqr8kwyn2gdz7ax443emy8rel00jjgkdqe3tj2dvgtx6we"
         },
         {
           "index": 2147483648,
           "notePubkey": "21d05d283166205e349a029785ec020e3f5c3f4f12c22ab946e331b8bf5ebe14",
           "cp1": "cp1y8g962p3vcs9udy6q2tctmqzpcl4c060ztpz4w2xuvcm3067hc2qqqxjc8",
           "noteSecretKey": "41c55647f714e81af30e24f1a553928ee444f4f913b258f8ccb200623ecb36d9",
-          "ownershipSignature": "76d45d9c930337918b6c347178c0c1bca8d5c037715dab51c4ffd9ec4c97dcd8bbc4d4b2a3b003b1063c2eba85cee847a6bd1ecbb665ed800fb5136eb00e03d1",
-          "ck1": "ck1y8g962p3vcs9udy6q2tctmqzpcl4c060ztpz4w2xuvcm3067hc28d4zanjfsxdu33dkrgutccrqme2x4cqmhzhdt28z0lk0vfjtaek9mcn2t9gasqwcsv0pwh2zua6z85673ajakvhkcqra4zdhtqrsr6ya3ymsy"
+          "ownershipSignature": "0f3da05175598176ce3d256d69ce0cfaf5c79bf05d8838d4d3a551d7d154500f2c72bfb3f12529c29f78e4decc21cbafcc3caaff1162808f36640ec8fe0769b1",
+          "ck1": "ck1y8g962p3vcs9udy6q2tctmqzpcl4c060ztpz4w2xuvcm3067hc2q70dq2964nqtkec7j2mtfecx04aw8n0c9mzpc6nf625wh6929qrevw2lm8uf998pf778ymmxzrja0es724lc3v2qg7dnypmy0upmfkyn903py"
         },
         {
           "index": 4294967295,
           "notePubkey": "2e288c8f4b408bc82a17fcacfc092ec982ea6f8ce6f130f2c8426119aca9ee9e",
           "cp1": "cp19c5ger6tgz9us2shljk0czfwexpw5muvumcnpukggfs3nt9fa60qxdpvgy",
           "noteSecretKey": "86df284dcd2a6b50672bf9232820c1c4cfd96388ff70bee45dbea404ccf46169",
-          "ownershipSignature": "1b96d9e9903182723f4d0df0b25cc1b8e8140e6d7c8c1ab10d3ff5645ad3c271a2159ffe8700000c831da845fc659c1cb396aeab779455c9b8daa7ed48774a4f",
-          "ck1": "ck19c5ger6tgz9us2shljk0czfwexpw5muvumcnpukggfs3nt9fa60ph9keaxgrrqnj8axsmu9jtnqm36q5pekherq6kyxnlatyttfuyudzzk0lapcqqqxgx8dggh7xt8qukwt2a2mhj32unwx65lk5sa62fuzhqpse"
+          "ownershipSignature": "e8d9800e4cd53e6424645e5f7ab56916c72ed91ad973f6a3f3ad467f5056df13bfb57024edcd9905f07eeb88aa155943ef0d1e122064b378844f8920df83f297",
+          "ck1": "ck19c5ger6tgz9us2shljk0czfwexpw5muvumcnpukggfs3nt9fa60w3kvqpexd20nyy3j9uhm6k453d3ewmyddjulk50e663nl2ptd7yalk4czfmwdnyzlqlht3z4p2k2raux3uy3qvjeh3pz03ysdlqljju6lgaff"
         }
       ]
     },
@@ -418,56 +419,56 @@
           "notePubkey": "e10932ea7796d0f28deb03a64718dd3f5b7079ae5c52348408420dcc9673e58e",
           "cp1": "cp1uyyn96nhjmg09r0tqwnywxxa8adhq7dwt3frfpqgggxue9nnuk8qrf9uem",
           "noteSecretKey": "96f38ca3c2cf1a166d4a420a9ffacd203326a4001a2c74a9321b9f939221c531",
-          "ownershipSignature": "a85aaf2c0e5b610d2231c9f8e224ba847a7ad8620c3e2f19106e2fcd10d9ee72f0501c3cc2091e6fd0d9a1e37ab2a754f74eb6413dca0d0b4d5a937633548574",
-          "ck1": "ck1uyyn96nhjmg09r0tqwnywxxa8adhq7dwt3frfpqgggxue9nnuk82sk409s89kcgdygcun78zyjagg7n6mp3qc030rygxut7dzrv7uuhs2qwressfrehapkdpudat9f657a8tvsfaegxskn26jdmrx4y9wsguaxjs"
+          "ownershipSignature": "4295bcf6fccc4ddb63d4e4d8c94dedbaff4568a3b177be2865a471e875e6c52a3c6bf2ec92142f21a138e0a0e5f7d6ffccb0360a12fccef2bf31ce591331156e",
+          "ck1": "ck1uyyn96nhjmg09r0tqwnywxxa8adhq7dwt3frfpqgggxue9nnuk8y99du7m7vcnwmv02wfkxffhkm4l69dz3mzaa79pj6gu0gwhnv223ud0eweys59us6zw8q5rjl04hlejcrvzsjln8090e3eev3xvg4dc9c292g"
         },
         {
           "index": 1,
           "notePubkey": "6c78e2072455b3a0c0e52903dab5324f74b1d3c3b92147bd5ecdf4faa440186d",
           "cp1": "cp1d3uwypey2ke6ps899ypa4dfjfa6tr57rhys50027eh604fzqrpksj79rmy",
           "noteSecretKey": "ede070d13b4590f2c4f98f0fa72a9681721943fde53582a6b4f843236dc55dc2",
-          "ownershipSignature": "5e30455cba61388b1af3e6329659f9d377cc0dd2b8215838ba70dfd8c0c0ddf137beb81a51c158d9953d30489301f6631e50dfa83ab5c926425125027f93176d",
-          "ck1": "ck1d3uwypey2ke6ps899ypa4dfjfa6tr57rhys50027eh604fzqrpk4uvz9tjaxzwytrte7vv5kt8uaxa7vphftsg2c8za8ph7ccrqdmufhh6up55wptrve20fsfzfsranrregdl2p6khyjvsj3y5p8lychd5zxqr2m"
+          "ownershipSignature": "65a6719331097f92cc888315ba6f4d26bc77b0ca27c1f5b37a4ded043c0acd5eb219b452b6bbf1a6c40904f2218a6b98fb2d76f830bc53ad6e91ac40dfc8113c",
+          "ck1": "ck1d3uwypey2ke6ps899ypa4dfjfa6tr57rhys50027eh604fzqrpkktfn3jvcsjlujejygx9d6daxjd0rhkr9z0s04kdaymmgy8s9v6h4jrx699d4m7xnvgzgy7gsc56uclvkhd7psh3f66m5343qdljq38sqv89dq"
         },
         {
           "index": 2,
           "notePubkey": "ba3c45375140dbb4b726ff352fbd7f9b2a81d22f28c4424349ec9eea23336091",
           "cp1": "cp1hg7y2d63grdmfdexlu6jl0tlnv4gr5309rzyys6faj0w5genvzgsygxyed",
           "noteSecretKey": "e01f025ee069a28b7070f073ca50e4c572d6297c78987d233cae38600843948b",
-          "ownershipSignature": "80ededc8367d005429211be3dd1f35e431c23e8ea142195f5a3813c6b08ad9aa27cd97c1520f59b9b811a1b2333fb8985f141984263293137c3152831ae3bd24",
-          "ck1": "ck1hg7y2d63grdmfdexlu6jl0tlnv4gr5309rzyys6faj0w5genvzgcpm0deqm86qz59ys3hc7aru67gvwz8682zssetadrsy7xkz9dn238ektuz5s0txumsydpkgenlwyctu2pnppxx2f3xlp322p34caaysvvpnur"
+          "ownershipSignature": "f668349ac3eb77844198b03919031c1e5a932f193cbf3380dc19b4d38e02f36547c0026e99d77ba45220ab76c19279a5a4a7c03e83bf0faac4b76b025025b269",
+          "ck1": "ck1hg7y2d63grdmfdexlu6jl0tlnv4gr5309rzyys6faj0w5genvzglv6p5ntp7kauygxvtqwgeqvwpuk5n9uvne0ensrwpndxn3cp0xe28cqpxaxwh0wj9yg9twmqey7d95jnuq05rhu86439hdvp9qfdjdyrgq6r8"
         },
         {
           "index": 1000,
           "notePubkey": "991367b57da7cbd897ca0fe9a4215c4ef2dc8d9dd097ccb66833648f6f34334c",
           "cp1": "cp1nyfk0dta5l9a3972pl56gg2ufmederva6ztuedngxdjg7me5xdxq4evpzr",
           "noteSecretKey": "489b61810962486b73596b2104fd2b10a43fca13cadffa961a4ea4de9788d128",
-          "ownershipSignature": "e2a5762208e066921095894c9c81e4984a809748f3dc860844c33ef78b22b7f53f0bb3dba50db81098dbd9d584e1fb04096a6d96f11a8100a6acd80d08c7b70c",
-          "ck1": "ck1nyfk0dta5l9a3972pl56gg2ufmederva6ztuedngxdjg7me5xdxw9ftkygywqe5jzz2cjnyus8jfsj5qjay08hyxppzvx0hh3v3t0aflpweahfgdhqgf3k7e6kzwr7cyp94xm9h3r2qspf4vmqxs33ahpsvgq848"
+          "ownershipSignature": "a5e0c184d03d8fcc1310745060b93d028ee53a2a99ce8f86d41c31ed7fc1b6e1347a4c37bbda416617c8176f11a9e6daf1cf1bc25945eec10a0b1a3eec9c34a6",
+          "ck1": "ck1nyfk0dta5l9a3972pl56gg2ufmederva6ztuedngxdjg7me5xdx2tcxpsngrmr7vzvg8g5rqhy7s9rh98g4fnn50sm2pcv0d0lqmdcf50fxr0w76g9np0jqhdug6nek67883hsjeghhvzzstrglwe8p55c78wmmu"
         },
         {
           "index": 2147483647,
           "notePubkey": "de7ff3cb078718fa6305f3c90811c96803b1177b4dc5698b8cacfce7d2a0b7de",
           "cp1": "cp1mell8jc8suv05cc970yssywfdqpmz9mmfhzknzuv4n7w054qkl0qkdnjvq",
           "noteSecretKey": "f4b1e6d067693064c82dc5de1ba6802f489989d710152b0eded6d1a5faf2cd49",
-          "ownershipSignature": "b5f3021b59be6c37df3ab03e688164e209c4cda4a1ec50da2119c545df3637109610144eb4ce5a6ed3ba161a907d567d0b9ce93189468c526f3794eadb248362",
-          "ck1": "ck1mell8jc8suv05cc970yssywfdqpmz9mmfhzknzuv4n7w054qkl0ttuczrdvmumphmuatq0ngs9jwyzwyekj2rmzsmgs3n329mumrwyykzq2yadxwtfhd8wskr2g864napwwwjvvfg6x9ymehjn4dkfyrvggpnxl6"
+          "ownershipSignature": "44ea1fd7b424abf2a188f0f14b9891a51cd035e18b76dc6c5bed5f89001ebc7a2a9c5989f5ca679a4f0b5b8392f36a8becd0d986bb2302a019a9f37c52083813",
+          "ck1": "ck1mell8jc8suv05cc970yssywfdqpmz9mmfhzknzuv4n7w054qkl0yf6sl676zf2lj5xy0pu2tnzg628xsxhsckakud3d76hufqq0tc732n3vcnaw2v7dy7z6mswf0x65tangdnp4myvp2qxdf7d79yzpczv4qfvaw"
         },
         {
           "index": 2147483648,
           "notePubkey": "2490843a73417452a099f8c08d810816f607a04285180a6caae21484d2e001c0",
           "cp1": "cp1yjgggwnng9699gyelrqgmqggzmmq0gzzs5vq5m92ug2gf5hqq8qqwytfm5",
           "noteSecretKey": "03bf10f9b48616809c16bb198df399da5467b9151b02d9ea20325da32337dfb5",
-          "ownershipSignature": "03cf57431b378491926f63904f09bddc58c4d0e33885ff2a1375da7040fec1d28d6100ed7e08648506d9d4fa36c6c82a57b8475ba079fbbd4b23433d8f0a6428",
-          "ck1": "ck1yjgggwnng9699gyelrqgmqggzmmq0gzzs5vq5m92ug2gf5hqq8qq8n6hgvdn0py3jfhk8yz0px7ackxy6r3n3p0l9gfhtknsgrlvr55dvyqw6lsgvjzsdkw5lgmvdjp227uywkaq08am6jergv7c7zny9qw0tnf6"
+          "ownershipSignature": "8645dac3b8436d5fd157f3a0ab6e4de4ab18415361f1470ba6b3943224ad34196dabd5c1f86e73bab47dcc3e6237594905a9ef46d397b212aebecfde3a77065a",
+          "ck1": "ck1yjgggwnng9699gyelrqgmqggzmmq0gzzs5vq5m92ug2gf5hqq8qgv3w6cwuyxm2l69tl8g9tdex7f2ccg9fkru28pwnt89pjyjkngxtd402ur7rwwwatglwv8e3rwk2fqk5773knj7ep9t47el0r5acxtgrwfmpc"
         },
         {
           "index": 4294967295,
           "notePubkey": "6d19acfcb5d19593023357a8bcdc1c46ae429399ba045eef0849056ec3010a44",
           "cp1": "cp1d5v6el946x2exq3n275tehqug6hy9yuehgz9amcgfyzkascppfzqgaxtrl",
           "noteSecretKey": "b3657257c8d54f99bd4a0b0a3feb6e574fd4f50c0fbfe60b3e21ab692b5795a0",
-          "ownershipSignature": "89738211aa6cde663e3837eeb00e6342240d502810b35a41993f7ffa4905726d392a205215f082c5661eddaef15f30d17dfb385fabda9362efcb7397d78b8605",
-          "ck1": "ck1d5v6el946x2exq3n275tehqug6hy9yuehgz9amcgfyzkascppfzgjuuzzx4xehnx8cur0m4spe35yfqd2q5ppv66gxvn7ll6fyzhymfe9gs9y90sstzkv8ka4mc47vx30hanshatm2fk9m7twwta0zuxq5c327dh"
+          "ownershipSignature": "153a538968808d535eef723c13a8116bcb710462e9f30e88396d853a6cf9013db529fbb057ea2774b278a887ddce63f21b84439d242e9db81440034b4b059cfe",
+          "ck1": "ck1d5v6el946x2exq3n275tehqug6hy9yuehgz9amcgfyzkascppfzp2wjn395gpr2ntmhhy0qn4qgkhjm3q33wnucw3qukmpf6dnusz0d498amq4l2ya6ty79gslwuucljrwzy88fy96wms9zqqd95kpvulc98au5c"
         }
       ]
     },
@@ -493,56 +494,56 @@
           "notePubkey": "d041f39cc3efeb815f29a9bdd4a323ff1a7a0fbf4bad7e922f42631d53e5023b",
           "cp1": "cp16pql88xral4czhef4x7afgerlud85ralfwkhay30gf3365l9qgaslww5ln",
           "noteSecretKey": "90ecbbf1d54a41f75ad13b3a72d2c7464629335867ecb5e0c7ec15106709ba24",
-          "ownershipSignature": "dcc994686a0524871b061fa18b33a1cf6891ae743037288dd62d84db73730d69b75d49f4286a8473083fe64022c71525cd559469522389f858afffddaa269287",
-          "ck1": "ck16pql88xral4czhef4x7afgerlud85ralfwkhay30gf3365l9qgaaejv5dp4q2fy8rvrplgvtxwsu76y34e6rqdeg3htzmpxmwdes66dht4ylg2r2s3ess0lxgq3vw9f9e42eg62jywylsk90llw65f5jsuq4y5qr"
+          "ownershipSignature": "089ebb9d67efd0433301380f8b9370a44068a69bbcf561423a6c743cdded97e30fd16b07561d7f32ea9bd5632aacbde5e0e89b9d1b3180cafb99ab3262d167d7",
+          "ck1": "ck16pql88xral4czhef4x7afgerlud85ralfwkhay30gf3365l9qgas384mn4n7l5zrxvqnsrutjdc2gsrg56dmeatpggaxcapumhke0cc0694sw4sa0uew4x74vv42e009ur5fh8gmxxqv47ue4vex95t86up2dzj0"
         },
         {
           "index": 1,
           "notePubkey": "1b5fcf1050dd830ae9af14dd3e937412f8ee00e61bf1463d16ca1801f69a5e21",
           "cp1": "cp1rd0u7yzsmkps46d0znwnaym5ztuwuq8xr0c5v0gkegvqra56tcssxw228u",
           "noteSecretKey": "f6bcb194b106b9ead25720f5ca0e641add49dcb94b509166f3fa2ae1cadad7ea",
-          "ownershipSignature": "2603c551df4e34619e28fec91742a470d4588291bb819417c840cb1724b769884f509f9d6ad211b9cc986b3fc37c57fb5866b426eb85c9dd40998f43e4c2c776",
-          "ck1": "ck1rd0u7yzsmkps46d0znwnaym5ztuwuq8xr0c5v0gkegvqra56tcsjvq792805udrpnc50ajghg2j8p4zcs2gmhqv5zlyypjchyjmknzz02z0e66kjzxuuexrt8lphc4lmtpntgfhtshya6sye3ap7fsk8wc6h4r98"
+          "ownershipSignature": "e9f1febebe4035432b2f8edd7261c00a8e88216fd71e94eff7eeb64a50e4e307a40b299fe2384ab2c35281d0de6d758c891e655b74ed3fda8fc58dddca16399b",
+          "ck1": "ck1rd0u7yzsmkps46d0znwnaym5ztuwuq8xr0c5v0gkegvqra56tcs7nu07h6lyqd2r9vhcahtjv8qq4r5gy9haw855alm7adj22rjwxpaypv5elc3cf2evx55p6r0x6avv3y0x2km5a5la4r793hwu593envxfpt0v"
         },
         {
           "index": 2,
           "notePubkey": "411c5bea3aa31f400a554192734a0bc37b76410567403379e4979c07e566c032",
           "cp1": "cp1gyw9h6365v05qzj4gxf8xjstcdahvsg9vaqrx70yj7wq0etxcqeq75d4gm",
           "noteSecretKey": "b85ea35e5ec928b98e4b1c3dbefb5601d705d12426bb93f230f91144f2afd779",
-          "ownershipSignature": "8cedfb9800a44a33681763f6cb45039f7e697828eb494d68d6dea85ce9adc8d8dffd3afc525415b6700e6cb3789360a5090a0c04fd7965d3ed20456f30cce17f",
-          "ck1": "ck1gyw9h6365v05qzj4gxf8xjstcdahvsg9vaqrx70yj7wq0etxcqegem0mnqq2gj3ndqtk8aktg5pe7lnf0q5wkj2ddrtda2zuaxku3kxll5a0c5j5zkm8qrnvkdufxc99py9qcp8a09ja8mfqg4hnpn8p0u4rwpa7"
+          "ownershipSignature": "6a758cc811040e063cee12cfb179918831ceae11c939abf4670cf28bd6dfdf38e1d949dd3e1b6494a14b7e9d99d2ac398a80fb98aa0da9a9b9787480fd8997af",
+          "ck1": "ck1gyw9h6365v05qzj4gxf8xjstcdahvsg9vaqrx70yj7wq0etxcqex5avveqgsgrsx8nhp9na30xgcsvww4cgujwdt73nseu5t6m0a7w8pm9ya60smvj22zjm7nkva9tpe32q0hx92pk56nwtcwjq0mzvh4u20rkct"
         },
         {
           "index": 1000,
           "notePubkey": "d619eb8f296484959173d598900965c9343cb9d263c3915cc2ef859edcf093be",
           "cp1": "cp16cv7hrefvjzftytn6kvfqzt9ey6rewwjv0pezhxza7zeah8sjwlquhzqa0",
           "noteSecretKey": "9c7e2bb6832081dc0844ef673c79f7653f601c22ff3d410b35a518a74311524e",
-          "ownershipSignature": "6487b6f54f9f715cbb755d16a98b5dc28bd6513fa832b336b430e559d4ab46df0be45bd1c7bc765d4ac996ac9c8c9a925c8e0122a5e8b8db0af195b4d074a7ae",
-          "ck1": "ck16cv7hrefvjzftytn6kvfqzt9ey6rewwjv0pezhxza7zeah8sjwlxfpak748e7u2uhd64694f3dwu9z7k2yl6sv4nx66rpe2e6j45dhctu3dar3auwew54jvk4jwgex5jtj8qzg49azudkzh3jk6dqa984cd8895v"
+          "ownershipSignature": "a497999a24a85a6e0fc2334499fb39dbb807c833e8caa70c6c0c5c0684fee5071f1f6a878d80bd1e679ae2c79133643e401a2a5ef880a5ad96093bd483a23839",
+          "ck1": "ck16cv7hrefvjzftytn6kvfqzt9ey6rewwjv0pezhxza7zeah8sjwl2f9uengj2sknwplprx3yelvuahwq8eqe73j48p3kqchqxsnlw2pclra4g0rvqh50x0xhzc7gnxep7gqdz5hhcszj6m9sf802g8g3c8ymj4zdd"
         },
         {
           "index": 2147483647,
           "notePubkey": "c42d2070e6c875a85c327fef16ec02f0b1c5cc5dbcc3b8a12cf39bbb6ad91374",
           "cp1": "cp1cskjqu8xep66shpj0lh3dmqz7zcutnzahnpm3gfv7wdmk6kezd6qmd444n",
           "noteSecretKey": "db1661f46998d227351a2fed365074a12db8f4fdd5c166bad630523adefc4924",
-          "ownershipSignature": "decd26322078f98ebf5934784f726b2ac1fda34227d3fb1833d0d23d4bac1d273d11e90bebf9e880097ed692a3577b9d9b3d565a53ab1ecb4b5e018c58b94ce6",
-          "ck1": "ck1cskjqu8xep66shpj0lh3dmqz7zcutnzahnpm3gfv7wdmk6kezd6danfxxgs837vwhavng7z0wf4j4s0a5dpz05lmrqeap53afwkp6feaz85sh6leazqqjlkkj234w7uanv74vkjn4v0vkj67qxx93w2vuc5wwy3g"
+          "ownershipSignature": "e4dfa944e2ab2b55579557ff569bcfab06ca80e61ba2b09b6f11d1043f1c5d1cb1a21129980a14659d7051b493ac2b460900c222f2dfbeb341f64d4553d2cb24",
+          "ck1": "ck1cskjqu8xep66shpj0lh3dmqz7zcutnzahnpm3gfv7wdmk6kezd6wfhafgn32k26427240l6kn086kpk2srnphg4sndh3r5gy8uw968935ggjnxq2z3je6uz3kjf6c26xpyqvyghjm7ltxs0kf4z485ktysg0wunf"
         },
         {
           "index": 2147483648,
           "notePubkey": "fe4e4ee0d2ea1a5db51a76701bf9539a85808ccc217be029887ac8f4e4bc51c3",
           "cp1": "cp1le8yacxjagd9mdg6wecph72nn2zcprxvy9a7q2vg0ty0fe9u28pssw0wc6",
           "noteSecretKey": "10e1ca2fb044c04ef9be5f9393969700c40cb8f03bc0c9aed89be21b8d93f157",
-          "ownershipSignature": "eb812373a64c548196c19e442409184eaba1e12a3171c96fd3e863fcc8941e32fc44d9f49ae65c57017106999f2a24d1662e1e4914917997447bd1cf0a5026ed",
-          "ck1": "ck1le8yacxjagd9mdg6wecph72nn2zcprxvy9a7q2vg0ty0fe9u28p7hqfrwwnyc4ypjmqeu3pypyvya2apuy4rzuwfdlf7scluez2puvhugnvlfxhxt3tszugxnx0j5fx3vchpujg5j9uew3rm688s55pxa597yev9"
+          "ownershipSignature": "68b3356c10855b709a1adef8f7fad7d8c09e44718c6422732bc70eace3a6631549dc9766740eb7c2a844e5d249b0f185254f9d01c435ef45acfe943e008b2537",
+          "ck1": "ck1le8yacxjagd9mdg6wecph72nn2zcprxvy9a7q2vg0ty0fe9u28pk3ve4dsgg2kmsngdda78hltta3sy7g3cccepzwv4uwr4vuwnxx92fmjtkvaqwklp2s3896fympuv9y48e6qwyxhh5tt87jslqpze9xu54q72z"
         },
         {
           "index": 4294967295,
           "notePubkey": "64c6f66ad86d8d5fe8f8829426397fb04b826f0d9c8584a6bec8098f750efd87",
           "cp1": "cp1vnr0v6kcdkx4l68cs22zvwtlkp9cymcdnjzcff47eqyc7agwlkrs2wtk2q",
           "noteSecretKey": "122e1f369089ed800b58f61fffad7155ca3f360fef769a97260bb6e88c587de8",
-          "ownershipSignature": "b55c3151f0176512a19890d9b2841c834526af86c2536dee01fe97e54310ec4df9a68dc9cbda99af4516f3eceadc3ff3f93b5b0aa90eabc81b7c0d769cbac589",
-          "ck1": "ck1vnr0v6kcdkx4l68cs22zvwtlkp9cymcdnjzcff47eqyc7agwlkrm2hp328cpwegj5xvfpkdjsswgx3fx47rvy5mdacqla9l9gvgwcn0e56xunj76nxh529hnan4dc0lnlya4kz4fp64usxmup4mfewk93yy6cu09"
+          "ownershipSignature": "3061b092f7bf5e8e456c8c875439b8cbfecb7915206620509bf6e6b152d623b868db00200482abda16b1308cd4d4bb7e3f018d8c59938331b00edf3c74165712",
+          "ck1": "ck1vnr0v6kcdkx4l68cs22zvwtlkp9cymcdnjzcff47eqyc7agwlkrnqcdsjtmm7h5wg4kgep658xuvhlkt0y2jqe3q2zdlde432ttz8wrgmvqzqpyz40dpdvfs3n2dfwm78uqcmrzejwpnrvqwmu78g9jhzgk5s2z8"
         }
       ]
     },
@@ -568,56 +569,56 @@
           "notePubkey": "c336a87c7092e0d36a3a7b757c9f39fd861757abf3a966a9fd98af790310207e",
           "cp1": "cp1cvm2slrsjtsdx6360d6he8eelkrpw4at7w5kd20anzhhjqcsyplq0l38f9",
           "noteSecretKey": "372f877843cf715317101f97025db51b1d4df439b9ff5e2b4d9d001ff8f7d658",
-          "ownershipSignature": "a539471e19cc83a5337b9cf3cc76eb016e6ee2ce2c97159f77c73d369673d1cfeb982d8e584805f9b3ab86ea8e0248872eeec97a04ea8e53c44261251eb917e3",
-          "ck1": "ck1cvm2slrsjtsdx6360d6he8eelkrpw4at7w5kd20anzhhjqcsypl22w28rcvueqa9xdaeeu7vwm4szmnwut8ze9c4namuw0fkjeearnltnqkcukzgqhum82uxa28qyjy89mhvj7sya28983zzvyj3awghuvtpyla8"
+          "ownershipSignature": "36a7948f76b22e83e9025bca28c60fc1494c84905b6d53b0c24f6fec7648c7e34f28e0ad191dcf4d2bb14b86fc3725ad8c2314276571b73d421af2f49e93099e",
+          "ck1": "ck1cvm2slrsjtsdx6360d6he8eelkrpw4at7w5kd20anzhhjqcsyplrdfu53amtyt5rayp9hj3gcc8uzj2vsjg9km2nkrpy7mlvweyv0c609rs26xgaeaxjhv2tsm7rwfdd3s33gfm9wxmn6ss67t6faycfncsdaw4a"
         },
         {
           "index": 1,
           "notePubkey": "9e76cfbafef7fa159f77a65c49e480e369f3a4ea1384e4610e1dd607f55f6d42",
           "cp1": "cp1nemvlwh77lapt8mh5ewyneyqud5l8f82zwzwgcgwrhtq0a2ld4pqxjjfg5",
           "noteSecretKey": "11f54c28485413dcf65a682e8293cc7acb6de723eb770a4fae03bbfb2b5cea2c",
-          "ownershipSignature": "51326782173acd720b0e99ca1d376b8ed737c8af9939ed20bd6a852cd31e6f5e777182723a6627f2f125ef53ed7188e113c91deb76537d03ec602ec470979d60",
-          "ck1": "ck1nemvlwh77lapt8mh5ewyneyqud5l8f82zwzwgcgwrhtq0a2ld4p9zvn8sgtn4ntjpv8fnjsaxa4ca4ehezhejw0dyz7k4pfv6v0x7hnhwxp8ywnxyle0zf0020khrz8pz0y3m6mk2d7s8mrq9mz8p9uavq4ww7p3"
+          "ownershipSignature": "da02b2036dd783d939366d393c96d217c39fd5d36ecf23c4f4d8c27875f378e98450ec61ab94d28e270bcbf7abc0dc3d3bafe6680ba1a22d760bd529a8ebe4b8",
+          "ck1": "ck1nemvlwh77lapt8mh5ewyneyqud5l8f82zwzwgcgwrhtq0a2ld4pd5q4jqdka0q7e8ymx6wfujmfp0sul6hfkanercn6d3sncwheh36vy2rkxr2u5628zwz7t774uphpa8wh7v6qt5x3z6ast655636lyhqgw0dk6"
         },
         {
           "index": 2,
           "notePubkey": "f7d61ad106daaa5e0d52ec2c9d81f27b2336c22eb7a312feab8a2703b1217fc3",
           "cp1": "cp17ltp45gxm249ur2jaskfmq0j0v3nds3wk7339l4t3gns8vfp0lps6xa45n",
           "noteSecretKey": "962c2de12c546aad3e702be76e0342bc30a58be08318477c3ff13324a7291a01",
-          "ownershipSignature": "992ae534785becba7b7e6b2acc3a60006489923c94a7a95d4708f04f36b32381618274ec2888bed39b1b5e2dc460a0b616607b928c3f6b30fa6a46a513402ded",
-          "ck1": "ck17ltp45gxm249ur2jaskfmq0j0v3nds3wk7339l4t3gns8vfp0lpej2h9x3u9hm960dlxk2kv8fsqqeyfjg7fffaft4rs3uz0x6ej8qtpsf6wc2yghmfekx679hzxpg9kzes8hy5v8a4np7n2g6j3xspda53qrs28"
+          "ownershipSignature": "a260e56a9c2118272a9aa6897697df156f7aa8a6019134cfa1c517f887adfb2ba30efc267825d56b6a352a0d6c1bafcfd809694459010fe56e0da83677e9f2db",
+          "ck1": "ck17ltp45gxm249ur2jaskfmq0j0v3nds3wk7339l4t3gns8vfp0lp6yc89d2wzzxp892d2dztkjl032mm64znqryf5e7su29lcs7klk2arpm7zv7p9644k5df2p4kpht70mqykj3zeqy872msd4qm8060jmvuh3qjt"
         },
         {
           "index": 1000,
           "notePubkey": "f1a0a5c55ef4e66af5da6c5b6f762ea978aa9e1782e3cc5ae753101ef7f5eba4",
           "cp1": "cp17xs2t3277nnx4aw6d3dk7a3w49u248shst3uckh82vgpaal4awjqw8gpq2",
           "noteSecretKey": "79a56bf2dcd3dfdbe5e2915c7c2ece3b0f92c84e85266a94b2922569788d35d2",
-          "ownershipSignature": "de431968af5cafd27cac40f50d54f7cc465895075c22b5913f06f6c20b52497e38c6ad425640aedac190ae7b95fcff1026663ad67b8ad97f1cea324cac115993",
-          "ck1": "ck17xs2t3277nnx4aw6d3dk7a3w49u248shst3uckh82vgpaal4awjduscedzh4et7j0jkypagd2nmuc3jcj5r4cg44jylsdakzpdfyjl3cc6k5y4jq4mdvry9w0w2lelcsyenr44nm3tvh7882xfx2cy2ejv8dvyl5"
+          "ownershipSignature": "9cf47cc7a9eb97f87acfd82af4481b0d1f417db559a98d80b1f33403dd1fafc233558fdabc76b4661be7a858ee29c3119d38ab9bfc011584c92c1434f24cd421",
+          "ck1": "ck17xs2t3277nnx4aw6d3dk7a3w49u248shst3uckh82vgpaal4awjfearuc757h9lc0t8as2h5fqds686p0k64n2vdszclxdqrm506ls3n2k8a40rkk3npheagtrhznsc3n5u2hxluqy2cfjfvzs60ynx5yys4f8rv"
         },
         {
           "index": 2147483647,
           "notePubkey": "900dd854839b29f655347c79f3831facd7226e198a5135d4fb655fdfc43c1dfa",
           "cp1": "cp1jqxas4yrnv5lv4f503ul8qcl4ntjymse3fgnt48mv40al3purhaq64e7ah",
           "noteSecretKey": "7ec17331865f084b6034537688491d7038340f29d676e7b61392d4b99fa97fcd",
-          "ownershipSignature": "b07d79a3b73c5045eac296cbd13b137a499cf3dd9f464a9b12410b0d8c9853f5b5019b6d833475d4c10c687416f06411b49eee55d407095f390cc3b5b4c93af8",
-          "ck1": "ck1jqxas4yrnv5lv4f503ul8qcl4ntjymse3fgnt48mv40al3purhatqlte5wmnc5z9atpfdj738vfh5jvu70we73j2nvfyzzcd3jv98ad4qxdkmqe5wh2vzrrgwst0qeq3kj0wu4w5quy47wgvcw6mfjf6lqg0rsdp"
+          "ownershipSignature": "53813633e978909950f2d14058abab6f0f49c34fe304b705e227f40bc065b8633d3a20a3a1772c2f59ce9f300763d2ab0de283626d4dfcea65bd454bd7e01c2a",
+          "ck1": "ck1jqxas4yrnv5lv4f503ul8qcl4ntjymse3fgnt48mv40al3purha98qfkx05h3yye2redzszc4w4k7r6fcd87xp9hqh3z0aqtcpjmscea8gs28gth9sh4nn5lxqrk854tph3gxcndfh7w5edag49a0cqu9g9d3ujp"
         },
         {
           "index": 2147483648,
           "notePubkey": "3f4fac14aea67734e61d3fd88fc1d8b5f505d91129ba96be87926102257e7dc4",
           "cp1": "cp18a86c99w5emnfesa8lvglswckh6stkg39xafd058jfssyft70hzq2upqkj",
           "noteSecretKey": "a0e3e0f0ce7801a95c91e6f6f8d83988830e5acfccdd7526680a2d6879d736c2",
-          "ownershipSignature": "e016bb9ad322fe8c06f6a7ee81179344db0eef5ae676b1b6fd7c357ef0141879742d1e4c6bcdd12b75adba806ced07649f50cadbdf1d6c05109a03095d9ab361",
-          "ck1": "ck18a86c99w5emnfesa8lvglswckh6stkg39xafd058jfssyft70hzwq94mntfj9l5vqmm20m5pz7f5fkcwaadwva43km7hcdt77q2ps7t5950yc67d6y4httd6spkw6pmynagv4k7lr4kq2yy6qvy4mx4nvyk0xujm"
+          "ownershipSignature": "8643134728982b552232c95f91e4bf2f16d20de4331fa734759e653dc92bbceb7b56ff660adebf595bf01004d8fd28a249096d29e83a46a1536d99090d50ffe9",
+          "ck1": "ck18a86c99w5emnfesa8lvglswckh6stkg39xafd058jfssyft70hzgvscngu5fs264ygevjhu3ujlj79kjphjrx8a8x36euefaey4me6mm2mlkvzk7hav4huqsqnv0629zfyyk620g8fr2z5mdnyys658lay3d7zu2"
         },
         {
           "index": 4294967295,
           "notePubkey": "293252bbe555d164cf43d7994016c970a8d3ff1853b7442dc2af12d4ccd86e94",
           "cp1": "cp19ye99wl92hgkfn6r67v5q9kfwz5d8lcc2wm5gtwz4ufdfnxcd62q24qdra",
           "noteSecretKey": "8070c2712023da7a50f6c25462bbe130e06a75b1298bb4ee7069be74987fba7b",
-          "ownershipSignature": "4ffa839fe7f5f79f3b89552431a6653b445df1d5064d8f8ff3cfa4d18fe54fedc75aa273d9e5c57aab32b0150f0ebf485e809363f6b83c177cbc6cea84f578e8",
-          "ck1": "ck19ye99wl92hgkfn6r67v5q9kfwz5d8lcc2wm5gtwz4ufdfnxcd62yl75rnlnltaul8wy42fp35ejnk3za782svnv03leulfx33lj5lmw8t2388k09c4a2kv4sz58sa06gt6qfxclkhq7pwl9udn4gfatcaqdx32vd"
+          "ownershipSignature": "6974ac039b22fc9c9da31a6f478f018154c4d9156beddb97e86c8e27f38083369504b42a2e0d005710ba740a301de8422dce90b469b703a6a46250a298174dbd",
+          "ck1": "ck19ye99wl92hgkfn6r67v5q9kfwz5d8lcc2wm5gtwz4ufdfnxcd62xja9vqwdj9lyunk335m683uqcz4xymy2khmwmjl5xer387wqgxd54qj6z5tsdqpt3pwn5pgcpm6zz9h8fpdrfkup6dfrz2z3fs96dh54utzgc"
         }
       ]
     }
@@ -661,25 +662,28 @@
       "action": "register",
       "username": "alice",
       "message": "LNURLcash:register:alice",
+      "digest": "07511b102748f3a3614676386cf9ece7a5fcf11576df21d154bafbaeed77e7ae",
       "indexZeroSecretKey": "e63e4e8109b3f54d1322942723fd786de2d56e2885f8098e2e9bd5067b2b6de0",
       "indexZeroPubkey": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
-      "signature": "eb14bc9e874706238fb3946b157d4da5b2197ad4107106be69cf29c400abc3cf8773eec8fd2c89283159efcbfafdacfb2f61dd3274fc6c06a3040313594e687e"
+      "signature": "30667dadcea5310194c1eeac09a00ae3ebcff0cd14c78792ec5674d564a178cf25b4b552149672321076919d05d88cf07ab5e3ddbd3c98782c8761ef4de34622"
     },
     {
       "action": "unregister",
       "username": "alice",
       "message": "LNURLcash:unregister:alice",
+      "digest": "a420c6e3107fb17638baf3b73d4f74f04312f331a4726f6e563a7d6aa3a5bba0",
       "indexZeroSecretKey": "e63e4e8109b3f54d1322942723fd786de2d56e2885f8098e2e9bd5067b2b6de0",
       "indexZeroPubkey": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
-      "signature": "8e05728cddc9ed4959decf531602503c53d60c8767cb0c9b5d239f6631e45e3b01c57b509ca3a98490ad895e56304f92b63581d753a9b4f286d49ec8c6ca36c8"
+      "signature": "2a82508acfb5ce1130e287e3c1ce53e16caa04a6b661d8ea81b1bdea95b8b08aec4188136e5c160628d34b4f5e98b7f98b0c53dc8cf19cab89c89270ab4b5bf1"
     },
     {
       "action": "register",
       "username": "bob",
       "message": "LNURLcash:register:bob",
+      "digest": "780902cb3e14e7fb81fc0a459939d7b9fee97398c1a1df9a5a075d005b6f10b9",
       "indexZeroSecretKey": "e63e4e8109b3f54d1322942723fd786de2d56e2885f8098e2e9bd5067b2b6de0",
       "indexZeroPubkey": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
-      "signature": "dc8f3158ee206db2b1cf2b0337fa24d45e82ac70e7b8257e08d24e299d6c24cf92c86373dbb11537465e35cb0280e8bdb19cbe0839d31e1d07256676f956570a"
+      "signature": "7a7bd40f123eb3878ce4df39d1324c51367c210ffe75c9a9c6ac468cb9b844f5476b152caea5007dbe2fa85ad7177137d7fe0dd2057e16a09163a280950c9e05"
     }
   ],
   "valid": [
@@ -723,12 +727,12 @@
     },
     {
       "type": "ck1",
-      "value": "ck1d7xjwf3w4zsn9x7yhtdg353wnn0jryhngapu3svqhwswt4gyja69emff4tyvd2nya8rmu0y5hfgg4t7lrpa76u4dh84u5ux3gvpu27gg3yqv2",
+      "value": "ck1shqsgqhwv7vamm62gvctugrjs70mchlakga5g69e03l22qtz4npc6elsh5vvdev7h6y9fulypat6zky0kmherx5kaaawsru80t3ulzshztwwv",
       "why": "64-byte signature without the 32-byte public key"
     },
     {
       "type": "cs1",
-      "value": "ck12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qeklrf8ych23gfjn0zt4k5g6ghfehepjte5ws7gcxqthg8965zfwazua5564jxx4fjwn3a78j2t55y24l03s7ldw2kmn672wrg5xq790yz4088e",
+      "value": "ck12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qectsgyqthx0xwaaa9yxv97ypeg08autl7myw6ydzuhcl49q932esudvlct6xxxuk0tazz570jq74aptz8mdmu3n2tw77hgp7rh4c703ghav8wl",
       "why": "a ck1 is not a cs1"
     },
     {
