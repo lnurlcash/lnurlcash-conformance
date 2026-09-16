@@ -11,7 +11,7 @@ import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {bech32, bech32m, base64urlnopad} from '@scure/base'
 import {sha256} from '@noble/hashes/sha2.js'
-import {secp256k1} from '@noble/curves/secp256k1.js'
+import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {hmac} from '@noble/hashes/hmac.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {mnemonicToSeedSync, validateMnemonic} from '@scure/bip39'
@@ -1125,7 +1125,7 @@ const decode2 = (hrp, value, length) => {
     return null
   }
 }
-const LENGTHS = {cp1: ['cp', 32], ck1: ['ck', 65], cx1: ['cx', 64]}
+const LENGTHS = {cp1: ['cp', 32], ck1: ['ck', 96], cx1: ['cx', 64]}
 const AMOUNT_MSAT_PER_UNIT = {'': 100_000_000_000, m: 100_000_000, u: 100_000, n: 100, p: 0.1}
 const decodeAmountSuffix = suffix => {
   const match = suffix.match(/^(\d+)([munp])?$/)
@@ -1150,8 +1150,9 @@ const recoverX = (signature, digest) => {
   return secp256k1.recoverPublicKey(recIdFirst, digest, {prehash: false}).slice(1)
 }
 
-check('part2: the ownership digest recomputes', () => {
-  assert(bytesToHex(lsmDigest('LNURLcash')) === part2.conventions.ownershipDigest, 'ownershipDigest')
+check('part2: the ownership message is raw UTF-8 with no application prehash', () => {
+  assert(part2.conventions.ownershipMessage === 'LNURLcash', 'ownershipMessage')
+  assert(part2.conventions.ownershipMessageEncoding === 'UTF-8 bytes, no application prehash', 'ownershipMessageEncoding')
 })
 
 check('part2: every cx1 is its branch key and chain code', () => {
@@ -1189,15 +1190,14 @@ check('part2: a watcher holding only the cx1 derives every note key', () => {
   }
 })
 
-check('part2: every ck1 is an ownership signature that recovers its note key', () => {
-  const digest = hexToBytes(part2.conventions.ownershipDigest)
+check('part2: every ck1 embeds its note key and a valid Schnorr ownership signature', () => {
+  const message = utf8ToBytes(part2.conventions.ownershipMessage)
   for (const b of part2.branches) {
     for (const n of b.notes) {
-      const sig = decode2('ck', n.ck1, 65)
-      assert(sig && bytesToHex(sig) === n.ownershipSignature, `${b.host} #${n.index}: ck1`)
-      assert(sig[64] <= 3, `${b.host} #${n.index}: recovery id`)
-      assert(toNum(sig.subarray(32, 64)) <= N2 / 2n, `${b.host} #${n.index}: high-S`)
-      assert(bytesToHex(recoverX(sig, digest)) === n.notePubkey, `${b.host} #${n.index}: recovery`)
+      const ck1 = decode2('ck', n.ck1, 96)
+      assert(ck1 && bytesToHex(ck1.subarray(0, 32)) === n.notePubkey, `${b.host} #${n.index}: ck1 key`)
+      assert(bytesToHex(ck1.subarray(32)) === n.ownershipSignature, `${b.host} #${n.index}: ck1 signature`)
+      assert(schnorr.verify(ck1.subarray(32), message, ck1.subarray(0, 32)), `${b.host} #${n.index}: Schnorr proof`)
     }
   }
 })
@@ -1222,12 +1222,11 @@ check('part2: every address proof is action- and username-bound to index zero', 
   for (const proof of part2.addressProofs) {
     assert(['register', 'unregister'].includes(proof.action), `${proof.action}: action`)
     assert(proof.message === `LNURLcash:${proof.action}:${proof.username}`, `${proof.action}: message`)
-    assert(bytesToHex(lsmDigest(proof.message)) === proof.digest, `${proof.action}: digest`)
     const signature = hexToBytes(proof.signature)
-    assert(signature.length === 65, `${proof.action}: signature length`)
+    assert(signature.length === 64, `${proof.action}: signature length`)
     assert(
-      bytesToHex(recoverX(signature, hexToBytes(proof.digest))) === proof.indexZeroPubkey,
-      `${proof.action}: recovers to index zero`
+      schnorr.verify(signature, utf8ToBytes(proof.message), hexToBytes(proof.indexZeroPubkey)),
+      `${proof.action}: verifies against index zero`
     )
   }
   assert(part2.addressProofs[0].signature !== part2.addressProofs[1].signature, 'action separation')
@@ -1262,7 +1261,7 @@ check('nostr-seed: marked as an extension, not LUD-25', () => {
 
 check('nostr-seed: every seed, branch and note recomputes', () => {
   const tag = sha256(utf8ToBytes('LNURLcash/derive'))
-  const digest = hexToBytes(part2.conventions.ownershipDigest)
+  const message = utf8ToBytes(part2.conventions.ownershipMessage)
   for (const c of nostrSeed.cases) {
     const identity = hexToBytes(c.identity)
     assert(bytesToHex(hmac(sha256, identity, utf8ToBytes(nostrSeed.label))) === c.seed, `${c.host}: seed`)
@@ -1282,8 +1281,9 @@ check('nostr-seed: every seed, branch and note recomputes', () => {
       const t = toNum(sha256(cat(tag, tag, x, node.subarray(32), i)))
       const pk = bytesToHex(lifted.add(secp256k1.Point.BASE.multiply(t)).toBytes(true).slice(1))
       assert(pk === n.notePubkey, `${c.host} #${n.index}: watch-only pk`)
-      const sig = decode2('ck', n.ck1, 65)
-      assert(sig && bytesToHex(recoverX(sig, digest)) === n.notePubkey, `${c.host} #${n.index}: ck1 recovery`)
+      const ck1 = decode2('ck', n.ck1, 96)
+      assert(ck1 && bytesToHex(ck1.subarray(0, 32)) === n.notePubkey, `${c.host} #${n.index}: ck1 key`)
+      assert(schnorr.verify(ck1.subarray(32), message, ck1.subarray(0, 32)), `${c.host} #${n.index}: ck1 proof`)
     }
   }
 })

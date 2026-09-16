@@ -4,6 +4,21 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## Unreleased
+
+**`ck1` now carries a BIP-340 Schnorr ownership proof.** This follows the
+current LUD-25 draft and is intentionally incompatible with the former
+recoverable-ECDSA bearer encoding.
+
+- `ck1` is bech32m over the note's 32-byte x-only public key followed by a
+  64-byte Schnorr signature over the raw UTF-8 bytes of `LNURLcash`.
+- Part 2 and Nostr-seed vectors have been regenerated. Their self-checks
+  verify the embedded key and Schnorr proof independently; `cs1` remains an
+  amount-bearing recoverable-ECDSA mint certificate.
+- The live grader now spends its Part 2 probe with the new 96-byte `ck1`.
+- Address proof vectors use Schnorr signatures over their raw UTF-8 messages,
+  matching the draft while address-management design remains under review.
+
 ## 0.11.1 - 2026-09-15
 
 - Unsigned plain-hash Part 1 mutation outputs now pass the live grader cleanly

@@ -53,9 +53,10 @@ const verifySignature = (k1, amountMsat, signatureHex, pubkeyHex) => {
 const verifyCertificate = (pubkeyHex32, amountMsat, sig, mintPubkeyHex) =>
   recoversTo(signedMessageDigest(`LNURLcash:${amountMsat}:${pubkeyHex32}`), sig, mintPubkeyHex)
 
-// Part 2's bech32m strings: cp1 (32-byte key), ck1 and cs1 (65-byte
-// signature). cs1 has a variable HRP: "cs" plus the amount under BOLT-11's
-// amount rules. Longer than BIP-173's 90 characters by design.
+// Part 2's bech32m strings: cp1 (32-byte key), ck1 (32-byte key plus 64-byte
+// Schnorr signature), and cs1 (65-byte recoverable ECDSA signature). cs1 has
+// a variable HRP: "cs" plus the amount under BOLT-11's amount rules. Longer
+// than BIP-173's 90 characters by design.
 const BECH32M_LIMIT = 200
 const encodeCash = (hrp, bytes) => bech32m.encode(hrp, bech32m.toWords(bytes), BECH32M_LIMIT)
 const decodeCash = (hrp, value, length) => {
@@ -89,11 +90,12 @@ const decodeCertificate = value => {
   return signature ? {amountMsat, signature} : null
 }
 
-// The bearer secret of a cp1 note: the key's signature over the fixed
-// message "LNURLcash", r || s || recovery-id, the same value every time.
+// The bearer secret of a cp1 note: its x-only key followed by a BIP-340
+// Schnorr signature over the raw UTF-8 bytes of "LNURLcash".
 const ownershipProof = secretKey => {
-  const lead = secp256k1.sign(signedMessageDigest('LNURLcash'), secretKey, {format: 'recovered', prehash: false})
-  return encodeCash('ck', new Uint8Array([...lead.subarray(1), lead[0]]))
+  const pubkey = schnorr.getPublicKey(secretKey)
+  const signature = schnorr.sign(utf8ToBytes('LNURLcash'), secretKey)
+  return encodeCash('ck', new Uint8Array([...pubkey, ...signature]))
 }
 
 // LUD-17: lnurlw://host/path is https://host/path, or http:// when the host

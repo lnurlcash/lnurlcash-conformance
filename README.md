@@ -48,7 +48,7 @@ for (const c of cases) {
 | `signature.json` | offline verification, both recovery-id orderings, malformed input |
 | `derivation.json` | deterministic note secrets from a BIP39 seed |
 | `cash-derivation.json` | LUD-25's seed-recoverable note secrets under `m/139'`, with BIP-32's own vector 1 |
-| `part2.json` | Part 2: `cp1`/`ck1`/amount-bearing `cs1`/`cx1`, the per-note key tweak, note ownership and mint certificates, on the reference wallet's `m/139'/1'` address path |
+| `part2.json` | Part 2: `cp1`, 96-byte-payload Schnorr `ck1`, amount-bearing recoverable-ECDSA `cs1`, `cx1`, the per-note key tweak, ownership proofs and mint certificates, on the reference wallet's `m/139'/1'` address path |
 | `bech32.json` | LUD-01 encoding, round trips, corrupted checksums |
 | `url-admission.json` | which URLs may be fetched, and why `data:` must never be |
 | `input-resolution.json` | bech32, LUD-17, Lightning Addresses, bare domains |
