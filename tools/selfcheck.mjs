@@ -1292,6 +1292,18 @@ check('nostr-seed: every seed, branch and note recomputes', () => {
   }
 })
 
+// ---- the runner ----
+
+const {ownershipProof} = await import('../runner/index.mjs')
+check("the runner's own ck1 signs the digest the vectors sign", () => {
+  const secretKey = hexToBytes('11'.repeat(32))
+  const words = bech32m.fromWords(bech32m.decode(ownershipProof(secretKey), false).words)
+  const proof = Uint8Array.from(words)
+  assert(proof.length === 96, 'ck1 payload is 96 bytes')
+  assert(bytesToHex(proof.subarray(0, 32)) === bytesToHex(schnorr.getPublicKey(secretKey)), 'ck1 key')
+  assert(schnorr.verify(proof.subarray(32), sha256(utf8ToBytes('LNURLcash')), proof.subarray(0, 32)), 'signs sha256("LNURLcash")')
+})
+
 console.log(
   failures === 0
     ? '\nvectors are self-consistent'

@@ -43,6 +43,8 @@ export interface Report {
 export declare const createReport: () => Report
 
 /** an `lnurlw://` or `lnurlp://` URL as its https equivalent, per LUD-17 */
+/** A Part 2 note's ck1: x-only key || BIP-340 signature over sha256("LNURLcash"). */
+export declare const ownershipProof: (secretKey: Uint8Array) => string
 export declare const fromLud17: (value: string) => string
 
 /** a lightning address or LNURL as the payRequest URL to fetch */

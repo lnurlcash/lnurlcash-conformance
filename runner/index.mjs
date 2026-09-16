@@ -91,10 +91,12 @@ const decodeCertificate = value => {
 }
 
 // The bearer secret of a cp1 note: its x-only key followed by a BIP-340
-// Schnorr signature over the raw UTF-8 bytes of "LNURLcash".
-const ownershipProof = secretKey => {
+// Schnorr signature over sha256("LNURLcash"), the 32-byte digest part2.json
+// signs (luds#6de59b2). A mint may still read the raw-message form, but a
+// grader that only ever sends that form cannot tell whether it reads this one.
+export const ownershipProof = secretKey => {
   const pubkey = schnorr.getPublicKey(secretKey)
-  const signature = schnorr.sign(utf8ToBytes('LNURLcash'), secretKey)
+  const signature = schnorr.sign(sha256(utf8ToBytes('LNURLcash')), secretKey)
   return encodeCash('ck', new Uint8Array([...pubkey, ...signature]))
 }
 
