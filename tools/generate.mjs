@@ -491,11 +491,13 @@ const cashDerivation = {
 // x-only key and chain code) lets a mint derive every pk on a branch and so
 // mint straight to a holder's next key.
 //
-// Built from the primitives like everything else here. The address branch
-// follows the reference wallet (lnurl-wallet cashSecrets.ts): m/139'/1' with
-// the hashing key at m/139'/1'/0. The draft text roots it at m/139'/d1..d4,
-// the node the Part 1 ladder already uses, and a wallet following the text
-// finds none of the reference wallet's notes. `conventions` records both.
+// Built from the primitives like everything else here. The address branch is
+// the literal m/139'/d1..d4 path this section's text specifies, with the
+// hashing key at m/139'/0 - the same node cashDomainNode derives. A
+// reference-wallet extension once derived Part 1 secrets deterministically
+// off that same node too, under its own m/139'/1' sub-purpose kept just to
+// avoid colliding with it; that extension is gone (not part of LUD-25 Part 1,
+// which is plain randomness), so there is nothing left to collide with.
 
 const concat = (...parts) => {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
@@ -550,13 +552,6 @@ const amountSuffix = amountMsat => {
   throw new Error('amount_msat could not be encoded')
 }
 
-const addressRootOf = seed => ckdPriv(cashRootOf(seed), 1 + HARDENED)
-
-const addressDomainIndices = (addressRoot, host) => {
-  const material = hmac(sha256, ckdPriv(addressRoot, 0).privateKey, utf8ToBytes(host))
-  return [0, 4, 8, 12].map(offset => readUint32BE(material, offset))
-}
-
 const ser32 = index => {
   const out = new Uint8Array(4)
   new DataView(out.buffer).setUint32(0, index, false)
@@ -587,9 +582,9 @@ const PART2_HOSTS = ['mint.example', 'mint.lnurlcash.com', 'moneyer.dev', 'local
 
 const part2Branch = (mnemonic, host) => {
   const seed = seedOf(mnemonic)
-  const addressRoot = addressRootOf(seed)
-  const domainIndices = addressDomainIndices(addressRoot, host)
-  const node = domainIndices.reduce(ckdPriv, addressRoot)
+  const cashRoot = cashRootOf(seed)
+  const domainIndices = cashDomainIndices(cashRoot, host)
+  const node = cashDomainNode(cashRoot, host)
   const P = secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey))
   const branchPubkey = P.toBytes(true).slice(1)
   return {
@@ -662,11 +657,11 @@ const part2 = {
   version: VERSION,
   spec: SPEC,
   description:
-    'LUD-25 Part 2: notes keyed by a public key and spent by a BIP-340 Schnorr proof. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/1\'/0, msg = utf8(host)), and addressNode is m/139\'/1\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is a 64-byte BIP-340 Schnorr signature over the UTF-8 bytes of "LNURLcash" with no application prehash, and ck1 is bech32m("ck", notePubkey || ownershipSignature): the value that spends the note. Register/update/unregister proofs are Schnorr signatures from index zero over the UTF-8 bytes of "LNURLcash:<action>:<username>", separating both action and name. A certificate remains a recoverable ECDSA signature by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).',
+    'LUD-25 Part 2: notes keyed by a public key and spent by a BIP-340 Schnorr proof. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/0, msg = utf8(host)), and addressNode is m/139\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is a 64-byte BIP-340 Schnorr signature over the UTF-8 bytes of "LNURLcash" with no application prehash, and ck1 is bech32m("ck", notePubkey || ownershipSignature): the value that spends the note. Register/update/unregister proofs are Schnorr signatures from index zero over the UTF-8 bytes of "LNURLcash:<action>:<username>", separating both action and name. A certificate remains a recoverable ECDSA signature by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).',
   conventions: {
-    addressBranch: "m/139'/1'/d1/d2/d3/d4",
-    hashingKey: "m/139'/1'/0",
-    specTextSays: "m/139'/d1/d2/d3/d4 with the hashing key at m/139'/0 - the Part 1 ladder's node; every implementation follows the reference wallet instead",
+    addressBranch: "m/139'/d1/d2/d3/d4",
+    hashingKey: "m/139'/0",
+    specTextSays: "m/139'/d1/d2/d3/d4 with the hashing key at m/139'/0 - now the literal path every implementation uses; there is no separate purpose for Part 2",
     noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t >= n is unusable, use the next index',
     indexWidth: '4 bytes, big-endian, any uint32, never hardened',
     ownershipMessage: 'LNURLcash',
@@ -715,8 +710,7 @@ const NOSTR_SEED_LABEL = 'LNURLcash/nostr-seed'
 
 const nostrSeedCase = (identityHex, host) => {
   const seed = hmac(sha256, hexToBytes(identityHex), utf8ToBytes(NOSTR_SEED_LABEL))
-  const addressRoot = addressRootOf(seed)
-  const node = addressDomainIndices(addressRoot, host).reduce(ckdPriv, addressRoot)
+  const node = cashDomainNode(cashRootOf(seed), host)
   const branchPubkey = secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey)).toBytes(true).slice(1)
   return {
     identity: identityHex,
@@ -746,7 +740,7 @@ const nostrSeed = {
   spec: SPEC,
   extension: true,
   description:
-    'An extension, not LUD-25: a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words. seed = HMAC-SHA256(key = identity (the 32-byte secret key), msg = utf8("LNURLcash/nostr-seed")); the branch is then the reference wallet\'s m/139\'/1\'/d1..d4 from that seed exactly as in part2.json, and every note field means what it means there. identityPubkey is the identity\'s x-only public key, the npub a lightning address belongs to. heartwood-esp32 derives this on the device and lnurlcash-kit exports it (deriveNostrAddressNode); a mint sees an ordinary cx1.',
+    'An extension, not LUD-25: a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words. seed = HMAC-SHA256(key = identity (the 32-byte secret key), msg = utf8("LNURLcash/nostr-seed")); the branch is then the reference wallet\'s m/139\'/d1..d4 from that seed exactly as in part2.json, and every note field means what it means there. identityPubkey is the identity\'s x-only public key, the npub a lightning address belongs to. heartwood-esp32 derives this on the device and lnurlcash-kit exports it (deriveNostrAddressNode); a mint sees an ordinary cx1.',
   label: NOSTR_SEED_LABEL,
   cases: [
     nostrSeedCase(IDENTITY_ONE, 'moneyer.dev'),
