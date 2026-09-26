@@ -1,7 +1,7 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "Spending a LUD-25 note (lnurl/luds 6e865b1, \"unified taproot verification\"). Every note is a BIP-341 output key Q; a ck1 opens it by the key path and a cw1 by one leaf of its script tree, and every signature in either signs the BIP-341 sighash of input 0 of the canonical spend transaction for the mint's domain. bearers: bearer notes (NUMS internal key, one OP_SHA256 <h> OP_EQUAL leaf) with every intermediate value. keyPath: one key's ck1 at several domains, and crossDomain pairs that must not verify. tree: the three-leaf note the grader rotates a funded note into, with each leaf's cw1 and the verdict LUD-25's leaf policy gives it, and the key path of the tweaked key. checksig: a <key> OP_CHECKSIG leaf with its script-path SigMsg and sighash at two claimed times. timeClaims, leafPolicy: the two SERVICE-side rules consensus does not decide, each case with the verdict and why. malformedCw1 and invalidCp1 must not decode to a note. shortForms: a 64-hex value names the same note, or makes the same spend, as its long form. Expected verdicts are written by hand; tools/selfcheck.mjs recomputes every one.",
+  "description": "Spending a LUD-25 note (lnurl/luds 6e865b1, \"unified taproot verification\"; keys per 50d740a). Every note is a BIP-341 output key Q; a ck1 opens it by the key path and a cw1 by one leaf of its script tree, and every signature in either signs the BIP-341 sighash of input 0 of the canonical spend transaction for the mint's domain. bearers: bearer notes (NUMS internal key, one OP_SHA256 <h> OP_EQUAL leaf) with every intermediate value. keyPath: one key's ck1 at several domains, and crossDomain pairs that must not verify. tree: the three-leaf note the grader rotates a funded note into, with each leaf's cw1 and the verdict LUD-25's leaf policy gives it, and the key path of the tweaked key. checksig: a <key> OP_CHECKSIG leaf with its script-path SigMsg and sighash at two claimed times. timeClaims, leafPolicy: the two SERVICE-side rules consensus does not decide, each case with the verdict and why. malformedCw1 and invalidCp1 must not decode to a note. shortForms: a 64-hex value names the same note, or makes the same spend, as its long form. Expected verdicts are written by hand; tools/selfcheck.mjs recomputes every one.",
   "conventions": {
     "domain": "the SERVICE's full domain name, lowercased, never its scheme or port: new URL(noteUrl).hostname.toLowerCase()",
     "canonicalSpendTransaction": "nVersion 2; vin[0] prevout (tagged_hash(\"LNURLcash/mint\", domain), 0), empty scriptSig, nSequence as claimed; vout[0] value 0, empty scriptPubKey; nLockTime as claimed; spent output (OP_1 <Q>, 0). Serialised with its witness in spec-vectors.json vector3.spendTransaction",
@@ -78,49 +78,49 @@
     }
   ],
   "keyPath": {
-    "secretKey": "944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f",
-    "Q": "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
-    "cp1": "cp14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6qh2fkky",
+    "secretKey": "3616b02290a133da73e758a54dbff1bf6439b4067a820cb51ca873fa4a13a96a",
+    "Q": "690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f",
+    "cp1": "cp1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0sxpcl6z",
     "spends": [
       {
         "domain": "mint.example",
         "normalisedDomain": "mint.example",
         "prevoutTxid": "d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b2",
-        "sighash": "b8933a42090297a1f80d7f1fc0023ec1aa2ab36a7df332520f0dacf07f617943",
-        "signature": "83bbe1fe044d3d15cd1c18b484168c37f921864a9f85e9251f8457b576abd66b211b70b97fb3d63856ae271e4b3e3cf95da8e8b7769fefc309d8dc4989120e8e",
-        "ck1": "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6g8wlplczy60g4e5wp3dyyz6xr07fpse9flp0fy50cg4a4w64av6eprdctjlan6cu9dt38re9nu08etk5w3dmknlhuxzwcm3ycjysw3c9dpmpy"
+        "sighash": "e97bb6831a916ff83919046f50a39c18ab98bf43079cf68cd364d251f7de527f",
+        "signature": "fc3491f1c6bca73dcd76b38fc6b7a82aef0f1fa67212ceb7d7f64dbc41c8bfe77e0db6077624bf117badb65efe0445e382ac9f4cd582f7a5cc366c7aeb4580d4",
+        "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0lcdy378rtefeae4mt8r7xk75z4mc0r7n8yykwkltlvndug8ytlem7pkmqwa3yhughhtdktmlqg30rs2kf7nx4stm6tnpkd3awk3vq6smm20wz"
       },
       {
         "domain": "moneyer.dev",
         "normalisedDomain": "moneyer.dev",
         "prevoutTxid": "ae16063204c1a365755906e7165cf7a5f33e012d22dbdf3ec88b0dca6807cb52",
-        "sighash": "b7d3888de4c0c579aef14ecc2a9fd601087d9cfa8beaa63013024bc23028d7e5",
-        "signature": "5129c9f68cffae7e8e7f745bee76b5c26340d2724e239aab50a15abe90feef57e42233690fed6a6840dd6f0f261d0c2cbfd78f64d9e37f68e78f74f7440e5eb6",
-        "ck1": "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc69z2wf76x0ltn73elhgklww66uyc6q6feyugu64dg2zk47jrlw74lyygekjrlddf5ypht0punp6rpvhltc7exeudlk3eu0wnm5grj7kcxccuth"
+        "sighash": "a6f90ce1b91e37b6a56c7b0e2eb993d72c6c3af7286adb3a0732370af6222630",
+        "signature": "504c87ceccd41ed6fc7355db27177a53abc6c63956ee142fe6fe30a6c4d9057be70f732a96d57e7151518be8a4db60ba3c9f800817f50b2af4f502660853a9ef",
+        "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x04qny8emxdg8kkl3e4tke8zaa9827xccu4dms59ln0uv9xcnvs27l8paej49k40ec4z5vtazjdkc968j0cqzqh759j4a84qfnqs5afau8gtwcn"
       },
       {
         "domain": "localhost",
         "normalisedDomain": "localhost",
         "prevoutTxid": "7f3fb78a2a908ccbfc19eecde64323281beb73e1e854f7dc86080bf6bd465011",
-        "sighash": "25728cb68036cd9776c80539841d0240ec5c9a1cf92a859dad8536de8e0421b4",
-        "signature": "c6e1dc2335cb363c3233338c93a6f3964e8fb5df85623728bfc996d8007a8ac54c54005bf5eb67460eb2f5d9d73e1d8b1766501ba3cee18463ae19547a4eac58",
-        "ck1": "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6vdcwuyv6ukd3uxgen8ryn5meevn50kh0c2c3h9zlun9kcqpag432v2sq9ha0tvarqavh4m8tnu8vtzan9qxaremscgcawr9285n4vtqhxyvda"
+        "sighash": "0024ec475867aefbd2f48d7e2b7cfde467cfb439f68edefa90c643e332b4eac6",
+        "signature": "c3d3a6bf02f4bc911dcb299e2c44c573da858a794838544f141e2abacfc4936879d2f1f59ef84bb4ecdf0e4239656c6f23bdcda0e0717975aad5092ba1eace74",
+        "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0u85axhup0f0y3rh9jn83vgnzh8k593fu5swz5fu2pu246elzfx6re6tclt8hcfw6wehcwgguk2mr0yw7umg8qw9uht2k4py46r6kwws77er5x"
       },
       {
         "domain": "127.0.0.1",
         "normalisedDomain": "127.0.0.1",
         "prevoutTxid": "46f0d72281276fe202d3b3392605c682d42951de262abec71e14a343f95b517a",
-        "sighash": "cdaaed38d12111496f185d2017335a00e60b065768131ec98eb044727946fb16",
-        "signature": "52689ab49c82d0e26170037beef37054188ccd2717db1ad5cc7e506725700e7bf0b15a82e7ab441844a1ab6b6a6e2be89f69bc10aa3f170be4b414d9c3d0263a",
-        "ck1": "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc69y6y6kjwg958zv9cqx7lw7dc9gxyve5n30kc66hx8u5r8y4cqu7lsk9dg9eatgsvyfgdtdd4xu2lgna5mcy928utshe95znvu85px8gu4ez7e"
+        "sighash": "e14d8be0e0e1ecf1b4a1b5e4fcfad158182fd21aaeb48b34f20168646afc0840",
+        "signature": "eaf3baabc178d4e951cb6aa3a83aed398dfed48eb2aa29257a237546a6bb06e25820b769b1e2c16a12bcb95f8e864223837004c8b753d338b6db4fc30952ceca",
+        "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x074ua640qh348f289k4gag8tknnr076j8t923fy4azxa2x56asdcjcyzmknv0zc94p909et78gvs3rsdcqfj9h20fn3dkmflpsj5kwegra4zzg"
       },
       {
         "domain": "MINT.EXAMPLE",
         "normalisedDomain": "mint.example",
         "prevoutTxid": "d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b2",
-        "sighash": "b8933a42090297a1f80d7f1fc0023ec1aa2ab36a7df332520f0dacf07f617943",
-        "signature": "83bbe1fe044d3d15cd1c18b484168c37f921864a9f85e9251f8457b576abd66b211b70b97fb3d63856ae271e4b3e3cf95da8e8b7769fefc309d8dc4989120e8e",
-        "ck1": "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6g8wlplczy60g4e5wp3dyyz6xr07fpse9flp0fy50cg4a4w64av6eprdctjlan6cu9dt38re9nu08etk5w3dmknlhuxzwcm3ycjysw3c9dpmpy"
+        "sighash": "e97bb6831a916ff83919046f50a39c18ab98bf43079cf68cd364d251f7de527f",
+        "signature": "fc3491f1c6bca73dcd76b38fc6b7a82aef0f1fa67212ceb7d7f64dbc41c8bfe77e0db6077624bf117badb65efe0445e382ac9f4cd582f7a5cc366c7aeb4580d4",
+        "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0lcdy378rtefeae4mt8r7xk75z4mc0r7n8yykwkltlvndug8ytlem7pkmqwa3yhughhtdktmlqg30rs2kf7nx4stm6tnpkd3awk3vq6smm20wz"
       }
     ],
     "crossDomain": [

@@ -17,15 +17,29 @@ note is keyed by `Q` and certified over `hex(Q)`. A mint graded clean by
 0.13.x will fail several checks here; that is the spec moving, not the
 grader.
 
+**Derivation purposes and certificate names** (luds `50d740a`). A note key
+is now `t = tagged_hash("LNURLcash/derive", P || chaincode || ser32(purpose)
+|| ser32(i)) mod n`, with purpose 0 for the wallet's own notes (and a
+split's `p1`), 1 for a split's change `p2` and 2 for Lightning Address
+auto-mint and internal transfer, each with its own counter and recovery gap
+limit. The register/unregister proof signs with the purpose-0 index-0 key.
+Certificates travel as `c` and `c2` (JSON) and `&c=` (note URL) rather than
+`sig`, `sig2` and `&sig=`, and the internal-transfer hint is `text/cpub`
+rather than `text/xpub`, its index the purpose-2 counter.
+
 Vectors:
 
 - `spec-vectors.json` follows 25.md's published vectors exactly. Vector 2's
   address proofs sign `sha256("LNURLcash:<action>:<domain>:<username>")`;
   vector 3 is now the key-path `ck1`, with the prevout, every `SigMsg`
   field, the sighash and the serialised canonical spend transaction;
-  vector 5 is new, a bearer note from preimage to `cw1` and its `cs1`.
-  Vectors 1 and 4 are unchanged. The selfcheck now holds every value to a
-  literal transcribed from 25.md, and recomputes each independently.
+  vector 5 is new, a bearer note from preimage to `cw1` and its `cs1`, and
+  its certified note URL carries `&c=`. Every note in vectors 1 and 2 gains
+  `purpose`; vector 1 lists purpose 0 at i = 0, 1, 2 and 5 and index 0 on
+  purposes 1 and 2, vector 2 purpose 0 at i = 0, 1 and 2, and vectors 3
+  and 4 move to the purpose-0 key, so every derived value, proof, `ck1` and
+  `cs1` changes. The selfcheck now holds every value to a literal
+  transcribed from 25.md at `50d740a`, and recomputes each independently.
 - New `spends.json`: bearer notes of both parities, one key's `ck1` across
   several domains (and the cross-domain spends that must not verify), a
   three-leaf script tree with each leaf's control block, `cw1` and verdict
@@ -40,6 +54,23 @@ Vectors:
   the domain-bound message. `conventions` drops the fixed ownership message.
   Consumers reading `ownershipSignature` break loudly, which is intended:
   it no longer means what it did.
+- `part2.json` and `nostr-seed.json` derive by purpose. Every note gains
+  `purpose` beside `index`. Each `part2.json` branch lists purpose 0 at the
+  same indices as before, then indices 0 and 1 on purposes 1 and 2, so
+  `notes[0]` is still the purpose-0 index-0 key the address proofs sign
+  with; each `nostr-seed.json` case lists purpose 0 at 0, 1 and 7, then
+  index 0 on purposes 1 and 2. `conventions` gains `purposes` and
+  `purposeUse`. A new `prePurpose` record keeps the superseded tweak
+  (no `ser32(purpose)`) for one branch, marked `superseded`, only so a
+  wallet can recognise and sweep notes it derived under luds `6e865b1`.
+- `note-url.json`, `responses.json` and `withdraw-info.json` use `c`, `c2`
+  and `&c=`. `note-url.json` keeps one parse case reading a certificate from
+  an older note URL's `&sig=`, and drops a stale `sig` along with a stale
+  `c` when the `k1` changes; `responses.json` adds a mint sending the
+  certificate under both names. `withdraw-info.json`'s `requestMustNotSend`
+  lists both.
+- `spends.json`'s key-path cases sign with vector 1's purpose-0 `sk_0`, so
+  the `mint.example` `ck1` is still test vector 3's.
 - `part2.json`'s `noteTweak` says `t` is reduced mod n, as 25.md requires,
   where it said `t >= n` is unusable. No vector reaches n, so no value
   changes. The mock mint's auto-mint reduces rather than skipping the index.
@@ -85,6 +116,12 @@ Grader, `gradeNote`:
   longer has an optional part, so that now fails.
 - New: `every certificate verifies over hex(Q) and the note value`, over
   every `cs1` the run collected. A wrong one fails; missing ones warn.
+- Certificates are read from `c` and `c2` only, on the informational GET
+  and every rotate, split and merge, and a retry must return the same `c`
+  and `c2`. A mint sending only the pre-`50d740a` `sig`/`sig2` is graded
+  uncertified, a warning that names the old spelling; a mint sending both
+  names, as one mid-transition does, is graded on `c` and not faulted for
+  the extra `sig`. The note URL a run ends with drops `c` and `sig` both.
 - Value is conserved on every path. A refusal is confirmed to have left the
   value in place, a misbehaving mint's output is adopted rather than lost,
   and the script tree has two ways home (its hashlock leaf, then its key
@@ -94,7 +131,9 @@ Grader, `gradeNote`:
 - `gradeNote` resolves to `{finalSecret, noteUrl}`, as it always did in
   practice; the declarations now say so.
 
-Grader, `gradeMint`: the comment check also requires a `cp1<Q>` comment to
+Grader, `gradeMint`: under `--address`, the internal-transfer hint is read
+from `text/cpub`; one published only as `text/xpub` fails that check. The
+comment check also requires a `cp1<Q>` comment to
 be invoiced, and a `cp1` whose key is not a curve point to be refused before
 any invoice exists. That rule is probed only here: as a `p1` it would
 destroy the note under grade on a mint that got it wrong.
@@ -115,6 +154,11 @@ with the value brought home: `leafVersionUnchecked`, `opSuccessUnchecked`,
 `alreadyInUseReason`, `certificateOverH`, `refusesCp1Outputs`,
 `acceptsOffCurveCp1`; `acceptsMissingP2` is the new name of
 `acceptsMissingH2`. The optional bound-mint receipt keeps signing its `h`.
+It sends certificates as `c` and `c2`, and its registered address auto-mints
+on purpose 2 and publishes `text/cpub`; `certificateNames` (`'sig'` or
+`'both'`) and `addressHintType` reproduce a mint still on the older names.
+It has no register/unregister endpoint, so the purpose-0 proof key is held
+to the vectors only.
 
 Not yet brought over: `signature.json`, `callbacks.json`,
 `retried-mutation.json` and the other Part 1 wire vectors still describe the

@@ -265,7 +265,8 @@ export const parseAdvertisedMintFee = metadata => {
 }
 
 // A registered Part 2 address advertises the safe-to-share branch and its
-// best-known next index as ["text/xpub", "cx1...:<i>"]. Parsing it here
+// best-known next purpose-2 index as ["text/cpub", "cx1...:<i>"] (named
+// text/xpub before luds 50d740a, which is no longer read). Parsing it here
 // makes --address assert the actual discovery signal rather than merely
 // trusting the operator's flag.
 export const parseInternalTransferHint = metadata => {
@@ -277,7 +278,7 @@ export const parseInternalTransferHint = metadata => {
   }
   if (!Array.isArray(entries)) return null
   for (const entry of entries) {
-    if (!Array.isArray(entry) || entry[0] !== 'text/xpub' || typeof entry[1] !== 'string') continue
+    if (!Array.isArray(entry) || entry[0] !== 'text/cpub' || typeof entry[1] !== 'string') continue
     const sep = entry[1].lastIndexOf(':')
     if (sep < 0) continue
     const cx1 = entry[1].slice(0, sep)
@@ -389,8 +390,8 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
   if (registeredAddress) {
     await report.check('advertises its cx1 and next index for internal transfers', async () => {
       const hint = parseInternalTransferHint(pay.metadata)
-      assert(hint, 'no valid ["text/xpub", "cx1...:<i>"] metadata entry')
-      return `index ${hint.index}`
+      assert(hint, 'no valid ["text/cpub", "cx1...:<i>"] metadata entry (text/xpub is its name before luds 50d740a)')
+      return `purpose-2 index ${hint.index}`
     })
   }
 
@@ -1041,9 +1042,10 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   ]
 
   // The note URL with nothing on it, for every lookup that follows. The
-  // amount and any sig are claims the informational GET ignores anyway.
+  // amount and any certificate (c, or sig before luds 50d740a) are claims
+  // the informational GET ignores anyway.
   const base = new URL(url)
-  for (const key of ['k1', 'amount', 'sig', 'p', 'h']) base.searchParams.delete(key)
+  for (const key of ['k1', 'amount', 'c', 'sig', 'p', 'h']) base.searchParams.delete(key)
   const infoBy = (key, value) => {
     const u = new URL(base)
     u.searchParams.set(key, value)
@@ -1080,8 +1082,15 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   // graded where it arrives when a check is about it, and all together at
   // the end.
   const certificates = []
-  const noteCertificate = (where, sig, qHex, amountMsat) => {
-    certificates.push({where, sig: sig ?? null, qHex, amountMsat})
+  // LUD-25 names a certificate `c` (and a split's change `c2`) since luds
+  // 50d740a; before that it was `sig`/`sig2`. The grader reads only the
+  // current name, so a mint sending only the old one is graded uncertified,
+  // and says why. A mint still sending the old name alongside the new one
+  // (a transition) is not faulted for it.
+  const noteCertificate = (where, body, qHex, amountMsat, {change = false} = {}) => {
+    const cert = body?.[change ? 'c2' : 'c'] ?? null
+    const legacy = body?.[change ? 'sig2' : 'sig'] ?? null
+    certificates.push({where, sig: cert, legacyOnly: cert === null && legacy !== null, qHex, amountMsat})
   }
 
   let info
@@ -1096,7 +1105,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       String(info.k1 ?? '').toLowerCase() === k1.toLowerCase(),
       'the response k1 differs from the one queried - it must be the spend itself, echoed, never a derived id'
     )
-    noteCertificate('the informational GET of the note given', info.sig, originalQ, info.maxWithdrawable)
+    noteCertificate('the informational GET of the note given', info, originalQ, info.maxWithdrawable)
     return `${info.maxWithdrawable} msat`
   })
   if (!info?.callback) return
@@ -1197,7 +1206,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
         body.maxWithdrawable === value,
         `the same note is worth ${body.maxWithdrawable} by its ${spelling} and ${value} by k1`
       )
-      noteCertificate(`the lookup by ${spelling}`, body.sig, originalQ, body.maxWithdrawable)
+      noteCertificate(`the lookup by ${spelling}`, body, originalQ, body.maxWithdrawable)
       answered.push(spelling)
     }
     lookupOffered = true
@@ -1289,7 +1298,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     // leave every later check pointed at a note this service just burned,
     // and report a pile of cascading failures that say nothing.
     adopt(fresh.k1)
-    noteCertificate('the first rotate', body.sig, fresh.q, value)
+    noteCertificate('the first rotate', body, fresh.q, value)
     assert(
       body.k1 === undefined && body.change === undefined,
       'the response carried a secret - a compliant SERVICE returns none, since it generated none'
@@ -1313,6 +1322,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     const first = certificates.find(c => c.where === 'the first rotate')
     if (!first) throw soft('the rotate did not complete, so there is no output to check')
     if (first.sig === null) {
+      if (first.legacyOnly) throw soft('the rotate returned its certificate only as sig, the name before luds 50d740a; LUD-25 names it c')
       throw soft('the rotate returned no certificate - LUD-25 says a SERVICE SHOULD certify every note, a bearer note included')
     }
     const verdict = judgeCertificate(first.sig, first.qHex, first.amountMsat)
@@ -1340,14 +1350,17 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   })
 
   // The informational GET hands out the queried note's certificate, so a
-  // holder need not rotate just to get one. Optional there; but a sig that
+  // holder need not rotate just to get one. Optional there; but a c that
   // is there must be a cs1 for exactly this note, or a wallet treating it
   // as an offline proof is misled.
   await report.check('a certificate on the informational GET verifies over hex(Q)', async () => {
     const body = await lookup(current)
     assert(body.status !== 'ERROR', `informational GET refused: ${body.reason}`)
-    if (body.sig === undefined || body.sig === null) return 'no certificate offered here'
-    const verdict = judgeCertificate(body.sig, currentQ, body.maxWithdrawable)
+    if (body.c === undefined || body.c === null) {
+      if (typeof body.sig === 'string') throw soft('a certificate is offered only as sig, the name before luds 50d740a; LUD-25 names it c')
+      return 'no certificate offered here'
+    }
+    const verdict = judgeCertificate(body.c, currentQ, body.maxWithdrawable)
     assert(verdict.signedBy, verdict.problem)
     return `cs1 for the queried note, ${describeSigner(verdict.signedBy)}`
   })
@@ -1496,8 +1509,8 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       return r.maxWithdrawable
     }
     const [va, vb] = [await valueOf(a), await valueOf(b)]
-    noteCertificate('a split, first output', body.sig, a.q, va)
-    noteCertificate('a split, change', body.sig2, b.q, vb)
+    noteCertificate('a split, first output', body, a.q, va)
+    noteCertificate('a split, change', body, b.q, vb, {change: true})
     assert(
       va === half,
       `asked to split off ${half}, got ${va} - any split fee comes out of change, never the requested amount`
@@ -1518,7 +1531,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     assert(mbody.status === 'OK', `merge refused: ${mbody.reason}`)
     adopt(merged.k1)
     const total = await valueOf(merged)
-    noteCertificate('a merge', mbody.sig, merged.q, total)
+    noteCertificate('a merge', mbody, merged.q, total)
     if (knownBaseFee !== null) {
       assert(
         total === va + vb + knownBaseFee,
@@ -1558,7 +1571,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     adopt(fresh.k1)
     const minted = await liveValue(fresh.k1)
     assert(minted !== null, 'the rotate reported OK but minted nothing')
-    noteCertificate('a rotate', first.sig, fresh.q, minted)
+    noteCertificate('a rotate', first, fresh.q, minted)
 
     const retried = await call({k1s: [prior], p1: fresh.h})
     const stillThere = await liveValue(fresh.k1)
@@ -1568,7 +1581,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       retried.status === 'OK',
       `a retried rotate is answered "${retried.reason}" while the note it minted is live and worth ${stillThere} msat`
     )
-    assert(retried.sig === first.sig, 'a retried rotate returned a different sig than the original')
+    assert(retried.c === first.c, 'a retried rotate returned a different certificate (c) than the original')
 
     // --- the same rotate, retried in other spellings ---
     const respelt = [
@@ -1583,7 +1596,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
         again.status === 'OK',
         `a retried rotate naming ${what} is answered "${again.reason}" - LUD-25 matches a retry on the notes it names, not the strings naming them`
       )
-      assert(again.sig === first.sig, `a retried rotate naming ${what} returned a different certificate than the original`)
+      assert(again.c === first.c, `a retried rotate naming ${what} returned a different certificate than the original`)
     }
 
     // --- a split, retried ---
@@ -1601,8 +1614,8 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       throw new Error(`the split itself was refused: ${splitFirst.reason}`)
     }
     const [va, vb] = [await liveValue(a.k1), await liveValue(b.k1)]
-    noteCertificate('a split, first output', splitFirst.sig, a.q, va)
-    noteCertificate('a split, change', splitFirst.sig2, b.q, vb)
+    noteCertificate('a split, first output', splitFirst, a.q, va)
+    noteCertificate('a split, change', splitFirst, b.q, vb, {change: true})
     const splitRetried = await call(split)
     const [va2, vb2] = [await liveValue(a.k1), await liveValue(b.k1)]
     assert(va2 === va && vb2 === vb, `the retried split changed its outputs: ${va}/${vb} -> ${va2}/${vb2}`)
@@ -1610,15 +1623,15 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       splitRetried.status === 'OK',
       `a retried split is answered "${splitRetried.reason}" while both its outputs are live`
     )
-    assert(splitRetried.sig === splitFirst.sig, 'a retried split returned a different sig than the original')
-    assert(splitRetried.sig2 === splitFirst.sig2, 'a retried split returned a different sig2 than the original')
+    assert(splitRetried.c === splitFirst.c, 'a retried split returned a different certificate (c) than the original')
+    assert(splitRetried.c2 === splitFirst.c2, 'a retried split returned a different change certificate (c2) than the original')
 
     // put the two halves back together, so the runner ends holding one note
     const merged = freshBearer()
     const mergeBody = await call({k1s: [a.k1, b.k1], p1: merged.h})
     if (mergeBody.status === 'OK') {
       adopt(merged.k1)
-      noteCertificate('a merge', mergeBody.sig, merged.q, await liveValue(merged.k1))
+      noteCertificate('a merge', mergeBody, merged.q, await liveValue(merged.k1))
     }
 
     return 'a rotate replays byte for byte and respelt, and so does a split'
@@ -1668,7 +1681,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       const body = await call({k1s: [spend], p1: home.h})
       if (body.status === 'OK') {
         adopt(home.k1)
-        noteCertificate('the rotate out of the script tree', body.sig, home.q, tree.value)
+        noteCertificate('the rotate out of the script tree', body, home.q, tree.value)
         tree = null
         return what
       }
@@ -1712,7 +1725,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       keyPath: keyPathSpend(tweakSecretKey(internal, built.tweak), domain)
     }
     adopt(home)
-    noteCertificate('the rotate into the script tree', body.sig, q, tree.value)
+    noteCertificate('the rotate into the script tree', body, q, tree.value)
 
     const inTree = await lookup(home)
     if (inTree.status === 'ERROR') {
@@ -1744,7 +1757,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       if (body.status === 'OK') {
         const lost = tree.value
         adopt(out.k1)
-        noteCertificate('a rotate the mint should have refused', body.sig, out.q, lost)
+        noteCertificate('a rotate the mint should have refused', body, out.q, lost)
         tree = null
         throw new Error(`spent the note by ${why} - anyone who saw that spend could have taken the value`)
       }
@@ -1835,7 +1848,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       forged: encodeCk1(pk, schnorr.sign(sha256(utf8ToBytes('not the sighash')), secp256k1.utils.randomSecretKey()))
     }
     adopt(keyNote.ck1)
-    noteCertificate('the rotate into a key-path note', body.sig, q, keyNote.value)
+    noteCertificate('the rotate into a key-path note', body, q, keyNote.value)
     return `rotated into cp1<${q.slice(0, 12)}...>`
   })
 
@@ -1860,7 +1873,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     const body = await call({k1s: [keyNote.elsewhere], p1: out.h})
     if (body.status === 'OK') {
       adopt(out.k1)
-      noteCertificate('a rotate the mint should have refused', body.sig, out.q, keyNote.value)
+      noteCertificate('a rotate the mint should have refused', body, out.q, keyNote.value)
       keyNote = null
       throw new Error(`spent the note by a ck1 signed for other.invalid, not ${domain} - a signature any mint has seen can be replayed here`)
     }
@@ -1876,7 +1889,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     const body = await call({k1s: [keyNote.ck1], p1: home.h})
     if (body.status === 'OK') {
       adopt(home.k1)
-      noteCertificate('the rotate out of the key-path note', body.sig, home.q, keyNote.value)
+      noteCertificate('the rotate out of the key-path note', body, home.q, keyNote.value)
     } else {
       // Bring the value home before failing. The fixed-message ck1 LUD-25
       // has since dropped is tried only as a rescue: a mint that still
@@ -1895,7 +1908,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     assert(byKey.status !== 'ERROR', `the callback took the ck1, but the informational GET refused it: ${byKey.reason}`)
     assert(byKey.maxWithdrawable === keyNote.value, `the key-path note is worth ${byKey.maxWithdrawable} by its ck1, not ${keyNote.value}`)
     assert(String(byKey.k1 ?? '').toLowerCase() === keyNote.ck1, 'the informational GET by ck1 did not echo the ck1 it was queried with')
-    noteCertificate('the informational GET of the key-path note', byKey.sig, keyNote.q, byKey.maxWithdrawable)
+    noteCertificate('the informational GET of the key-path note', byKey, keyNote.q, byKey.maxWithdrawable)
     keyNote = null
     return `bound to ${domain}, and spent home to a bearer note`
   })
@@ -1915,9 +1928,10 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     }
     assert(wrong.length === 0, wrong.join('; '))
     const missing = certificates.length - present.length
+    const legacyOnly = certificates.filter(c => c.legacyOnly).length
     if (missing > 0) {
       throw soft(
-        `${missing} of ${certificates.length} notes came back uncertified - LUD-25 says a SERVICE SHOULD certify every note it issues${present.length > 0 ? `; the ${present.length} certificates given all verify` : ''}`
+        `${missing} of ${certificates.length} notes came back uncertified${legacyOnly > 0 ? ` (${legacyOnly} of them certified only as sig/sig2, the names before luds 50d740a; LUD-25 names them c/c2)` : ''} - LUD-25 says a SERVICE SHOULD certify every note it issues${present.length > 0 ? `; the ${present.length} certificates given all verify` : ''}`
       )
     }
     const keys = [...signedBy].map(key => (key === info.mintPubkey ? 'mintPubkey' : `previous key ${key.slice(0, 16)}...`))
@@ -1928,6 +1942,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     finalSecret: current,
     noteUrl: (() => {
       const u = new URL(url)
+      u.searchParams.delete('c')
       u.searchParams.delete('sig')
       u.searchParams.delete('amount')
       u.searchParams.set('k1', current)

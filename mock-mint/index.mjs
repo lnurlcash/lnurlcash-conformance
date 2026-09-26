@@ -88,7 +88,7 @@ const DEFAULTS = {
   // signmessage output unreordered.
   signatureLayout: 'trailing',
   // Certify every note it issues with a cs1 over hex(Q), a bearer note
-  // included. LUD-25 makes that a SHOULD; false withholds sig/sig2
+  // included. LUD-25 makes that a SHOULD; false withholds c/c2
   // entirely, as a SERVICE with no signer does.
   signatures: true,
   // The hosts a spend's signature may be bound to. Unset, the mock takes
@@ -160,6 +160,14 @@ const DEFAULTS = {
   ignoresTimeClaims: false,
   // over-strict: refuse every non-zero locktime, a past Unix time included
   refusesLocktimes: false,
+  // the names certificates travel under. 'c' is LUD-25 as of luds 50d740a
+  // (c, and c2 for a split's change); 'sig' is the pre-50d740a sig/sig2
+  // alone, which a current wallet reads as no certificate at all; 'both'
+  // sends each under both names, as a mint mid-transition does
+  certificateNames: 'c',
+  // the payRequest metadata type a registered address's internal-transfer
+  // hint travels under: 'text/cpub' as of luds 50d740a, 'text/xpub' before
+  addressHintType: 'text/cpub',
   // accept any ck1 whose Q is outstanding without checking its signature,
   // so a spend bound to another mint's domain, or to none, opens the note
   unverifiedCk1: false,
@@ -390,8 +398,9 @@ export const createMockMint = async (options = {}) => {
 
   // A deterministic watch-only branch for the registered-address fixture.
   // It is public test material, not a secret used for value. The mock uses
-  // the actual LUD-25 tweak so its text/xpub hint names the same output its
-  // next quote reserves.
+  // the actual LUD-25 tweak on purpose 2, the Lightning Address counter
+  // auto-mint and internal transfer share (luds 50d740a), so its text/cpub
+  // hint names the same output its next quote reserves.
   const registeredBranchSecret = hexToBytes('44'.repeat(32))
   const registeredBranchPubkey = secp256k1.getPublicKey(registeredBranchSecret, true).slice(1)
   const registeredChainCode = sha256(utf8ToBytes('lnurlcash-conformance registered address'))
@@ -400,6 +409,9 @@ export const createMockMint = async (options = {}) => {
     bech32m.toWords(concat(registeredBranchPubkey, registeredChainCode)),
     200
   )
+  // The purpose-2 index: a Lightning Address payment and an internal
+  // transfer land on it, never on the wallet's own purpose 0.
+  const ADDRESS_PURPOSE = 2
   let registeredIndex = 0
 
   // A Q is spoken for if it is a note in any state, the fallback note of an
@@ -416,7 +428,7 @@ export const createMockMint = async (options = {}) => {
       const index = registeredIndex++
       // t mod n, as the spec requires: a tweak >= n is reduced, not skipped
       const tweak =
-        BigInt(`0x${bytesToHex(taggedHash('LNURLcash/derive', registeredBranchPubkey, registeredChainCode, ser32(index)))}`) %
+        BigInt(`0x${bytesToHex(taggedHash('LNURLcash/derive', registeredBranchPubkey, registeredChainCode, ser32(ADDRESS_PURPOSE), ser32(index)))}`) %
         secp256k1.Point.Fn.ORDER
       const note = branch.add(secp256k1.Point.BASE.multiplyUnsafe(tweak))
       if (note.equals(secp256k1.Point.ZERO)) continue
@@ -552,7 +564,7 @@ export const createMockMint = async (options = {}) => {
       const previousKey = q.get('key') === 'previous'
       const h = k1 && /^[0-9a-f]{64}$/i.test(k1) ? noteId(k1.toLowerCase()) : p ? hOf(p) : null
       const sig = mintNote(qHex, amount, {previousKey, ...(h ? {h} : {})})
-      return send({status: 'OK', ...(k1 ? {k1} : {p}), amount, sig: sig ?? null})
+      return send({status: 'OK', ...(k1 ? {k1} : {p}), amount, c: sig ?? null})
     }
     if (url.pathname === '/_test/settle') {
       const hash = q.get('payment_hash')?.toLowerCase()
@@ -603,6 +615,14 @@ export const createMockMint = async (options = {}) => {
 
     if (opts.slowMs) await new Promise(r => setTimeout(r, opts.slowMs))
     const send = (body, status = 200) => {
+      if (opts.certificateNames !== 'c' && body && typeof body === 'object') {
+        body = {...body}
+        for (const [now, before] of [['c', 'sig'], ['c2', 'sig2']]) {
+          if (!(now in body)) continue
+          body[before] = body[now]
+          if (opts.certificateNames === 'sig') delete body[now]
+        }
+      }
       if (opts.malformedJson) {
         res.writeHead(status, {'content-type': 'application/json'})
         res.end('{ this is not json')
@@ -638,7 +658,7 @@ export const createMockMint = async (options = {}) => {
         metadata.push(['text/plain', `Mint fees: ${opts.baseFeeMsat},${opts.feePpm}`])
       }
       if (opts.registeredAddress) {
-        metadata.push(['text/xpub', `${registeredCx1}:${registeredIndex}`])
+        metadata.push([opts.addressHintType, `${registeredCx1}:${registeredIndex}`])
       }
       return send({
         tag: 'payRequest',
@@ -1015,7 +1035,7 @@ export const createMockMint = async (options = {}) => {
               }
             : {}),
           mintPubkey: pubkey,
-          ...(sig ? {sig} : {})
+          ...(sig ? {c: sig} : {})
         })
       }
       if (!k1) return fail('Unknown note.')
@@ -1054,7 +1074,7 @@ export const createMockMint = async (options = {}) => {
             }
           : {}),
         mintPubkey: pubkey,
-        ...(sig ? {sig} : {})
+        ...(sig ? {c: sig} : {})
       })
     }
 
@@ -1122,9 +1142,9 @@ export const createMockMint = async (options = {}) => {
         const outputs = swaps.get(identity)
         if (outputs) {
           const replay = {status: 'OK'}
-          if (outputs[0].sig) replay.sig = outputs[0].sig
+          if (outputs[0].sig) replay.c = outputs[0].sig
           if (outputs[1]) {
-            if (outputs[1].sig) replay.sig2 = outputs[1].sig
+            if (outputs[1].sig) replay.c2 = outputs[1].sig
           }
           if (opts.serverGeneratedSecrets) {
             replay.k1 = 'a'.repeat(64)
@@ -1234,8 +1254,8 @@ export const createMockMint = async (options = {}) => {
           {q: out2, amountMsat: change, sig: sig2}
         ])
         const body = {status: 'OK'}
-        if (sig) body.sig = sig
-        if (sig2) body.sig2 = sig2
+        if (sig) body.c = sig
+        if (sig2) body.c2 = sig2
         if (opts.serverGeneratedSecrets) {
           body.k1 = 'a'.repeat(64)
           body.change = 'b'.repeat(64)
@@ -1252,7 +1272,7 @@ export const createMockMint = async (options = {}) => {
       const sig = mintNote(out1, total + refund, {h: hOf(p1)})
       swaps.set(identity, [{q: out1, amountMsat: total + refund, sig}])
       const body = {status: 'OK'}
-      if (sig) body.sig = sig
+      if (sig) body.c = sig
       if (opts.serverGeneratedSecrets) body.k1 = 'a'.repeat(64)
       return finish(body)
     }

@@ -343,6 +343,32 @@ if (unsigned.failed > 0) die('a mint issuing no certificates FAILED the grade - 
 conserved(unsigned, 'a mint issuing no certificates')
 console.log('ok   a mint issuing no certificates warns, and never fails')
 
+// Certificates are named c and c2 since luds 50d740a. A mint sending only
+// the old sig/sig2 is, to a current wallet, a mint sending no certificate:
+// it warns, never fails, and the report names the old spelling. A mint
+// sending both, as one mid-transition does, is graded on c and passes.
+const oldNames = await grade({certificateNames: 'sig'})
+for (const name of [SIGNATURE_CHECK, EVERY_CERTIFICATE]) {
+  if (statusOf(oldNames, name) !== 'warn' || !/50d740a/.test(detailOf(oldNames, name))) {
+    die(`certificates sent only as sig/sig2 did not warn, naming the old spelling, on "${name}": ${statusOf(oldNames, name)} ${detailOf(oldNames, name)}`)
+  }
+}
+if (oldNames.failed > 0) die('a mint certifying only as sig/sig2 FAILED the grade - certifying is a SHOULD')
+conserved(oldNames, 'a mint certifying only as sig/sig2')
+console.log('ok   certificates sent only as sig/sig2 warn as uncertified, and are named')
+
+const bothNames = await grade({certificateNames: 'both'})
+for (const name of [SIGNATURE_CHECK, EVERY_CERTIFICATE]) {
+  if (statusOf(bothNames, name) !== 'pass') {
+    die(`a mint sending c and sig both did not pass "${name}": ${statusOf(bothNames, name)} ${detailOf(bothNames, name)}`)
+  }
+}
+const warnings = report => report.results.filter(r => r.status === 'warn').map(r => r.name).sort().join()
+if (bothNames.failed > 0 || warnings(bothNames) !== warnings(await grade({}))) {
+  die('a mint sending c and sig both was faulted for the extra sig')
+}
+console.log('ok   a mint sending certificates as both c and sig passes clean')
+
 // ...but a certificate that is there must be over hex(Q). One over a bearer
 // note's h is the pre-taproot message, and a wallet checking it offline
 // rejects a good note.
@@ -456,6 +482,15 @@ if (!/registered Lightning Address/.test(detailOf(address, MINT_TO_HASH_CHECK)))
   die(`the report did not name what it graded: ${detailOf(address, MINT_TO_HASH_CHECK)}`)
 }
 console.log('ok   a registered address passes under --address, and the report names it')
+
+// The internal-transfer hint is text/cpub since luds 50d740a; one still
+// published as text/xpub is not found.
+const oldHint = await grade({registeredAddress: true, addressHintType: 'text/xpub'}, {registeredAddress: true})
+const HINT_CHECK = 'advertises its cx1 and next index for internal transfers'
+if (statusOf(oldHint, HINT_CHECK) !== 'fail') {
+  die(`an address hint published as text/xpub was not caught: ${statusOf(oldHint, HINT_CHECK)}`)
+}
+console.log('ok   an internal-transfer hint under the old text/xpub name caught')
 
 // The flag relaxes the comment rules and nothing else. It cannot separate
 // an address from a preimage-keyed fallback - both answer free text with

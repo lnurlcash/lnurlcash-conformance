@@ -17,7 +17,8 @@ spec-vectors.json    25.md's own test vectors 1-5, every value checked against t
 spends.json          the taproot model: bearer notes, ck1 per domain, a 3-leaf tree and its
                      verdicts, a CHECKSIG leaf's sighash, time claims, leaf policy, bad cw1s
 part2.json           key-path notes: cp1, ck1=Q||BIP340 sig over the domain-bound sighash,
-                     cs1 over hex(Q), cx1, the note-key tweak, address proofs; m/139'/d1..d4
+                     cs1 over hex(Q), cx1, the note-key tweak per purpose, address proofs;
+                     m/139'/d1..d4; prePurpose = the superseded tweak, for sweeping only
 bech32.json          LUD-01 encoding
 url-admission.json   which URLs may be fetched (https, or http to loopback/.onion)
 input-resolution.json bech32, LUD-17, Lightning Address, bare domain
@@ -100,7 +101,7 @@ softly: a mint publishing none of them loses nothing, a published field of
 the wrong shape warns, and a signature under a key the mint publishes in
 previousPubkeys is accepted as its own.
 
---spend grades LUD-25 as of luds 6e865b1. Besides the rotate, split, merge,
+--spend grades LUD-25 as of luds 50d740a. Besides the rotate, split, merge,
 retry and refusal checks it moves the value through a three-leaf script tree
 (a hashlock at leaf version 0xc0, the same at 0xc2, a hashlock with
 OP_SUCCESS80) and a key-path note, and requires: the 0xc2 and OP_SUCCESS
@@ -109,9 +110,12 @@ claims refused and a past locktime accepted; a ck1 for another domain refused
 at the callback and the informational GET; the right-domain ck1 accepted; a
 p1 naming a burned note refused as exactly "already in use"; a retry respelt
 (preimage vs full cw1, h vs cp1) replayed. A missing cs1 warns (SHOULD); a
-cs1 not over hex(Q) fails. Value always comes home.
+cs1 not over hex(Q) fails. Certificates are read from c and c2 only; a mint
+sending only the pre-50d740a sig/sig2 is graded uncertified (warns), and one
+sending both names passes. --address reads the internal-transfer hint from
+text/cpub (text/xpub before 50d740a is not read). Value always comes home.
 
-## Notes and spends, canonically (luds 6e865b1)
+## Notes and spends, canonically (luds 6e865b1, keys per 50d740a)
 
 Q        32-byte x-only taproot output key; cp1<Q> (bech32m, hrp "cp"), and
          a mint MUST refuse a Q that is not on the curve
@@ -131,6 +135,12 @@ sighash  tagged_hash("TapSighash", 0x00 || SigMsg), SIGHASH_DEFAULT, input 0 of:
          path); spent output (OP_1 <Q>, 0)
 domain   the mint's lowercase hostname: no scheme, no port
 leaves   refuse leaf version != 0xc0 and any OP_SUCCESSx outside pushed data
+derive   t = tagged_hash("LNURLcash/derive", P || chaincode || ser32(purpose) ||
+         ser32(i)) mod n; pk_i = x(lift_x(P) + t·G). purpose 0 = the wallet's
+         own notes (mint, rotate, merge, a split's p1), 1 = a split's change p2,
+         2 = Lightning Address auto-mint and internal transfer. One counter and
+         one recovery gap limit per purpose; one cx1 covers all three. The
+         register/unregister proof signs with purpose 0, index 0
 time     nLockTime 0, or a Unix time (>= 500000000) not in the future;
          nSequence with bit 31 set, or bit 22 set and (low 16 bits * 512 s)
          elapsed since the mint credited the note; heights and block counts
@@ -143,6 +153,11 @@ digest  = sha256(sha256("Lightning Signed Message:" + message))
 sig     = 65 bytes, r || s || recovery_id (wire format)
 cs1     bech32m, hrp "cs" + BOLT-11 amount (cs10n = 1000 msat), over sig
 pubkey  = mintPubkey, 33-byte compressed, hex
+wire    JSON "c" (and "c2" for a split's change) on the informational GET and
+        every rotate, split or merge; note URL ...?k1=<spend>&c=<cs1>. These
+        were sig, sig2 and &sig= before luds 50d740a
+hint    payRequest metadata ["text/cpub", "cx1...:<i>"], i the purpose-2
+        counter (text/xpub before luds 50d740a)
 
 Recover from digest with NO further hashing (prehash off). Verifiers MUST
 also accept recovery_id || r || s. Library layouts differ:

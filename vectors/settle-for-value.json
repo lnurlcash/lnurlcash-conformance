@@ -6,7 +6,7 @@
     "the note URL parses and names a host",
     "the host is one of acceptedMints",
     "the mint is asked what the note is worth, which is where a spent or in-flight note surfaces",
-    "when requireSignature, the note carries a sig and it verifies against the mint pubkey",
+    "when requireSignature, the note carries a certificate (c) and it verifies against the mint pubkey",
     "the value the mint reports is at least minMsat",
     "rotate: the settlement and the double-spend check in one call"
   ],

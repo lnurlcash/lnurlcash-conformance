@@ -1130,6 +1130,11 @@ check('the threat suite cross-references its executable companion', () => {
 const part2 = load('part2.json')
 const N2 = secp256k1.Point.Fn.ORDER
 const toNum = bytes => BigInt(`0x${bytesToHex(bytes)}`)
+const be32 = n => {
+  const out = new Uint8Array(4)
+  new DataView(out.buffer).setUint32(0, n, false)
+  return out
+}
 const cat = (...parts) => {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
   let o = 0
@@ -1207,9 +1212,8 @@ check('part2: a watcher holding only the cx1 derives every note key', () => {
   for (const b of part2.branches) {
     const P = secp256k1.Point.fromBytes(cat(Uint8Array.of(0x02), hexToBytes(b.branchPubkey)))
     for (const n of b.notes) {
-      const i = new Uint8Array(4)
-      new DataView(i.buffer).setUint32(0, n.index, false)
-      const t = toNum(sha256(cat(tag, tag, hexToBytes(b.branchPubkey), hexToBytes(b.chainCode), i)))
+      assert([0, 1, 2].includes(n.purpose), `${b.host} #${n.index}: purpose ${n.purpose}`)
+      const t = toNum(sha256(cat(tag, tag, hexToBytes(b.branchPubkey), hexToBytes(b.chainCode), be32(n.purpose), be32(n.index))))
       const pk = P.add(secp256k1.Point.BASE.multiply(t)).toBytes(true).slice(1)
       assert(bytesToHex(pk) === n.notePubkey, `${b.host} #${n.index}: watch-only pk`)
       const sk = toNum(hexToBytes(n.noteSecretKey))
@@ -1221,6 +1225,38 @@ check('part2: a watcher holding only the cx1 derives every note key', () => {
       const cp1 = decode2('cp', n.cp1, 32)
       assert(cp1 && bytesToHex(cp1) === n.notePubkey, `${b.host} #${n.index}: cp1`)
     }
+  }
+})
+
+// Each purpose is its own counter: the same index on two purposes must be
+// two different keys, and every branch must exercise all three.
+check('part2: every branch covers all three purposes, and they never share a key', () => {
+  for (const b of part2.branches) {
+    assert(new Set(b.notes.map(n => n.purpose)).size === 3, `${b.host}: not every purpose is covered`)
+    const keys = b.notes.map(n => n.notePubkey)
+    assert(new Set(keys).size === keys.length, `${b.host}: two notes share a key`)
+  }
+})
+
+// The superseded derivation, without ser32(purpose): it must still
+// recompute, and must land on none of the current keys.
+check('part2: the pre-purpose record is the old formula and matches no current key', () => {
+  const pre = part2.prePurpose
+  assert(pre && pre.superseded === true, 'no superseded prePurpose record')
+  const b = part2.branches.find(x => x.cx1 === pre.cx1 && x.host === pre.host)
+  assert(b, 'prePurpose names no branch')
+  const tag = sha256(utf8ToBytes('LNURLcash/derive'))
+  const P = secp256k1.Point.fromBytes(cat(Uint8Array.of(0x02), hexToBytes(b.branchPubkey)))
+  const current = new Set(b.notes.map(n => n.notePubkey))
+  for (const n of pre.notes) {
+    const t = toNum(sha256(cat(tag, tag, hexToBytes(b.branchPubkey), hexToBytes(b.chainCode), be32(n.index))))
+    const pk = P.add(secp256k1.Point.BASE.multiply(t)).toBytes(true).slice(1)
+    assert(bytesToHex(pk) === n.notePubkey, `pre-purpose #${n.index}: pk`)
+    assert(
+      bytesToHex(secp256k1.Point.BASE.multiply(toNum(hexToBytes(n.noteSecretKey))).toBytes(true).slice(1)) === n.notePubkey,
+      `pre-purpose #${n.index}: sk`
+    )
+    assert(!current.has(n.notePubkey), `pre-purpose #${n.index}: collides with a current key`)
   }
 })
 
@@ -1262,8 +1298,11 @@ check('part2: every certificate is the mint key over its message', () => {
   }
 })
 
-check('part2: every address proof is action-, domain- and username-bound to index zero', () => {
+check('part2: every address proof is action-, domain- and username-bound to the purpose-0 index-0 key', () => {
+  const walletZero = part2.branches[0].notes.find(n => n.purpose === 0 && n.index === 0)
+  assert(part2.branches[0].notes[0] === walletZero, 'notes[0] is not purpose 0, index 0')
   for (const proof of part2.addressProofs) {
+    assert(proof.indexZeroPubkey === walletZero.notePubkey, `${proof.action}: not the purpose-0 index-0 key`)
     assert(['register', 'unregister'].includes(proof.action), `${proof.action}: action`)
     assert(
       proof.message === `LNURLcash:${proof.action}:${proof.domain}:${proof.username}`,
@@ -1334,10 +1373,9 @@ check('nostr-seed: every seed, branch and note recomputes', () => {
     const cx = decode2('cx', c.cx1, 64)
     assert(cx && bytesToHex(cx) === bytesToHex(x) + bytesToHex(node.subarray(32)), `${c.host}: cx1`)
     const lifted = secp256k1.Point.fromBytes(cat(Uint8Array.of(0x02), x))
+    assert(new Set(c.notes.map(n => n.purpose)).size === 3, `${c.host}: not every purpose is covered`)
     for (const n of c.notes) {
-      const i = new Uint8Array(4)
-      new DataView(i.buffer).setUint32(0, n.index, false)
-      const t = toNum(sha256(cat(tag, tag, x, node.subarray(32), i)))
+      const t = toNum(sha256(cat(tag, tag, x, node.subarray(32), be32(n.purpose), be32(n.index))))
       const pk = lifted.add(secp256k1.Point.BASE.multiply(t)).toBytes(true).slice(1)
       assert(bytesToHex(pk) === n.notePubkey, `${c.host} #${n.index}: watch-only pk`)
       const sighash = keyPathSighash(pk, c.domain)
@@ -1358,7 +1396,7 @@ check('nostr-seed: every seed, branch and note recomputes', () => {
 //
 // spec-vectors.json is produced by the generator from the primitives. Two
 // independent checks hold it to the spec: every value is compared with the
-// hex 25.md itself prints (transcribed below from lnurl/luds 6e865b1, the
+// hex 25.md itself prints (transcribed below from lnurl/luds 50d740a, the
 // one place in this repo those numbers are typed rather than computed), and
 // every value is recomputed with the grader's own primitives and code here.
 
@@ -1376,36 +1414,58 @@ const SPEC_TEXT = {
     cx1: 'cx1k7pa9ycdcpf6ju0sryz5efp70jw72rs8d80gwtw3mh096zl5e8g6hywvzxh28902dd3zj2npgl63aaq4p6l2qnn52ymmdpceugu0jpqes280t',
     notes: [
       {
+        purpose: 0,
         index: 0,
-        t: '10054a4025dc5678a26e16087703ac1af6be92dab9cc20f10c5a5ae0ffbd057c',
-        Q: '02aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
-        pk: 'aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
-        sk: '944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f',
-        cp1: 'cp14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6qh2fkky'
+        t: 'b1d16430daa362837db746ce38dc6c5ebb092876692b5cac5bbdce0f3cd92688',
+        Q: '02690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f',
+        pk: '690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f',
+        sk: '3616b02290a133da73e758a54dbff1bf6439b4067a820cb51ca873fa4a13a96a',
+        cp1: 'cp1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0sxpcl6z'
       },
       {
+        purpose: 0,
         index: 1,
-        t: '08c401f6e9646a046291700ec99fa5181f46b241cb4667cd1aa7b86ed30fde19',
-        Q: '02f0c1ea9aede945b9cf84f3bf8df27ac65154a937e4d10cb8a5865df0583b1083',
-        pk: 'f0c1ea9aede945b9cf84f3bf8df27ac65154a937e4d10cb8a5865df0583b1083',
-        sk: '8d094de89f623b5b58c181e5de832a7783261ab88be5b8119b64bce6b080a23c',
-        cp1: 'cp17rq74xhda9zmnnuy7wlcmun6ceg4f2fhungsew99sewlqkpmzzpsf28ex8'
+        t: '1120c64b536e09cf1f08dad93edb7161682c739773a1330b4e137f3eb1cb9e48',
+        Q: '023e76b56c1a90bc64c4bf594be91a3cb8861a150232da92705cff6ee3714bb384',
+        pk: '3e76b56c1a90bc64c4bf594be91a3cb8861a150232da92705cff6ee3714bb384',
+        sk: '9566123d096bdb261538ecb053bef6c0cc0bdc0e3440834fced083b68f3c626b',
+        cp1: 'cp18emt2mq6jz7xf39lt997jx3uhzrp59gzxtdfyuzulahwxu2tkwzqjttard'
       },
       {
+        purpose: 0,
         index: 2,
-        t: 'b17b1b45fb64a2d70009c968f965790e11a6b9879041eb9730fda21ca199181f',
-        Q: '03c1e51bc2b8ad1c6ecfe382fe201c322506e2783a2e4d3eae0da47fece2eab078',
-        pk: 'c1e51bc2b8ad1c6ecfe382fe201c322506e2783a2e4d3eae0da47fece2eab078',
-        sk: '35c06737b162742df639db400e48fe6ebad74517a1989b9ff1e84807aed39b01',
-        cp1: 'cp1c8j3hs4c45wxanlrstlzq8pjy5rwy7p69exnatsd53l7ech2kpuqsypsv2'
+        t: 'da4160b271948f81059ca631c4bdae0eed617f6f39d531d082c9472b795aa4c5',
+        Q: '0220146298f9b6439027ead2b4a15738a10721b26c425b58c634baac6147ee7fc7',
+        pk: '20146298f9b6439027ead2b4a15738a10721b26c425b58c634baac6147ee7fc7',
+        sk: '5e86aca4279260d7fbccb808d9a1336f96920aff4b2be1d943b3ed16869527a7',
+        cp1: 'cp1yq2x9x8ekepeqfl26262z4ec5yrjrvnvgfd43335h2kxz3lw0lrss2e4g5'
       },
       {
+        purpose: 0,
         index: 5,
-        t: '468c1cdcf8fe1194f33d2b4c543c9a6000423bddc9b8a83f17c3ace9b0796568',
-        Q: '02c2b6a6d230d3ca51cc680bf84948c416eab70109542a0cf4fd1fbebbd647891a',
-        pk: 'c2b6a6d230d3ca51cc680bf84948c416eab70109542a0cf4fd1fbebbd647891a',
-        sk: 'cad168ceaefbe2ebe96d3d2369201fbf6421a4548a57f8839880b1618dea298b',
-        cp1: 'cp1c2m2d53s6099rnrgp0uyjjxyzm4twqgf2s4qea8ar7lth4j83ydqcznzj6'
+        t: '8cf628fcc47354f9c3a2a072f108b41da79792d8300bf8c9d8c74de61897d0a7',
+        Q: '02c64ed8f1cd0f4d23aba8ddd739d9ae7e1a7ba2719cb54437384498fbc73788b3',
+        pk: 'c64ed8f1cd0f4d23aba8ddd739d9ae7e1a7ba2719cb54437384498fbc73788b3',
+        sk: '113b74ee7a712650b9d2b24a05ec397e50c81e684162a8d299b1f3d125d25389',
+        cp1: 'cp1ce8d3uwdpaxj82agmhtnnkdw0cd8hgn3nj65gdecgjv0h3eh3zes4mxg2k'
+      },
+      {
+        purpose: 1,
+        index: 0,
+        t: 'd17f99715d669d21e4172e3dee64d176b3a2ff18cfc56f9d359213fb5a016023',
+        Q: '03e9a2d71a45a4a5a22d3378bdd761f0b3b2622b6a939d24c779668379352d8274',
+        pk: 'e9a2d71a45a4a5a22d3378bdd761f0b3b2622b6a939d24c779668379352d8274',
+        sk: '55c4e56313646e78da474015034856d75cd38aa8e11c1fa5f67cb9e6673be305',
+        cp1: 'cp1ax3dwxj95jj6ytfn0z7awc0skwexy2m2jwwjf3mev6phjdfdsf6qx02dpd'
+      },
+      {
+        purpose: 2,
+        index: 0,
+        t: '00194391b44f24f7a5d3c8e2bd2854adcc536e3f2ddcdf5e8091f56117913685',
+        Q: '02acff3482453b4671e410d2158fd93ab7d4c3e8c1b9554ce1190deb021fd2cd4c',
+        pk: 'acff3482453b4671e410d2158fd93ab7d4c3e8c1b9554ce1190deb021fd2cd4c',
+        sk: '845e8f836a4cf64e9c03dab9d20bda0d3032d6b5ee7c2fa3014ef9d8f501faa8',
+        cp1: 'cp14nlnfqj98dr8reqs6g2clkf6kl2v86xph925ecgeph4sy87je4xqrl557f'
       }
     ]
   },
@@ -1423,28 +1483,31 @@ const SPEC_TEXT = {
     cx1: 'cx1vjy9489tj0kq29mphzstsrsc2jnpsev834v0w23kth7kgzzs7e6kh9tet7vq0tdgtjx22rkf8jfpfqapsw4la49rkj47dw2u3xyqxpspgvxpa',
     notes: [
       {
+        purpose: 0,
         index: 0,
-        t: '4d010c0ae5b4e0def5d0eb651d5e08de7fc36aef5703231480372b24688d2711',
-        Q: '0223bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130',
-        pk: '23bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130',
-        sk: 'bc1e4427b38f7b48ef379ff7cefbef6612cf84a0f582b06c90bf6b51d2c89f29',
-        cp1: 'cp1ywljdk2rxkm9ap9c8qltp296ajxr9chtc4s6yp9rs6ahyz6v6ycqvtd8z5'
+        t: '3867f7253bf0d9b02bb522625e3ae902b2d46896c199a62ea64b97d4dc2ad230',
+        Q: '0201fee34e378bf66de6afa1bfa6e30f5c89551fd92bc1b089dca93c52b7ab61bc',
+        pk: '01fee34e378bf66de6afa1bfa6e30f5c89551fd92bc1b089dca93c52b7ab61bc',
+        sk: 'a7852f4209cb741a251bd6f50fd8cf8a45e0824860193386b6d3d80246664a48',
+        cp1: 'cp1q8lwxn3h30mxme405xl6dcc0tjy4287e90qmpzwu4y799datvx7q0uv35q'
       },
       {
+        purpose: 0,
         index: 1,
-        t: '370d05e7dca3f107e7ec061de1ea81a51f2a7f5756330317d1a662fdfd35f618',
-        Q: '03b1ab49e8ca397385ccb6d17d611bf8afc75390513bdcdfe3d760e0bb9860e0aa',
-        pk: 'b1ab49e8ca397385ccb6d17d611bf8afc75390513bdcdfe3d760e0bb9860e0aa',
-        sk: 'a62a3e04aa7e8b71e152bab09388682cb2369908f4b2906fe22ea32b67716e30',
-        cp1: 'cp1kx45n6x289ectn9k697kzxlc4lr48yz380wdlc7hvrsthxrquz4qtpysaz'
+        t: '82d50d21bffa50acf24a242b550df20925493cc425c9e25e28049d2824298e79',
+        Q: '037c5434c33d25bc24d98c35b2610dd484cb2a3d4a7854de354f7747e9b10597b8',
+        pk: '7c5434c33d25bc24d98c35b2610dd484cb2a3d4a7854de354f7747e9b10597b8',
+        sk: 'f1f2453e8dd4eb16ebb0d8be06abd890b8555675c4496fb6388cdd558e650691',
+        cp1: 'cp1032rfseayk7zfkvvxkexzrw5sn9j50220p2dud20war7nvg9j7uqsksqqz'
       },
       {
+        purpose: 0,
         index: 2,
-        t: '3d978b10770f8566e6630d978f46a79cb2d237ab0f6168123154dc83c3dc1392',
-        Q: '039cf00b60589f863cedd2773b42341e6f5102d6bd23d04559a3103d50611b2ada',
-        pk: '9cf00b60589f863cedd2773b42341e6f5102d6bd23d04559a3103d50611b2ada',
-        sk: 'acb4c32d44ea1fd0dfc9c22a40e48e2445de515cade0f56a41dd1cb12e178baa',
-        cp1: 'cp1nncqkczcn7rremwjwua5ydq7dags944ay0gy2kdrzq74qcgm9tdq37e4dd'
+        t: 'fcf834f455a2a184581dc705400bce64ac19dda82e17d8e77b50482cdce746c9',
+        Q: '032517f8221468e33cb7aafdffde313950446da0cf4d790c9b758b373dc67a5686',
+        pk: '2517f8221468e33cb7aafdffde313950446da0cf4d790c9b758b373dc67a5686',
+        sk: '6c156d11237d3bee51847b97f1a9b4ed84771a731d4ec603cc0629cd76ec7da0',
+        cp1: 'cp1y5tlsgs5dr3neda2lhlauvfe2pzxmgx0f4usexm43vmnm3n626rqslqkvr'
       }
     ],
     addressProofs: [
@@ -1455,7 +1518,7 @@ const SPEC_TEXT = {
         message: 'LNURLcash:register:cash.example.com:alice',
         digest: 'be730f1fc4a81feea4bc0464d9f6adff04dfe652687e39cba30eac9caa73fcdd',
         signature:
-          '9d96780fe55f602a9e238a4b2640a9f8ca939cacbbcde109cfd6ba94a6f9d46ff4aaf56ba1e4e72696f7c0e8833445bd194bd06155a133cf524eb587d52e8d22'
+          '9169a81db3372d8bb8a080f271f8036192131d4ed02596c0baa181613fdc5d6e17b3230b01f510a759fdb6c46b53671e57678f57ac0a6a3deb6300761225adc7'
       },
       {
         action: 'unregister',
@@ -1464,59 +1527,59 @@ const SPEC_TEXT = {
         message: 'LNURLcash:unregister:cash.example.com:alice',
         digest: 'dc12e80f7d0486fab791c743688e54bcc759111722d80dfa5fa70586a7d9d9d9',
         signature:
-          '7250ab2403333eb5ed73f7a212ac4f35b58f426fe5c2acb8b2194a112881332bfbeebeba0bc4615bcf361bc125d5a4149ddbe4b6ea3b755b711fefd8bba58728'
+          'fcc6a96f560d6505bfc475d8c2d4383047f2ece6593412af9b2834913af60f108b6e194cef31c377a23a051f8c80c1660efc2313b7876a2f80bc1f0f423c7835'
       }
     ]
   },
   vector3: {
-    sk: '944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f',
-    Q: 'aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
-    cp1: 'cp14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6qh2fkky',
+    sk: '3616b02290a133da73e758a54dbff1bf6439b4067a820cb51ca873fa4a13a96a',
+    Q: '690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f',
+    cp1: 'cp1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0sxpcl6z',
     domain: 'mint.example',
     prevoutTxid: 'd5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b2',
-    spentScriptPubKey: '5120aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
+    spentScriptPubKey: '5120690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f',
     sigMsgFields: {
       hash_type: '00',
       nVersion: '02000000',
       nLockTime: '00000000',
       sha_prevouts: '30b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024',
       sha_amounts: 'af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc',
-      sha_scriptpubkeys: 'ddd2d8771df7fb07a13626816ef020a553559bdcd01734d1259655430f6b91fa',
+      sha_scriptpubkeys: '6ca88527eb01d83d9c7eec6d169b4813ee5567ac7b83a83b5da812fac542d09d',
       sha_sequences: 'ad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e',
       sha_outputs: '3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d',
       spend_type: '00',
       input_index: '00000000'
     },
     sigMsg:
-      '00020000000000000030b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfcddd2d8771df7fb07a13626816ef020a553559bdcd01734d1259655430f6b91faad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d0000000000',
-    sighash: 'b8933a42090297a1f80d7f1fc0023ec1aa2ab36a7df332520f0dacf07f617943',
+      '00020000000000000030b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc6ca88527eb01d83d9c7eec6d169b4813ee5567ac7b83a83b5da812fac542d09dad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d0000000000',
+    sighash: 'e97bb6831a916ff83919046f50a39c18ab98bf43079cf68cd364d251f7de527f',
     auxRand: '0000000000000000000000000000000000000000000000000000000000000000',
     signature:
-      '83bbe1fe044d3d15cd1c18b484168c37f921864a9f85e9251f8457b576abd66b211b70b97fb3d63856ae271e4b3e3cf95da8e8b7769fefc309d8dc4989120e8e',
+      'fc3491f1c6bca73dcd76b38fc6b7a82aef0f1fa67212ceb7d7f64dbc41c8bfe77e0db6077624bf117badb65efe0445e382ac9f4cd582f7a5cc366c7aeb4580d4',
     spendTransaction:
-      '02000000000101d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b20000000000ffffffff01000000000000000000014083bbe1fe044d3d15cd1c18b484168c37f921864a9f85e9251f8457b576abd66b211b70b97fb3d63856ae271e4b3e3cf95da8e8b7769fefc309d8dc4989120e8e00000000',
-    ck1: 'ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6g8wlplczy60g4e5wp3dyyz6xr07fpse9flp0fy50cg4a4w64av6eprdctjlan6cu9dt38re9nu08etk5w3dmknlhuxzwcm3ycjysw3c9dpmpy'
+      '02000000000101d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b20000000000ffffffff010000000000000000000140fc3491f1c6bca73dcd76b38fc6b7a82aef0f1fa67212ceb7d7f64dbc41c8bfe77e0db6077624bf117badb65efe0445e382ac9f4cd582f7a5cc366c7aeb4580d400000000',
+    ck1: 'ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0lcdy378rtefeae4mt8r7xk75z4mc0r7n8yykwkltlvndug8ytlem7pkmqwa3yhughhtdktmlqg30rs2kf7nx4stm6tnpkd3awk3vq6smm20wz'
   },
   vector4: {
     mintPrivateKey: 'a8358061952ee158b42ffe1607c00adda3e63098247f837f08a4ef9492b4f798',
     mintPubkey: '035acdbd57663f858be6d61ec4bfcbc99492699010f1451e30a6550f26295e813d',
-    notePubkey: 'aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
+    notePubkey: '690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f',
     certificates: [
       {
         amountMsat: 1000,
-        message: 'LNURLcash:1000:aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
-        digest: '30894ad113df18b1e00a27015ed62e8b94a87498c8da7997ddac48e4cd7bb20f',
+        message: 'LNURLcash:1000:690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f',
+        digest: '516ed4b15e18e8e23e6f7d36a8d7eb88505997b5b6ab537939d22127cf69594c',
         signature:
-          '41a69c2e826555b1c5c099b3166e8d50cc3bbba3ccb9b87c377e96ae070d532c3b6230194ae97d322d663fb38266abd26f3553c62a7d5a528ce9c72d3838fffc01',
-        cs1: 'cs10n1gxnfct5zv42mr3wqnxe3vm5d2rxrhwarejumslph06t2upcd2vkrkc3sr99wjlfj94nrlvuzv64ayme420rz5l2622xwn3ed8qu0llqpeg9n5x'
+          '30d2250a5a97e7aee8de9f0296cbe550f4c88dc2ef2004b9731009c7dcd2df4f4ddd974c04971d09d9f22a3ff0a7c9a249cc52673dc1ba6c5071815889be995100',
+        cs1: 'cs10n1xrfz2zj6jln6a6x7nupfdjl92r6v3rwzausqfwtnzqyu0hxjma85mhvhfszfw8gfm8ez50ls5ly6yjwv2fnnmsd6d3g8rq2c3xlfj5gqqstd9v'
       },
       {
         amountMsat: 21000000,
-        message: 'LNURLcash:21000000:aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
-        digest: '6186fd2c1c258a6c0a3627e895efbc3d0988325c4f36f0050b52b4c4751ab13d',
+        message: 'LNURLcash:21000000:690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f',
+        digest: '30d8b4219483353c7c9286dbf630070439712aaaf06460afa4eca93c4864eeaa',
         signature:
-          'b5c6c3dd151708501bc8820ae00ef3d6439cdcca8bac00fb2675fee6b89a7767079e37f62c2502c6744a56295c459d52c0475e27a0eb34745790b44c54b9386200',
-        cs1: 'cs210u1khrv8hg4zuy9qx7gsg9wqrhn6epeehx23wkqp7exwhlwdwy6wans083h7ckz2qkxw399v22ugkw49sz8tcn6p6e5w3tepdzv2junscsqwvvr03'
+          'cd0e543690ae62c1fa70279bd6d406733739803c361bce8ca633b935db59246a08db7f25ebf6da82a4b42ecc8baf9e97cf9213477a628910bd50a0d2092959b301',
+        cs1: 'cs210u1e589gd5s4e3vr7nsy7dad4qxwvmnnqpuxcduar9xxwuntk6ey34q3kmlyh4ldk5z5j6zanyt470f0nujzdrh5c5fzz74pgxjpy54nvcpd0rph6'
       }
     ]
   },
@@ -1540,7 +1603,7 @@ const SPEC_TEXT = {
       cs1: 'cs10n1caxh3wxfa0g2zxj6lt90rlksv8dgemtavcj7dqymvfxa7683d268mawdsvygd0maru024z9ehtdv5fptumsr3t0v0vuv2x3e953557qq5c70z5'
     },
     certifiedNoteUrl:
-      'lnurlw://mint.example/w?k1=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&sig=cs10n1caxh3wxfa0g2zxj6lt90rlksv8dgemtavcj7dqymvfxa7683d268mawdsvygd0maru024z9ehtdv5fptumsr3t0v0vuv2x3e953557qq5c70z5'
+      'lnurlw://mint.example/w?k1=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&c=cs10n1caxh3wxfa0g2zxj6lt90rlksv8dgemtavcj7dqymvfxa7683d268mawdsvygd0maru024z9ehtdv5fptumsr3t0v0vuv2x3e953557qq5c70z5'
   }
 }
 
@@ -1613,23 +1676,30 @@ check('spec-vectors: vectors 1 and 2 re-derive from their seeds', () => {
     assert(bech32m.encode('cx', bech32m.toWords(cat(Px, branch.chainCode)), false) === v.cx1, `${name}: cx1`)
     const tag = sha256(utf8ToBytes('LNURLcash/derive'))
     for (const n of v.notes) {
-      const i = new Uint8Array(4)
-      new DataView(i.buffer).setUint32(0, n.index, false)
-      const t = toNum(sha256(cat(tag, tag, Px, branch.chainCode, i))) % N2
-      assert(t.toString(16).padStart(64, '0') === n.t, `${name} #${n.index}: t`)
+      const t = toNum(sha256(cat(tag, tag, Px, branch.chainCode, be32(n.purpose), be32(n.index)))) % N2
+      assert(t.toString(16).padStart(64, '0') === n.t, `${name} ${n.purpose}/${n.index}: t`)
       const Q = secp256k1.Point.fromBytes(cat(Uint8Array.of(0x02), Px)).add(secp256k1.Point.BASE.multiply(t))
-      assert(bytesToHex(Q.toBytes(true)) === n.Q, `${name} #${n.index}: Q`)
-      assert(bytesToHex(Q.toBytes(true).slice(1)) === n.pk, `${name} #${n.index}: pk`)
+      assert(bytesToHex(Q.toBytes(true)) === n.Q, `${name} ${n.purpose}/${n.index}: Q`)
+      assert(bytesToHex(Q.toBytes(true).slice(1)) === n.pk, `${name} ${n.purpose}/${n.index}: pk`)
       const p = toNum(branch.key)
       const sk = ((P.y % 2n === 0n ? p : N2 - p) + t) % N2
-      assert(sk.toString(16).padStart(64, '0') === n.sk, `${name} #${n.index}: sk`)
-      assert(encodeCp1(hexToBytes(n.pk)) === n.cp1, `${name} #${n.index}: cp1`)
+      assert(sk.toString(16).padStart(64, '0') === n.sk, `${name} ${n.purpose}/${n.index}: sk`)
+      assert(encodeCp1(hexToBytes(n.pk)) === n.cp1, `${name} ${n.purpose}/${n.index}: cp1`)
     }
   }
 })
 
-check("spec-vectors: vector 2's proofs verify under pk_0 and bind their domain", () => {
+check('spec-vectors: vector 1 isolates purpose, index 0 on all three purposes', () => {
+  const zeros = SPEC_TEXT.vector1.notes.filter(n => n.index === 0)
+  assert(zeros.map(n => n.purpose).join() === '0,1,2', 'vector 1 does not list index 0 on purposes 0, 1 and 2')
+  for (const field of ['t', 'Q', 'pk', 'sk', 'cp1']) {
+    assert(new Set(zeros.map(n => n[field])).size === 3, `two purposes share ${field} at index 0`)
+  }
+})
+
+check("spec-vectors: vector 2's proofs verify under the purpose-0 pk_0 and bind their domain", () => {
   const v = SPEC_TEXT.vector2
+  assert(v.notes[0].purpose === 0 && v.notes[0].index === 0, 'notes[0] is not purpose 0, index 0')
   const pk0 = hexToBytes(v.notes[0].pk)
   for (const proof of v.addressProofs) {
     assert(bytesToHex(sha256(utf8ToBytes(proof.message))) === proof.digest, `${proof.action}: digest`)
@@ -1721,7 +1791,8 @@ check('spec-vectors: vector 5 recomputes, and its certificate is over hex(Q)', (
     "does not recover to vector 4's mintPubkey"
   )
   const url = new URL(v.certifiedNoteUrl.replace(/^lnurlw:/, 'https:'))
-  assert(url.searchParams.get('k1') === v.preimage && url.searchParams.get('sig') === c.cs1, 'certified note URL')
+  assert(url.searchParams.get('k1') === v.preimage && url.searchParams.get('c') === c.cs1, 'certified note URL')
+  assert(!url.searchParams.has('sig'), 'the certified note URL still carries the pre-50d740a sig')
 })
 
 // ---- spends ----

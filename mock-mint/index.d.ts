@@ -41,9 +41,20 @@ export interface MockMintOptions {
   /**
    * Certify every note issued with a cs1 over hex(Q), a bearer note
    * included (default). LUD-25 makes certifying a SHOULD; false withholds
-   * sig/sig2 everywhere, which the grader warns about and never fails.
+   * c/c2 everywhere, which the grader warns about and never fails.
    */
   signatures?: boolean
+  /**
+   * The names certificates travel under: 'c' (default) is LUD-25 as of luds
+   * 50d740a, c and c2; 'sig' is the pre-50d740a sig/sig2 alone; 'both'
+   * sends each under both names, as a mint mid-transition does.
+   */
+  certificateNames?: 'c' | 'sig' | 'both'
+  /**
+   * The metadata type of a registered address's internal-transfer hint:
+   * 'text/cpub' (default) as of luds 50d740a, 'text/xpub' before.
+   */
+  addressHintType?: string
   /**
    * The hosts a spend's signature may be bound to, as a list or a
    * comma-separated string. Unset, the hostname the mock was reached at.

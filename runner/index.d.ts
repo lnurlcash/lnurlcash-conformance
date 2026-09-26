@@ -72,7 +72,7 @@ export interface InternalTransferHint {
   chainCode: Uint8Array
 }
 
-/** the `text/xpub` branch and next-index hint out of registered-address metadata */
+/** the `text/cpub` branch and next purpose-2 index hint out of registered-address metadata */
 export declare const parseInternalTransferHint: (
   metadata: string
 ) => InternalTransferHint | null

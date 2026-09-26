@@ -255,7 +255,10 @@ npx lnurlcash-conform mint@example.com --note='lnurlw://...?k1=...' --spend
 It burns the note it is given and prints where the value ended up. The
 note's `k1` may be any spend of it: a bearer note's 64-hex preimage, a `ck1`
 or a `cw1`. It grades LUD-25 as of the unified taproot model (luds
-`6e865b1`), where every note is a taproot output key `Q`.
+`6e865b1`), where every note is a taproot output key `Q`, with the
+derivation purposes and certificate names of luds `50d740a`: certificates
+are read from `c` and `c2`, and a mint that also sends the older `sig` and
+`sig2` is not faulted for it.
 
 On the note as given it checks that the informational GET is idempotent,
 echoes the queried `k1` and ignores the URL's own `amount`; that a lookup by

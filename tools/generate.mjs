@@ -703,12 +703,24 @@ const ser32 = index => {
 }
 
 // BIP-341's tweak, so a watcher holding only the cx1 derives the same pk the
-// holder does. i is any uint32 and is never hardened.
-const noteKeysAt = (node, index) => {
+// holder does. purpose and i are any uint32 and are never hardened (luds
+// 50d740a): purpose 0 is the wallet's own notes, 1 a split's change, 2 the
+// Lightning Address rail (auto-mint and internal transfer).
+const PURPOSE_WALLET = 0
+const PURPOSE_CHANGE = 1
+const PURPOSE_ADDRESS = 2
+const PURPOSE_NAMES = ['wallet', 'change', 'Lightning Address']
+const deriveTweakOf = (Px, chainCode, purpose, index) =>
+  purpose === null
+    ? bytesToNumber(taggedHash('LNURLcash/derive', Px, chainCode, ser32(index))) % CURVE_N
+    : bytesToNumber(taggedHash('LNURLcash/derive', Px, chainCode, ser32(purpose), ser32(index))) % CURVE_N
+// purpose null is the superseded pre-purpose derivation (luds 6e865b1),
+// kept only for the prePurpose record in part2.json.
+const noteKeysAt = (node, purpose, index) => {
   const p = bytesToNumber(node.privateKey)
   const P = secp256k1.Point.BASE.multiply(p)
   const Px = P.toBytes(true).slice(1)
-  const t = bytesToNumber(taggedHash('LNURLcash/derive', Px, node.chainCode, ser32(index))) % CURVE_N
+  const t = deriveTweakOf(Px, node.chainCode, purpose, index)
   const even = P.y % 2n === 0n
   const sk = ((even ? p : CURVE_N - p) + t) % CURVE_N
   const watched = secp256k1.Point.fromBytes(concat(Uint8Array.of(0x02), Px))
@@ -716,11 +728,20 @@ const noteKeysAt = (node, index) => {
     .toBytes(true)
     .slice(1)
   const held = secp256k1.Point.BASE.multiply(sk).toBytes(true).slice(1)
-  if (bytesToHex(watched) !== bytesToHex(held)) throw new Error(`watch-only and held keys disagree at ${index}`)
+  if (bytesToHex(watched) !== bytesToHex(held)) throw new Error(`watch-only and held keys disagree at ${purpose}/${index}`)
   return {secretKey: numberTo32(sk), pubkey: held}
 }
 
 const PART2_INDICES = [0, 1, 2, 1000, HARDENED - 1, HARDENED, 0xffffffff]
+// Every purpose-0 index above, then the first two indices of purposes 1 and
+// 2, so the purpose-0 index-0 note stays notes[0].
+const PART2_KEYS = [
+  ...PART2_INDICES.map(index => [PURPOSE_WALLET, index]),
+  [PURPOSE_CHANGE, 0],
+  [PURPOSE_CHANGE, 1],
+  [PURPOSE_ADDRESS, 0],
+  [PURPOSE_ADDRESS, 1]
+]
 const PART2_HOSTS = ['mint.example', 'mint.lnurlcash.com', 'moneyer.dev', 'localhost:3338']
 
 const part2Branch = (mnemonic, host) => {
@@ -743,11 +764,12 @@ const part2Branch = (mnemonic, host) => {
     branchParity: P.y % 2n === 0n ? 'even' : 'odd',
     chainCode: bytesToHex(node.chainCode),
     cx1: bech32mOf('cx', concat(branchPubkey, node.chainCode)),
-    notes: PART2_INDICES.map(index => {
-      const {secretKey, pubkey} = noteKeysAt(node, index)
+    notes: PART2_KEYS.map(([purpose, index]) => {
+      const {secretKey, pubkey} = noteKeysAt(node, purpose, index)
       const spend = keyPathSpendOf(secretKey, domain)
-      if (bytesToHex(spend.Q) !== bytesToHex(pubkey)) throw new Error(`key-path Q is not the note key at ${index}`)
+      if (bytesToHex(spend.Q) !== bytesToHex(pubkey)) throw new Error(`key-path Q is not the note key at ${purpose}/${index}`)
       return {
+        purpose,
         index,
         notePubkey: bytesToHex(pubkey),
         cp1: bech32mOf('cp', pubkey),
@@ -818,14 +840,15 @@ const withPublicKey = node => ({
   publicKey: secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey)).toBytes(true)
 })
 
-const specNoteVector = (branch, index) => {
+const specNoteVector = (branch, purpose, index) => {
   const branchXonly = branch.publicKey.slice(1)
-  const t = bytesToNumber(taggedHash('LNURLcash/derive', branchXonly, branch.chainCode, ser32(index))) % CURVE_N
-  const {pubkey, secretKey} = noteKeysAt(branch, index)
+  const t = deriveTweakOf(branchXonly, branch.chainCode, purpose, index)
+  const {pubkey, secretKey} = noteKeysAt(branch, purpose, index)
   const Q = secp256k1.Point.fromBytes(concat(Uint8Array.of(0x02), branchXonly))
     .add(secp256k1.Point.BASE.multiply(t))
     .toBytes(true)
   return {
+    purpose,
     index,
     t: numberTo32(t),
     Q,
@@ -842,7 +865,12 @@ const specVector1 = () => {
   const hashingNode = ckdPriv(cashRoot, 0)
   const domainIndices = cashDomainIndices(cashRoot, domain)
   const branch = withPublicKey(cashDomainNode(cashRoot, domain))
-  const notes = [0, 1, 2, 5].map(i => specNoteVector(branch, i))
+  // Purpose 0 at 0, 1, 2 and 5, then index 0 on purposes 1 and 2, in 25.md's order.
+  const notes = [
+    ...[0, 1, 2, 5].map(i => specNoteVector(branch, PURPOSE_WALLET, i)),
+    specNoteVector(branch, PURPOSE_CHANGE, 0),
+    specNoteVector(branch, PURPOSE_ADDRESS, 0)
+  ]
   return {
     seedHex: bytesToHex(seed),
     domain,
@@ -855,6 +883,7 @@ const specVector1 = () => {
     chainCode: bytesToHex(branch.chainCode),
     cx1: bech32mOf('cx', concat(branch.publicKey.slice(1), branch.chainCode)),
     notes: notes.map(n => ({
+      purpose: n.purpose,
       index: n.index,
       t: bytesToHex(n.t),
       Q: bytesToHex(n.Q),
@@ -874,8 +903,9 @@ const specVector2 = () => {
   const hashingNode = ckdPriv(cashRoot, 0)
   const domainIndices = cashDomainIndices(cashRoot, domain)
   const branch = withPublicKey(cashDomainNode(cashRoot, domain))
-  const notes = [0, 1, 2].map(i => specNoteVector(branch, i))
-  const {secretKey: sk0} = noteKeysAt(branch, 0)
+  const notes = [0, 1, 2].map(i => specNoteVector(branch, PURPOSE_WALLET, i))
+  // The register/unregister proof key is purpose 0, index 0 (luds 50d740a).
+  const {secretKey: sk0} = noteKeysAt(branch, PURPOSE_WALLET, 0)
   const username = 'alice'
   // The vector's own domain, bound into the message since luds 265759f.
   const addressProofOf = action => {
@@ -901,6 +931,7 @@ const specVector2 = () => {
     chainCode: bytesToHex(branch.chainCode),
     cx1: bech32mOf('cx', concat(branch.publicKey.slice(1), branch.chainCode)),
     notes: notes.map(n => ({
+      purpose: n.purpose,
       index: n.index,
       t: bytesToHex(n.t),
       Q: bytesToHex(n.Q),
@@ -993,7 +1024,7 @@ const specVector5 = () => {
     cw1,
     mintPubkey: bytesToHex(secp256k1.getPublicKey(SPEC_MINT_KEY, true)),
     certificate,
-    certifiedNoteUrl: `lnurlw://mint.example/w?k1=${bytesToHex(note.preimage)}&sig=${certificate.cs1}`
+    certifiedNoteUrl: `lnurlw://mint.example/w?k1=${bytesToHex(note.preimage)}&c=${certificate.cs1}`
   }
 }
 
@@ -1001,7 +1032,7 @@ const specVectors = {
   version: VERSION,
   spec: SPEC,
   description:
-    "LUD-25's own published \"Test Vectors\" section (25.md, lnurl/luds 6e865b1), reproduced here from the primitives so every implementation checks itself against the exact numbers the spec document publishes, not just this project's own fixtures; the selfcheck compares every value with the spec text itself. Vectors 1 and 2 reuse BIP-32's own published test vector 1 and 2 seeds and land on opposite branch-key parities (vector 1 odd, vector 2 even), so both halves of the sk_i formula are exercised; t and Q are shown for each note alongside pk/sk. Vector 2's register/unregister proofs sign sha256(\"LNURLcash:<action>:<domain>:<username>\"), bound to the vector's own domain. Vector 3 is a key-path spend (ck1) of vector 1's pk_0 at mint.example: the prevout, every BIP-341 SigMsg field by name, the sighash, the BIP-340 signature with an all-zero aux_rand, and the serialised canonical spend transaction with its witness. Vector 4 is the mint's cs1 certificate over (hex(Q), amount) under a fixed key. Vector 5 is a bearer note: its preimage (the k1 short form), h (the cp1 short form), the OP_SHA256 <h> OP_EQUAL leaf, its tapleaf hash, the NUMS internal key H, the tweak, Q, the control block, cp1, the full cw1, and a cs1 for it under vector 4's key.",
+    "LUD-25's own published \"Test Vectors\" section (25.md, lnurl/luds 50d740a), reproduced here from the primitives so every implementation checks itself against the exact numbers the spec document publishes, not just this project's own fixtures; the selfcheck compares every value with the spec text itself. Vectors 1 and 2 reuse BIP-32's own published test vector 1 and 2 seeds and land on opposite branch-key parities (vector 1 odd, vector 2 even), so both halves of the sk_i formula are exercised; each note carries its purpose (0 wallet, 1 change, 2 Lightning Address) and index, t = tagged_hash(\"LNURLcash/derive\", P || chaincode || ser32(purpose) || ser32(i)) mod n, and t and Q are shown alongside pk/sk. Vector 1 lists purpose 0 at i = 0, 1, 2 and 5, then i = 0 on purposes 1 and 2; vector 2 lists purpose 0 at i = 0, 1 and 2. Vector 2's register/unregister proofs are signed by the purpose-0 index-0 key over sha256(\"LNURLcash:<action>:<domain>:<username>\"), bound to the vector's own domain. Vector 3 is a key-path spend (ck1) of vector 1's purpose-0 pk_0 at mint.example: the prevout, every BIP-341 SigMsg field by name, the sighash, the BIP-340 signature with an all-zero aux_rand, and the serialised canonical spend transaction with its witness. Vector 4 is the mint's cs1 certificate over (hex(Q), amount) under a fixed key. Vector 5 is a bearer note: its preimage (the k1 short form), h (the cp1 short form), the OP_SHA256 <h> OP_EQUAL leaf, its tapleaf hash, the NUMS internal key H, the tweak, Q, the control block, cp1, the full cw1, a cs1 for it under vector 4's key, and the certified note URL carrying that cs1 as &c=.",
   vector1: specVector1(),
   vector2: specVector2(),
   vector3: specVector3(),
@@ -1009,24 +1040,46 @@ const specVectors = {
   vector5: specVector5()
 }
 
+// The derivation as luds 6e865b1 had it, with no ser32(purpose): superseded,
+// recorded for one branch only so a wallet can recognise and sweep notes it
+// derived before purposes existed.
+const prePurposeRecord = (() => {
+  const branch = part2Branches[0]
+  const node = cashDomainNode(cashRootOf(seedOf(branch.mnemonic)), branch.host)
+  return {
+    superseded: true,
+    spec: 'lnurl/luds 6e865b1, before derivation purposes (50d740a)',
+    noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(i)) mod n',
+    mnemonic: branch.mnemonic,
+    host: branch.host,
+    cx1: branch.cx1,
+    notes: [0, 1, 2].map(index => {
+      const {secretKey, pubkey} = noteKeysAt(node, null, index)
+      return {index, notePubkey: bytesToHex(pubkey), cp1: bech32mOf('cp', pubkey), noteSecretKey: bytesToHex(secretKey)}
+    })
+  }
+})()
+
 const part2 = {
   version: VERSION,
   spec: SPEC,
   description:
-    'LUD-25 key-path notes (the half of the draft once called Part 2): a note whose output key Q is a holder\'s own key, used as is with no BIP-86 tweak, spent by a ck1 and certified by a cs1. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/0, msg = utf8(host)), and addressNode is m/139\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)) mod n; notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. A ck1 spends the note at one mint only: domain is the branch host\'s lowercase hostname with any port dropped, sighash is the BIP-341 key-path signature hash (SIGHASH_DEFAULT) of input 0 of the canonical spend transaction for that domain (prevout tagged_hash("LNURLcash/mint", domain), spent output (OP_1 <notePubkey>, 0); spends.json lists every SigMsg field), keyPathSignature is BIP-340 Schnorr over that sighash with an all-zero aux_rand, and ck1 is bech32m("ck", notePubkey || keyPathSignature). The same ck1 fails at any other domain. Register/unregister proofs are Schnorr signatures from index zero over sha256("LNURLcash:<action>:<domain>:<username>"), separating action, mint and name. A certificate is a recoverable ECDSA signature by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).',
+    'LUD-25 key-path notes (the half of the draft once called Part 2): a note whose output key Q is a holder\'s own key, used as is with no BIP-86 tweak, spent by a ck1 and certified by a cs1. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/0, msg = utf8(host)), and addressNode is m/139\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note names its purpose (0: the wallet\'s own notes, including a split\'s p1 and every rotate or merge output; 1: a split\'s change p2; 2: Lightning Address auto-mint and internal transfer) and its index on that purpose, and t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(purpose) || ser32_be(index)) mod n; notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. A ck1 spends the note at one mint only: domain is the branch host\'s lowercase hostname with any port dropped, sighash is the BIP-341 key-path signature hash (SIGHASH_DEFAULT) of input 0 of the canonical spend transaction for that domain (prevout tagged_hash("LNURLcash/mint", domain), spent output (OP_1 <notePubkey>, 0); spends.json lists every SigMsg field), keyPathSignature is BIP-340 Schnorr over that sighash with an all-zero aux_rand, and ck1 is bech32m("ck", notePubkey || keyPathSignature). The same ck1 fails at any other domain. Register/unregister proofs are Schnorr signatures from the purpose-0 index-0 key over sha256("LNURLcash:<action>:<domain>:<username>"), separating action, mint and name. A certificate is a recoverable ECDSA signature by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350). prePurpose records the superseded derivation without ser32(purpose) (luds 6e865b1) for one branch, only so a wallet can find and sweep notes it derived before purposes existed; no SERVICE derives there.',
   conventions: {
     addressBranch: "m/139'/d1/d2/d3/d4",
     hashingKey: "m/139'/0",
     specTextSays: "m/139'/d1/d2/d3/d4 with the hashing key at m/139'/0 - the literal path every implementation uses",
-    noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t is reduced mod n, as the spec requires (no index here reaches n)',
-    indexWidth: '4 bytes, big-endian, any uint32, never hardened',
+    noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(purpose) || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t is reduced mod n, as the spec requires (no index here reaches n)',
+    purposes: Object.fromEntries(PURPOSE_NAMES.map((name, purpose) => [purpose, name])),
+    purposeUse: 'purpose 0: every note the wallet mints, rotates into or merges into, and a split\'s p1; purpose 1: a split\'s change p2; purpose 2: a note credited by Lightning Address auto-mint or an internal transfer (the text/cpub hint\'s index). Each purpose has its own counter and its own recovery gap limit, and one cx1 covers all three.',
+    indexWidth: '4 bytes, big-endian, any uint32, never hardened; the same for purpose',
     spendDomain: "the host's lowercase hostname, never its scheme or port; the derivation above still hashes the host exactly as stored, port included",
     canonicalSpendTransaction: 'nVersion 2; vin[0] prevout (tagged_hash("LNURLcash/mint", domain), 0), empty scriptSig, nSequence 0xffffffff; vout[0] value 0, empty scriptPubKey; nLockTime 0; spent output (OP_1 <notePubkey>, 0)',
     ck1Signs: 'tagged_hash("TapSighash", 0x00 || SigMsg), the BIP-341 key-path sighash (SIGHASH_DEFAULT, spend_type 0x00) of input 0 of the canonical spend transaction for the domain',
     keyPathSignature: 'BIP-340 Schnorr, 64 bytes, all-zero aux_rand, so a ck1 is a deterministic function of the key and the domain',
     ck1Payload: '32-byte x-only public key || 64-byte Schnorr signature',
     addressProofMessage: 'LNURLcash:<register|unregister>:<domain>:<username>',
-    addressProofMessageEncoding: 'UTF-8 bytes, sha256-hashed to a 32-byte digest, then BIP-340 Schnorr by the branch\'s index-zero key',
+    addressProofMessageEncoding: 'UTF-8 bytes, sha256-hashed to a 32-byte digest, then BIP-340 Schnorr by the branch\'s purpose-0 index-0 key',
     certificateMessage: 'LNURLcash:<amount_msat>:<hex(pk)>',
     certificateHrp: 'cs || BOLT11_amount_suffix(amount_msat)'
   },
@@ -1035,6 +1088,7 @@ const part2 = {
     mintPubkey: bytesToHex(secp256k1.getPublicKey(PART2_MINT_KEY, true))
   },
   branches: part2Branches,
+  prePurpose: prePurposeRecord,
   certificates: part2Certificates,
   addressProofs: [
     addressProof('register', 'alice'),
@@ -1084,10 +1138,17 @@ const nostrSeedCase = (identityHex, host) => {
     seed: bytesToHex(seed),
     addressNode: nodeHex(node),
     cx1: bech32mOf('cx', concat(branchPubkey, node.chainCode)),
-    notes: [0, 1, 7].map(index => {
-      const {secretKey, pubkey} = noteKeysAt(node, index)
+    notes: [
+      [PURPOSE_WALLET, 0],
+      [PURPOSE_WALLET, 1],
+      [PURPOSE_WALLET, 7],
+      [PURPOSE_CHANGE, 0],
+      [PURPOSE_ADDRESS, 0]
+    ].map(([purpose, index]) => {
+      const {secretKey, pubkey} = noteKeysAt(node, purpose, index)
       const spend = keyPathSpendOf(secretKey, domain)
       return {
+        purpose,
         index,
         noteSecretKey: bytesToHex(secretKey),
         notePubkey: bytesToHex(pubkey),
@@ -1108,7 +1169,7 @@ const nostrSeed = {
   spec: SPEC,
   extension: true,
   description:
-    'An extension, not LUD-25: a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words. seed = HMAC-SHA256(key = identity (the 32-byte secret key), msg = utf8("LNURLcash/nostr-seed")); the branch is then the reference wallet\'s m/139\'/d1..d4 from that seed exactly as in part2.json, and every note field means what it means there: domain is the case host\'s lowercase hostname without its port, and each ck1 signs that domain\'s key-path sighash. identityPubkey is the identity\'s x-only public key, the npub a lightning address belongs to. heartwood-esp32 derives this on the device and lnurlcash-kit exports it (deriveNostrAddressNode); a mint sees an ordinary cx1.',
+    'An extension, not LUD-25: a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words. seed = HMAC-SHA256(key = identity (the 32-byte secret key), msg = utf8("LNURLcash/nostr-seed")); the branch is then the reference wallet\'s m/139\'/d1..d4 from that seed exactly as in part2.json, and every note field means what it means there, purpose included: domain is the case host\'s lowercase hostname without its port, and each ck1 signs that domain\'s key-path sighash. identityPubkey is the identity\'s x-only public key, the npub a lightning address belongs to. heartwood-esp32 derives this on the device and lnurlcash-kit exports it (deriveNostrAddressNode); a mint sees an ordinary cx1.',
   label: NOSTR_SEED_LABEL,
   cases: [
     nostrSeedCase(IDENTITY_ONE, 'moneyer.dev'),
@@ -1134,7 +1195,7 @@ const bech32Vectors = {
   version: VERSION,
   spec: 'LUD-01',
   description:
-    'bech32 encoding of LNURLs. The hrp is "lnurl"; the limit is raised well above bech32 default because a note URL carrying k1, amount and sig is long.',
+    'bech32 encoding of LNURLs. The hrp is "lnurl"; the limit is raised well above bech32 default because a note URL carrying k1, amount and c is long.',
   encode: bech32Urls.map(url => ({url, lnurl: lnurlEncode(url)})),
   decodeInvalid: [
     {input: '', why: 'empty'},
@@ -1237,7 +1298,7 @@ const noteUrl = {
   version: VERSION,
   spec: SPEC,
   description:
-    'A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. An amount-bearing cs1 carries that same declared amount itself, so the current reference wallet omits the duplicate `amount` query parameter and reads it from `sig`. A SERVICE returning a rotate, split or merge to a cp1 output MUST include that certificate in `sig` (and `sig2` for the second split output). A legacy hash output may instead carry the reference mint\'s raw Part 1 signature when a signer is available; it never carries cs1.',
+    'A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. An amount-bearing cs1 carries that same declared amount itself, so the current reference wallet omits the duplicate `amount` query parameter and reads it from `c`. A SERVICE returning a rotate, split or merge to a cp1 output MUST include that certificate in `c` (and `c2` for the second split output). A legacy hash output may instead carry the reference mint\'s raw Part 1 signature when a signer is available; it never carries cs1. The parameter was `sig` before lnurl/luds 50d740a: a WALLET MAY still read a certificate from a `sig` it finds on an older note URL, but writes only `c`, and drops a stale `sig` along with a stale `c` whenever the k1 changes.',
   parse: [
     {
       url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000',
@@ -1253,17 +1314,24 @@ const noteUrl = {
       why: 'k1 is bytes, not text: normalise to lowercase so the same secret in two casings is one note'
     },
     {
-      url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000&sig=' + 'ab'.repeat(65),
+      url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000&c=' + 'ab'.repeat(65),
       k1: K1_A,
       declaredAmountMsat: 21000,
       signature: 'ab'.repeat(65)
+    },
+    {
+      url: 'https://mint.example/w?k1=' + K1_A + '&c=' + part2Certificates[1].cs1,
+      k1: K1_A,
+      declaredAmountMsat: 21000,
+      signature: part2Certificates[1].cs1,
+      why: 'an amount-bearing cs1 carries the declared amount without a duplicate amount query parameter'
     },
     {
       url: 'https://mint.example/w?k1=' + K1_A + '&sig=' + part2Certificates[1].cs1,
       k1: K1_A,
       declaredAmountMsat: 21000,
       signature: part2Certificates[1].cs1,
-      why: 'an amount-bearing cs1 carries the declared amount without a duplicate amount query parameter'
+      why: 'a note URL written before lnurl/luds 50d740a carries its certificate as sig; a WALLET may still read it there'
     },
     {
       url: 'https://mint.example/w',
@@ -1308,7 +1376,7 @@ const noteUrl = {
   ],
   withNewK1: [
     {
-      url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000&sig=' + 'ab'.repeat(65),
+      url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000&c=' + 'ab'.repeat(65),
       k1: K1_B,
       amountMsat: 5000,
       signature: null,
@@ -1316,24 +1384,32 @@ const noteUrl = {
       why: 'a stale signature must be dropped: it no longer matches the new secret'
     },
     {
+      url: 'https://mint.example/w?k1=' + K1_A + '&sig=' + part2Certificates[1].cs1,
+      k1: K1_B,
+      amountMsat: 5000,
+      signature: null,
+      expect: 'https://mint.example/w?k1=' + K1_B + '&amount=5000',
+      why: 'a stale certificate under the pre-50d740a name sig is dropped too'
+    },
+    {
       url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000',
       k1: K1_B,
       amountMsat: 5000,
       signature: 'cd'.repeat(65),
-      expect: 'https://mint.example/w?k1=' + K1_B + '&amount=5000&sig=' + 'cd'.repeat(65)
+      expect: 'https://mint.example/w?k1=' + K1_B + '&amount=5000&c=' + 'cd'.repeat(65)
     },
     {
       url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000',
       k1: K1_B,
       amountMsat: 21000,
       signature: part2Certificates[1].cs1,
-      expect: 'https://mint.example/w?k1=' + K1_B + '&sig=' + part2Certificates[1].cs1,
+      expect: 'https://mint.example/w?k1=' + K1_B + '&c=' + part2Certificates[1].cs1,
       why: 'the cs1 already carries amount_msat, so the current reference wallet omits the duplicate amount parameter'
     }
   ],
   withoutK1: [
     {
-      url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000&sig=' + 'ab'.repeat(65),
+      url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000&c=' + 'ab'.repeat(65),
       amountMsat: 5000,
       signature: null,
       expect: 'https://mint.example/w?amount=5000',
@@ -1343,7 +1419,7 @@ const noteUrl = {
       url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000',
       amountMsat: 21000,
       signature: part2Certificates[1].cs1,
-      expect: 'https://mint.example/w?sig=' + part2Certificates[1].cs1,
+      expect: 'https://mint.example/w?c=' + part2Certificates[1].cs1,
       why: 'a secret-free mirror also avoids duplicating the amount already encoded in cs1'
     }
   ]
@@ -1731,31 +1807,41 @@ const responses = {
       http: 200,
       body: {status: 'OK'},
       expect: 'unverifiable',
-      why: 'a cp1 output is owed a cs1 certificate in sig; without one the note it names cannot be verified offline, which is the whole reason to hold a cp1 note. The note exists at the key the WALLET disclosed'
+      why: 'a cp1 output is owed a cs1 certificate in c; without one the note it names cannot be verified offline, which is the whole reason to hold a cp1 note. The note exists at the key the WALLET disclosed'
     },
     {
       name: 'cp1 output certified',
       op: 'mutation',
       output: 'cp1',
       http: 200,
-      body: {status: 'OK', sig: bech32mOf('cs', hexToBytes('ab'.repeat(65)))},
+      body: {status: 'OK', c: bech32mOf('cs', hexToBytes('ab'.repeat(65)))},
       expect: 'ok',
       signature: bech32mOf('cs', hexToBytes('ab'.repeat(65)))
+    },
+    {
+      name: 'cp1 output certified under both names',
+      op: 'mutation',
+      output: 'cp1',
+      http: 200,
+      body: {status: 'OK', c: bech32mOf('cs', hexToBytes('ab'.repeat(65))), sig: bech32mOf('cs', hexToBytes('ab'.repeat(65)))},
+      expect: 'ok',
+      signature: bech32mOf('cs', hexToBytes('ab'.repeat(65))),
+      why: 'a SERVICE moving from the pre-50d740a name may send the certificate as both c and sig; c is the one a WALLET reads, and the extra sig is harmless'
     },
     {
       name: 'a split to a cp1 change that certifies only its first output',
       op: 'split',
       change: 'cp1',
       http: 200,
-      body: {status: 'OK', sig: 'ab'.repeat(65)},
+      body: {status: 'OK', c: 'ab'.repeat(65)},
       expect: 'unverifiable',
-      why: 'the change is a cp1 note and is owed its certificate in sig2 exactly as the first output would be; the change is not a lesser note'
+      why: 'the change is a cp1 note and is owed its certificate in c2 exactly as the first output would be; the change is not a lesser note'
     },
     {
       name: 'success with an offline-verification signature',
       op: 'mutation',
       http: 200,
-      body: {status: 'OK', sig: 'ab'.repeat(65)},
+      body: {status: 'OK', c: 'ab'.repeat(65)},
       expect: 'ok',
       signature: 'ab'.repeat(65)
     },
@@ -1763,7 +1849,7 @@ const responses = {
       name: 'split success with both signatures',
       op: 'split',
       http: 200,
-      body: {status: 'OK', sig: 'ab'.repeat(65), sig2: 'cd'.repeat(65)},
+      body: {status: 'OK', c: 'ab'.repeat(65), c2: 'cd'.repeat(65)},
       expect: 'ok',
       signature: 'ab'.repeat(65),
       changeSignature: 'cd'.repeat(65)
@@ -1772,7 +1858,7 @@ const responses = {
       name: 'a split that signs only its first output',
       op: 'split',
       http: 200,
-      body: {status: 'OK', sig: 'ab'.repeat(65)},
+      body: {status: 'OK', c: 'ab'.repeat(65)},
       expect: 'ok',
       signature: 'ab'.repeat(65),
       why: 'both outputs are legacy hash notes; tolerant callers can retain a landed output without proof, while a strict caller may require both raw Part 1 signatures'
@@ -1880,8 +1966,8 @@ const withdrawInfo = {
   spec: 'LUD-03, LUD-25',
   description:
     'The informational GET on a note. Never burns, rotates or alters it. maxWithdrawable is the ONLY authoritative statement of what a note is worth - the URL\'s own `amount` is a claim and the SERVICE ignores it here. The response\'s k1 MUST be the bearer secret itself, never a derived or opaque id. Offline verification is mandatory in the current draft, so the response MUST also carry `mintPubkey`, the stable compressed secp256k1 key the SERVICE\'s note signatures verify against; without it a holder handed a note has nothing to check it against.',
-  queriedUrl: 'https://mint.example/w?k1=' + K1_A + '&amount=99999&sig=' + 'ab'.repeat(65),
-  requestMustNotSend: ['sig'],
+  queriedUrl: 'https://mint.example/w?k1=' + K1_A + '&amount=99999&c=' + 'ab'.repeat(65),
+  requestMustNotSend: ['c', 'sig'],
   requestMustSendUnchanged: ['k1'],
   accepted: [
     {
@@ -2191,7 +2277,7 @@ const lifecycle = {
         'the HTTP stack silently resends the identical request'
       ],
       requirement:
-        'a SERVICE MUST recognize the byte-identical retry from the same k1 set, h, h2 and amount, and return the original success, with the same sig and sig2 where the outputs had any, without moving balance again. A WALLET still persists every fresh output secret before sending the first request and keeps it across an ambiguous transport failure. A request that changes any recorded field is a genuine double-spend attempt and gets the ordinary already-spent refusal.'
+        'a SERVICE MUST recognize the byte-identical retry from the same k1 set, h, h2 and amount, and return the original success, with the same c and c2 where the outputs had any, without moving balance again. A WALLET still persists every fresh output secret before sending the first request and keeps it across an ambiguous transport failure. A request that changes any recorded field is a genuine double-spend attempt and gets the ordinary already-spent refusal.'
     },
     {
       name: 'settle a merge or split output',
@@ -2427,7 +2513,7 @@ const threatSuite = {
       adversary: 'an attacker who self-signs a note and supplies their own key',
       steps: [
         'a recipient who has never interacted with this mint receives a note',
-        'it has no mintPubkey on record, so it cannot verify the note\'s sig offline',
+        'it has no mintPubkey on record, so it cannot verify the note\'s certificate offline',
         'embedding the pubkey in the note URL proves nothing - an attacker self-signs and supplies their own key'
       ],
       currentBehavior: 'no offline verification on first contact - a spec-level gap, no endpoint to hit',
@@ -2569,7 +2655,7 @@ const retriedMutation = {
     'Recorded, never inferred. A SERVICE links the burned inputs to the outputs they minted and matches against that. Matching on "a note exists at h" alone would let anyone holding a burned k1 and any outstanding note id pull a success out of the SERVICE.',
   outcomes: {
     replay:
-      'the original success, byte for byte: the same status, the same sig and sig2 where the outputs had any, and no balance moved',
+      'the original success, byte for byte: the same status, the same c and c2 where the outputs had any, and no balance moved',
     'double-spend':
       'refused exactly as any other attempt to spend a burned secret, with the reason string unchanged'
   },
@@ -3274,7 +3360,7 @@ const SETTLE_ORDER = [
   'the note URL parses and names a host',
   'the host is one of acceptedMints',
   'the mint is asked what the note is worth, which is where a spent or in-flight note surfaces',
-  'when requireSignature, the note carries a sig and it verifies against the mint pubkey',
+  'when requireSignature, the note carries a certificate (c) and it verifies against the mint pubkey',
   'the value the mint reports is at least minMsat',
   'rotate: the settlement and the double-spend check in one call'
 ]
@@ -3435,9 +3521,9 @@ const spendBearers = [
   bearerCase('all 0xff', hexToBytes('ff'.repeat(32)))
 ]
 
-// One key at several domains: vector 1's sk_0, so the mint.example ck1 is
-// test vector 3's exactly.
-const SPEND_KEY = hexToBytes('944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f')
+// One key at several domains: vector 1's purpose-0 sk_0, so the mint.example
+// ck1 is test vector 3's exactly.
+const SPEND_KEY = hexToBytes('3616b02290a133da73e758a54dbff1bf6439b4067a820cb51ca873fa4a13a96a')
 const SPEND_KEY_Q = schnorr.getPublicKey(SPEND_KEY)
 const keyPathAt = domain => {
   const normalised = domain.toLowerCase()
@@ -3651,7 +3737,7 @@ const spends = {
   version: VERSION,
   spec: SPEC,
   description:
-    'Spending a LUD-25 note (lnurl/luds 6e865b1, "unified taproot verification"). Every note is a BIP-341 output key Q; a ck1 opens it by the key path and a cw1 by one leaf of its script tree, and every signature in either signs the BIP-341 sighash of input 0 of the canonical spend transaction for the mint\'s domain. bearers: bearer notes (NUMS internal key, one OP_SHA256 <h> OP_EQUAL leaf) with every intermediate value. keyPath: one key\'s ck1 at several domains, and crossDomain pairs that must not verify. tree: the three-leaf note the grader rotates a funded note into, with each leaf\'s cw1 and the verdict LUD-25\'s leaf policy gives it, and the key path of the tweaked key. checksig: a <key> OP_CHECKSIG leaf with its script-path SigMsg and sighash at two claimed times. timeClaims, leafPolicy: the two SERVICE-side rules consensus does not decide, each case with the verdict and why. malformedCw1 and invalidCp1 must not decode to a note. shortForms: a 64-hex value names the same note, or makes the same spend, as its long form. Expected verdicts are written by hand; tools/selfcheck.mjs recomputes every one.',
+    'Spending a LUD-25 note (lnurl/luds 6e865b1, "unified taproot verification"; keys per 50d740a). Every note is a BIP-341 output key Q; a ck1 opens it by the key path and a cw1 by one leaf of its script tree, and every signature in either signs the BIP-341 sighash of input 0 of the canonical spend transaction for the mint\'s domain. bearers: bearer notes (NUMS internal key, one OP_SHA256 <h> OP_EQUAL leaf) with every intermediate value. keyPath: one key\'s ck1 at several domains, and crossDomain pairs that must not verify. tree: the three-leaf note the grader rotates a funded note into, with each leaf\'s cw1 and the verdict LUD-25\'s leaf policy gives it, and the key path of the tweaked key. checksig: a <key> OP_CHECKSIG leaf with its script-path SigMsg and sighash at two claimed times. timeClaims, leafPolicy: the two SERVICE-side rules consensus does not decide, each case with the verdict and why. malformedCw1 and invalidCp1 must not decode to a note. shortForms: a 64-hex value names the same note, or makes the same spend, as its long form. Expected verdicts are written by hand; tools/selfcheck.mjs recomputes every one.',
   conventions: {
     domain: "the SERVICE's full domain name, lowercased, never its scheme or port: new URL(noteUrl).hostname.toLowerCase()",
     canonicalSpendTransaction:
