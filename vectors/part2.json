@@ -1,26 +1,19 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "LUD-25 key-path notes (the half of the draft once called Part 2): a note whose output key Q is a holder's own key, used as is with no BIP-86 tweak, spent by a ck1 and certified by a cs1. Every branch is the reference wallet's address path under a BIP39 seed (no passphrase): cashRoot is m/139', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139'/0, msg = utf8(host)), and addressNode is m/139'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m(\"cx\", branchPubkey || chainCode). Each note names its purpose (0: the wallet's own notes, including a split's p1 and every rotate or merge output; 1: a split's change p2; 2: Lightning Address auto-mint and internal transfer) and its index on that purpose, and t = tagged_hash(\"LNURLcash/derive\", branchPubkey || chainCode || ser32_be(purpose) || ser32_be(index)) mod n; notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. A ck1 spends the note at one mint only: domain is the branch host's lowercase hostname with any port dropped, sighash is the BIP-341 key-path signature hash (SIGHASH_DEFAULT) of input 0 of the canonical spend transaction for that domain (prevout tagged_hash(\"LNURLcash/mint\", domain), spent output (OP_1 <notePubkey>, 0); spends.json lists every SigMsg field), keyPathSignature is BIP-340 Schnorr over that sighash with an all-zero aux_rand, and ck1 is bech32m(\"ck\", notePubkey || keyPathSignature). The same ck1 fails at any other domain. Register/unregister proofs are Schnorr signatures from the purpose-0 index-0 key over sha256(\"LNURLcash:<action>:<domain>:<username>\"), separating action, mint and name. A certificate is a recoverable ECDSA signature by the mint key over sha256(sha256(\"Lightning Signed Message:\" || \"LNURLcash:<amount_msat>:<hex(notePubkey)>\")); its bech32m HRP is \"cs\" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350). prePurpose records the superseded derivation without ser32(purpose) (luds 6e865b1) for one branch, only so a wallet can find and sweep notes it derived before purposes existed; no SERVICE derives there.",
+  "description": "LUD-25 Part 2: notes keyed by a public key and spent by a BIP-340 Schnorr proof. Every branch is the reference wallet's address path under a BIP39 seed (no passphrase): cashRoot is m/139', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139'/0, msg = utf8(host)), and addressNode is m/139'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m(\"cx\", branchPubkey || chainCode). Each note: t = tagged_hash(\"LNURLcash/derive\", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is a 64-byte BIP-340 Schnorr signature over sha256(\"LNURLcash\") - a 32-byte digest, not the raw 9-byte string, since most conforming Schnorr signers (libsecp256k1's schnorrsig module included) only accept a 32-byte message (2026-09-16, luds#6de59b2) - and ck1 is bech32m(\"ck\", notePubkey || ownershipSignature): the value that spends the note. Register/update/unregister proofs are Schnorr signatures from index zero over sha256(\"LNURLcash:<action>:<username>\"), same reasoning, separating both action and name. A certificate remains a recoverable ECDSA signature by the mint key over sha256(sha256(\"Lightning Signed Message:\" || \"LNURLcash:<amount_msat>:<hex(notePubkey)>\")); its bech32m HRP is \"cs\" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).",
   "conventions": {
     "addressBranch": "m/139'/d1/d2/d3/d4",
     "hashingKey": "m/139'/0",
-    "specTextSays": "m/139'/d1/d2/d3/d4 with the hashing key at m/139'/0 - the literal path every implementation uses",
-    "noteTweak": "tagged_hash(\"LNURLcash/derive\", P || chainCode || ser32_be(purpose) || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t is reduced mod n, as the spec requires (no index here reaches n)",
-    "purposes": {
-      "0": "wallet",
-      "1": "change",
-      "2": "Lightning Address"
-    },
-    "purposeUse": "purpose 0: every note the wallet mints, rotates into or merges into, and a split's p1; purpose 1: a split's change p2; purpose 2: a note credited by Lightning Address auto-mint or an internal transfer (the text/cpub hint's index). Each purpose has its own counter and its own recovery gap limit, and one cx1 covers all three.",
-    "indexWidth": "4 bytes, big-endian, any uint32, never hardened; the same for purpose",
-    "spendDomain": "the host's lowercase hostname, never its scheme or port; the derivation above still hashes the host exactly as stored, port included",
-    "canonicalSpendTransaction": "nVersion 2; vin[0] prevout (tagged_hash(\"LNURLcash/mint\", domain), 0), empty scriptSig, nSequence 0xffffffff; vout[0] value 0, empty scriptPubKey; nLockTime 0; spent output (OP_1 <notePubkey>, 0)",
-    "ck1Signs": "tagged_hash(\"TapSighash\", 0x00 || SigMsg), the BIP-341 key-path sighash (SIGHASH_DEFAULT, spend_type 0x00) of input 0 of the canonical spend transaction for the domain",
-    "keyPathSignature": "BIP-340 Schnorr, 64 bytes, all-zero aux_rand, so a ck1 is a deterministic function of the key and the domain",
+    "specTextSays": "m/139'/d1/d2/d3/d4 with the hashing key at m/139'/0 - now the literal path every implementation uses; there is no separate purpose for Part 2",
+    "noteTweak": "tagged_hash(\"LNURLcash/derive\", P || chainCode || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t >= n is unusable, use the next index",
+    "indexWidth": "4 bytes, big-endian, any uint32, never hardened",
+    "ownershipMessage": "LNURLcash",
+    "ownershipMessageEncoding": "UTF-8 bytes, sha256-hashed to a 32-byte digest before signing (2026-09-16, luds#6de59b2)",
+    "ownershipSignature": "BIP-340 Schnorr, 64 bytes; vectors use 32 zero auxiliary bytes",
     "ck1Payload": "32-byte x-only public key || 64-byte Schnorr signature",
-    "addressProofMessage": "LNURLcash:<register|unregister>:<domain>:<username>",
-    "addressProofMessageEncoding": "UTF-8 bytes, sha256-hashed to a 32-byte digest, then BIP-340 Schnorr by the branch's purpose-0 index-0 key",
+    "addressProofMessage": "LNURLcash:<register|unregister>:<username>",
+    "addressProofMessageEncoding": "UTF-8 bytes, sha256-hashed to a 32-byte digest before signing, same reasoning as ownershipMessageEncoding",
     "certificateMessage": "LNURLcash:<amount_msat>:<hex(pk)>",
     "certificateHrp": "cs || BOLT11_amount_suffix(amount_msat)"
   },
@@ -33,7 +26,6 @@
       "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
       "seedHex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
       "host": "mint.example",
-      "domain": "mint.example",
       "cashRoot": "c7a2496e9b453a67c5d2a1f04936ec1259440d45454c795a99a66269e4cd3005111e1cc966fca2fe32f054f14caceab90449e536d94cf6935ea12a087e414f60",
       "domainIndices": [
         2589708612,
@@ -48,114 +40,60 @@
       "cx1": "cx1jdcdmewar4hqgfnysxntnl2a2avtlz60c7fa5fq04udrgz58d0zd6h54qnwmdmhm47j26wcq44ppsk86ls8dn6j2hkwtdpunlpzulsgnm784k",
       "notes": [
         {
-          "purpose": 0,
           "index": 0,
-          "notePubkey": "25fc2fa155ee8161a63f60c7a3ce33b7d75be9e2c36386bfe177836a928509cd",
-          "cp1": "cp1yh7zlg24a6qkrf3lvrr68n3nklt4h60zcd3cd0lpw7pk4y59p8xshfmy26",
-          "noteSecretKey": "7c20d8b15ced3c7dd52aa7c852582338f68dfeae5b9b4c6f0807463eebad7f0b",
-          "sighash": "8b261b9716044683e8ac8052cddd41a4f54dc8d568c5358a473243aebf27384f",
-          "keyPathSignature": "8105c2241a2d8bf0c14a17e4f1d989effa6642c7ed39664dc17e3dadeee6ae07c61b0920b8b7e911a3a7a7c8acb19375c40794f97d607924c15922a8b17383b1",
-          "ck1": "ck1yh7zlg24a6qkrf3lvrr68n3nklt4h60zcd3cd0lpw7pk4y59p8xczpwzysdzmzlsc99p0e83mxy7l7nxgtr76wtxfhqhu0ddamn2up7xrvyjpw9hayg68fa8ezktrym4csref7tavpujfs2ey25tzuurky6v82c7"
+          "notePubkey": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
+          "cp1": "cp12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qesd2rcha",
+          "noteSecretKey": "e63e4e8109b3f54d1322942723fd786de2d56e2885f8098e2e9bd5067b2b6de0",
+          "ownershipSignature": "85c10402ee6799ddef4a4330be2072879fbc5ffdb23b4468b97c7ea50162acc38d67f0bd18c6e59ebe8854f3e40f57a1588fb6ef919a96ef7ae80f877ae3cf8a",
+          "ck1": "ck12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qectsgyqthx0xwaaa9yxv97ypeg08autl7myw6ydzuhcl49q932esudvlct6xxxuk0tazz570jq74aptz8mdmu3n2tw77hgp7rh4c703ghav8wl"
         },
         {
-          "purpose": 0,
           "index": 1,
-          "notePubkey": "1bc2acef7373cc39e2494dd614fb957ec04faed0d1648a5b710bed0c0d873b6c",
-          "cp1": "cp1r0p2emmnw0xrncjffhtpf7u40mqyltks69jg5km3p0kscrv88dkqgt6xyk",
-          "noteSecretKey": "d37e79be5d64f286100006b8c2faca805763371fdb0bfdfc71ba72462edddc1a",
-          "sighash": "c71fe55dcb28a2192f606800a468f42907f844d79c6a08c4aeed1945d5489c65",
-          "keyPathSignature": "c7bb079e69d29a5d7e6d26e842c336af6973bde6c62d0e59a1bdb0855ab1f5ddd3c557eba14581b10e5bbcbfc4119ea6af8eea21d50c3135f600c9c686acd616",
-          "ck1": "ck1r0p2emmnw0xrncjffhtpf7u40mqyltks69jg5km3p0kscrv88dkv0wc8ne5a9xja0ekjd6zzcvm276tnhhnvvtgwtxsmmvy9t2clthwnc4t7hg29sxcsukauhlzpr84x478w5gw4pscntasqe8rgdtxkzcaz3vzd"
+          "notePubkey": "2a1f9b556ca944e20f4281613c286f68f257f7d8b9dec18be5c79e2eae9dc3c6",
+          "cp1": "cp19g0ek4tv49zwyr6zs9snc2r0dre90a7ch80vrzl9c70zat5ac0rqmuurur",
+          "noteSecretKey": "cba6d9bf45839f3a409e9a3b8d2260a9489e4a5cea121eb2b65e31b8fe69288c",
+          "ownershipSignature": "b081860b78d3b0b1243bf477d9a73a56a99909c38eecdd71f50a39cf5b85e588bf6fa03e1df1090126fafc1a0c57eaccf2074cb139f24562b424feade66b3da0",
+          "ck1": "ck19g0ek4tv49zwyr6zs9snc2r0dre90a7ch80vrzl9c70zat5ac0rtpqvxpdud8v93ysalga7e5ua9d2vep8pcamxaw86s5ww0twz7tz9ld7sru803pyqjd7hurgx906kv7gr5evfe7fzk9dpyl6k7v6ea5q5pe7ae"
         },
         {
-          "purpose": 0,
           "index": 2,
-          "notePubkey": "d793f800fa9a3a8ce8ea7ac0bb8c585681d74522ee0e93c0a5e380b54762939f",
-          "cp1": "cp167flsq86ngage6820tqthrzc26qaw3fzac8f8s99uwqt23mzjw0sv6rqyw",
-          "noteSecretKey": "c50f6c50fec13c21387b70aef24bb8d0144419dd28621f93fa7723967812e663",
-          "sighash": "7a2de53cc1fe51f3853072a2f26df319f636d56ced3693f1c44791b9182c9e64",
-          "keyPathSignature": "44681ff74d8c6e257af56b6df4a50eda1b8dc542f5b7d427a500a25239fc6799f91100d3274149f225202b56f935b3b43c89dd199c3a4320ad9f6d8299b30cd3",
-          "ck1": "ck167flsq86ngage6820tqthrzc26qaw3fzac8f8s99uwqt23mzjw05g6ql7axccm390t6kkm05558d5xudc4p0td75y7jspgjj887x0x0ezyqdxf6pf8ez2gpt2muntva58jya6xvu8fpjptvldkpfnvcv6vh87x6k"
+          "notePubkey": "921e17ce875fe9eeb0ade22d99d2e3d830e58d05fbff61a65ddb279db461099a",
+          "cp1": "cp1jg0p0n58tl57av9dugken5hrmqcwtrg9l0lkrfjamvnemdrppxdqkcf7yv",
+          "noteSecretKey": "4161e80150c8019d51e97c13c8c288ae5fbdfddfab4444ef0df221d8b1561e02",
+          "ownershipSignature": "5aab9e7958e72f1e0aacba944ea4ffe837915fd0cae32aa827468b188c3add8604acdf8ac7df8fe3031c0b7330c8594af17e8f9903d4ed0f85c8e131d1208599",
+          "ck1": "ck1jg0p0n58tl57av9dugken5hrmqcwtrg9l0lkrfjamvnemdrppxd942u709vwwtc7p2kt49zw5nl7sdu3tlgv4ce24qn5dzcc3sadmpsy4n0c437l3l3sx8qtwvcvsk2279lglxgr6nkslpwguycazgy9nys6hrxy"
         },
         {
-          "purpose": 0,
           "index": 1000,
-          "notePubkey": "5a33d82d54ab2d9d1167b049a183d782c88dadd9341c2ebc4f1bdbf26d4b35f7",
-          "cp1": "cp1tgeast254vke6yt8kpy6rq7hstygmtwexswza0z0r0dlym2txhms43sgf8",
-          "noteSecretKey": "726c865175096703c5be01f8c97be6c3d488261a3425d1c50957db5f2367112f",
-          "sighash": "4f8f63b774910401d3651afb1c42e5336dc0d20dd08470c6e23f23fecc06d087",
-          "keyPathSignature": "ffbe394584221c5595dfe9b294129eed341cb02cff172d0df8648636c8031e7ad5360e9ed1e9922a9f4f6d37d5295d60d1b922833d9beac66d8a7899c69d2016",
-          "ck1": "ck1tgeast254vke6yt8kpy6rq7hstygmtwexswza0z0r0dlym2txhmll03egkzzy8z4jh07nv55z20w6dqukqk079edphuxfp3keqp3u7k4xc8fa50fjg4f7nmdxl2jjhtq6xuj9qean04vvmv20zvud8fqzcgz2m66"
+          "notePubkey": "2c769a88d11f866116384757ef90be35c7736d9be171400b3d51847d9c40afa7",
+          "cp1": "cp193mf4zx3r7rxz93cgat7ly97xhrhxmvmu9c5qzea2xz8m8zq47nsk7pfgu",
+          "noteSecretKey": "606eaf1437cd8aeb73b54b9bb2eff8b0e6fe353850d1c7dc3d5251157e5fa665",
+          "ownershipSignature": "15523466fff4d18568fa74be70e58462e86ce34184120d11419c5851833515af3cd5ef73cd6f776642e1ea4b24ccf2eb1f99664c6ef32fca2bd8d8b9cd15f62a",
+          "ck1": "ck193mf4zx3r7rxz93cgat7ly97xhrhxmvmu9c5qzea2xz8m8zq47n32535vmllf5v9dra8f0nsukzx96rvudqcgysdz9qeckz3sv63tteu6hhh8nt0wany9c02fvjveuhtr7vkvnrw7vhu527cmzuu690k9g5f5z4k"
         },
         {
-          "purpose": 0,
           "index": 2147483647,
-          "notePubkey": "1ed09c6d320bea97950427527030126fea214dba6a7b2cda121c7c1ea06e629c",
-          "cp1": "cp1rmgfcmfjp04f09gyyaf8qvqjdl4zznd6dfajeksjr37pagrwv2wqz7aj6c",
-          "noteSecretKey": "bded873c00bca48a25499c466b78c4bfd66b2ba3a253478d40d55d26bc3656d0",
-          "sighash": "50ea01875498cfbd764836cd14217b0bc5b8a0c840caa06257ae76f9e5d8ba8b",
-          "keyPathSignature": "724a9a0e5bcde15b49d163e84a21cad1674f27aa046379ef73b36c18bff9e5679fb0101b5af9997a03438c27a662a6034ea0005eb5a8c29c59fe9f3d5acc81c4",
-          "ck1": "ck1rmgfcmfjp04f09gyyaf8qvqjdl4zznd6dfajeksjr37pagrwv2w8yj56pedumc2mf8gk86z2y89dze60y74qgcmeaaemxmqchlu72eulkqgpkkhen9aqxsuvy7nx9fsrf6sqqh444rpfck07nu744nypcsansnf0"
+          "notePubkey": "8ca1212b6cbcfe30a49887baad3a806517ff8f4862edfe77e784861306f27d56",
+          "cp1": "cp13jsjz2mvhnlrpfycs7a26w5qv5tllr6gvtklual8sjrpxphj04tqpxqahk",
+          "noteSecretKey": "ab03d34324d5b131e0ffd96fce818488d783a77920c2b5d708c8c6ab966fa586",
+          "ownershipSignature": "bbbd83501da571c9ebdef58859292ad0cd9468d5636c9c00da15bd2f65729f0dbcab7b2e41eaf0e9fa42fba61701c66d94fefd316942c69e60c4510b3b0d33a1",
+          "ck1": "ck13jsjz2mvhnlrpfycs7a26w5qv5tllr6gvtklual8sjrpxphj04tth0vr2qw62uwfa000tzze9y4dpnv5dr2kxmyuqrdpt0f0v4ef7rdu4dajus027r5l5shm5ctsr3ndjnl06vtfgtrfucxy2y9nkrfn5ykf262r"
         },
         {
-          "purpose": 0,
           "index": 2147483648,
-          "notePubkey": "102b411c68e8e05c1b3e266e3fea97d0a4bb633d81bde1c0bf647024d0bf96f6",
-          "cp1": "cp1zq45z8rgars9cxe7yehrl65h6zjtkceasx77rs9lv3czf59ljmmqag0mcp",
-          "noteSecretKey": "2efdc7a07e236d3caf54a1d6e591bab49174cd45a61c8e5fbf5d5e0f84ab0a83",
-          "sighash": "49aa0185fd84e33554a04b67c170c5742316f17fd730d6aba74fd893a012f4cc",
-          "keyPathSignature": "eeb4ddb1ec75e6e5a41ab0cc48021edc4d49de7fa11d0965a9d17965d1e1dba1be367a354bcd8ca21aa497c6dc304a7c41bcd071af32921df2e04dcfa49acc88",
-          "ck1": "ck1zq45z8rgars9cxe7yehrl65h6zjtkceasx77rs9lv3czf59ljmmwadxak8k8teh95sdtpnzgqg0dcn2fmel6z8gfvk5az7t968sahgd7xear2j7d3j3p4fyhcmwrqjnugx7dqud0x2fpmuhqfh86fxkv3qfcd5rv"
+          "notePubkey": "9fc1d38d06e6ed8881b5d4d5037f339cdbba342fce6d2c776e608a4c2ffde14c",
+          "cp1": "cp1nlqa8rgxumkc3qd46n2sxlennndm5dp0eekjcamwvz9yctlau9xqqnvxje",
+          "noteSecretKey": "3f56766df08d3cc0257e99466519b089209d6e1a337b2b230b8df7d83ee5ebc0",
+          "ownershipSignature": "06356ecc55536c97ff415ff0e182d746ed74c7da160b38c0f7e50b585e0cbd4b0690724c7b141ece9fcf69c3e1870ce7bfdad27a0543d559f680fd72cec1a9b2",
+          "ck1": "ck1nlqa8rgxumkc3qd46n2sxlennndm5dp0eekjcamwvz9yctlau9xqvdtwe324xmyhlaq4lu8pstt5dmt5cldpvzeccrm72z6ctcxt6jcxjpeyc7c5rm8flnmfc0scwr88hlddy7s9g024na5ql4evasdfkg5pc0jq"
         },
         {
-          "purpose": 0,
           "index": 4294967295,
-          "notePubkey": "6dcfe2c3387a427bc1b5f53b63c3aebb23377cb50a46f9c5c5ee7282e0dfc875",
-          "cp1": "cp1dh879sec0fp8hsd475ak8sawhv3nwl94pfr0n3w9aeeg9cxlep6sksmahk",
-          "noteSecretKey": "6d940d6de499861a1dd72be324884c2699091ce62e9be844f672f4c15295092d",
-          "sighash": "80c4bb0e855a4b1b760bdffa5389d33d629fec91780d2ec5f91c1355fc9db065",
-          "keyPathSignature": "bd817ea45f86851e60544fcb1370ddff9c314146f7eec64bc9011a8e7fd13eea8360c15823b643e9b8fdb82edf96e93d8d8dd6f7ca230033f11f097f802a10ee",
-          "ck1": "ck1dh879sec0fp8hsd475ak8sawhv3nwl94pfr0n3w9aeeg9cxlep6mmqt7530cdpg7vp2yljcnwrwll8p3g9r00mkxf0yszx5w0lgna65rvrq4sgakg05m3ldc9m0ed6fa3kxada72yvqr8uglp9lcq2ssac6qgcru"
-        },
-        {
-          "purpose": 1,
-          "index": 0,
-          "notePubkey": "0cc7d037af610ccb9347a30774c877a23dd0d8a119f642a0e6de59444b091da6",
-          "cp1": "cp1pnraqda0vyxvhy685vrhfjrh5g7apk9pr8my9g8xmev5gjcfrknqtpkqzt",
-          "noteSecretKey": "e6883dd8ac93eefa5c83abebbed7fa9a08e1dfec6ee3195d326aa0bdb5532f54",
-          "sighash": "2e47244f304807a4172f774a50755d0defcfa7412ac0369b67320fb6c56cde34",
-          "keyPathSignature": "5d025c9b19488551000f9957a4eb9d95de731188bf4d05d1a27007c9c649c6c03316d8f0f74e006ffd870b7cf5bdd567e1d2b49d98946582577fc00dab88a87e",
-          "ck1": "ck1pnraqda0vyxvhy685vrhfjrh5g7apk9pr8my9g8xmev5gjcfrkn96qjunvv53p23qq8ej4ayawwethnnzxyt7ng96x38qp7fceyudspnzmv0pa6wqphlmpct0n6mm4t8u8ftf8vcj3jcy4mlcqx6hz9g0cpek5k2"
-        },
-        {
-          "purpose": 1,
-          "index": 1,
-          "notePubkey": "b414608c83d1266b689ea6c2f6058a5d1e88a2a8f6855b0ec01e344b0a1fe077",
-          "cp1": "cp1ks2xpryr6ynxk6y75mp0vpv2t50g3g4g76z4krkqrc6ykzslupmsxa59zx",
-          "noteSecretKey": "f6d78d363f4a714ad89e2a064afd7648281c0810f7fc7d544d59c24ccaf0ad3c",
-          "sighash": "70ded017fb70fb87fdccba13f3be83c3385347e5024bae7bfd9099fc0d6223ac",
-          "keyPathSignature": "3bf499e34d20fb6dd7a48b2ef62120c6fd78e845f9df4ad4fe7d045d8c33ed5c634b0f7177c1bee531553ab40308e77970e53860e521d7382a7818c51ae4af9f",
-          "ck1": "ck1ks2xpryr6ynxk6y75mp0vpv2t50g3g4g76z4krkqrc6ykzslupmnhayeudxjp7md67jgkthkyysvdltcapzlnh626nl86pza3se76hrrfv8hza7phmjnz4f6ksps3emewrjnsc89y8tns2ncrrz34e90nupcgx62"
-        },
-        {
-          "purpose": 2,
-          "index": 0,
-          "notePubkey": "ad7483eda73467fccdfdc55fd94bd96a86cb55e98af4c3f2a2b9d78cf139a77d",
-          "cp1": "cp1446g8md8x3nlen0ac40ajj7ed2rvk40f3t6v8u4zh8tceufe5a7sqn3af8",
-          "noteSecretKey": "7fc47454f944bd1aad737144a5f4419760ecacdee3362863f5b517231e23babd",
-          "sighash": "46e65ccdcfafa355d8c79cfd43bd58bd54d3e27b561960c42c733e2a90c765da",
-          "keyPathSignature": "463e65c54a32e0ebbaa17ca76b087528ef19d30a5fcdde15a367944ec7675b744aeabfec5257a3957373481e295f37802d858754f1ae100e28776f67de764f28",
-          "ck1": "ck1446g8md8x3nlen0ac40ajj7ed2rvk40f3t6v8u4zh8tceufe5a75v0n9c49r9c8th2shefmtpp6j3mce6v99lnw7zk3k09zwcan4kaz2a2l7c5jh5w2hxu6grc547duq9kzcw4834cgqu2rhdanauaj09qckzjzn"
-        },
-        {
-          "purpose": 2,
-          "index": 1,
-          "notePubkey": "fc61464fbcfb4f746d85db70de2054efe9f60c0ca69edf46c61d246bda8f5fd8",
-          "cp1": "cp1l3s5vnauld8hgmv9mdcdugz5al5lvrqv560d73kxr5jxhk50tlvq22hmp6",
-          "noteSecretKey": "9afb4bc8aa5473ad614772badeaa75aec46dc8582ee95282389480099d826c40",
-          "sighash": "6d19a4e487edb5e9dd1719a7b180d652f9a64c550404d9a5c7dbe7b3452a35c7",
-          "keyPathSignature": "bf4d3a349d80375d769e8bf539b645f8d8ce1498066d6a1abbc0652a8fb6ee5fd2662aa3a48a7f84fc44cbe539acb59e9f6703633f9388e676399fd1f4222f40",
-          "ck1": "ck1l3s5vnauld8hgmv9mdcdugz5al5lvrqv560d73kxr5jxhk50tlvt7nf6xjwcqd6aw60ghafekezl3kxwzjvqvmt2r2auqef237mwuh7jvc428fy207z0c3xtu5u6edv7nansxceljwywva3enlglgg30gqzgacee"
+          "notePubkey": "71bbe0889494a2a4ddd1c84998ed44c7a4344977b70df30d9abe832845c839cc",
+          "cp1": "cp1wxa7pzy5jj32fhw3epye3m2yc7jrgjthkuxlxrv6h6pjs3wg88xqjcmhz2",
+          "noteSecretKey": "b649d4336a740ec90c5768bbcb9109711ee5da0477f7014d23ae13eb6253a199",
+          "ownershipSignature": "fb8127ec404e4ebf18e04aca1c846d92ed312c6641d62415b1e75530e4a6299163f2346cc81f87858c9dfc0df240f8e7b2641e66c950a90d268956cd011ca20b",
+          "ck1": "ck1wxa7pzy5jj32fhw3epye3m2yc7jrgjthkuxlxrv6h6pjs3wg88x0hqf8a3qyun4lrrsy4jsus3ke9mf393nyr43yzkc7w4fsujnznytr7g6xejqls7zce80upheyp788kfjpuekf2z5s6f5f2mxsz89zpv83fzgt"
         }
       ]
     },
@@ -163,7 +101,6 @@
       "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
       "seedHex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
       "host": "mint.lnurlcash.com",
-      "domain": "mint.lnurlcash.com",
       "cashRoot": "c7a2496e9b453a67c5d2a1f04936ec1259440d45454c795a99a66269e4cd3005111e1cc966fca2fe32f054f14caceab90449e536d94cf6935ea12a087e414f60",
       "domainIndices": [
         4283982853,
@@ -178,114 +115,60 @@
       "cx1": "cx1y5kzpds3vwftfy72wtyq2pvc4ts90w9z5cenff974lggtxtuc387jtvzfqrg6f0476wnmznfkhf9akdsu4ghhy0l6quqy7gkvxa8elsrxdyhy",
       "notes": [
         {
-          "purpose": 0,
           "index": 0,
-          "notePubkey": "bde4b800e25c3f585fc5b68afdabd5d2f31b1d7d26a74963e128b622926c0032",
-          "cp1": "cp1hhjtsq8ztsl4sh79k690m2746te3k8tay6n5jclp9zmz9ynvqqeq945h47",
-          "noteSecretKey": "82b04ee8be39dbc8e6fff9745b2a4db2997940f12068ea110e3763446f6dfb98",
-          "sighash": "4636860780af95449d39f1d3aa057e75b39891c14594d9c72b5114af372b1dd9",
-          "keyPathSignature": "fdf5dc1016ba714cbadef6103c799b51e81fcdcad336c7c7ac185435fc8fa3d546e44da6f56e9ee7207e6a2d1abfb81c690298a1c9f6b3cb605da4904a90be3c",
-          "ck1": "ck1hhjtsq8ztsl4sh79k690m2746te3k8tay6n5jclp9zmz9ynvqqe0mawuzqtt5u2vht00vypu0xd4r6qleh9dxdk8c7kps4p4lj86842xu3x6datwnmnjqln295dtlwqudypf3gwf76eukcza5jgy4y978s3cx7ys"
+          "notePubkey": "dddd050c8567c8e4b03ce65544171ce0fd7e91081bde2c325176eb3f46342311",
+          "cp1": "cp1mhws2ry9vlywfvpuue25g9cuur7hayggr00zcvj3wm4n7335yvgsl6nq56",
+          "noteSecretKey": "63e2c0393a3a7080cee5c12cc5781ee00d9a564f4d38280f4662d9031480c0cf",
+          "ownershipSignature": "53f8a3c585d0396cf38f917db1c05db9ba20531af13c18f274fd72179f336d15aa5c5e735842e5abfbd8a1ccfb74808730b52c9e0565f5a9ab315aecca481534",
+          "ck1": "ck1mhws2ry9vlywfvpuue25g9cuur7hayggr00zcvj3wm4n7335yvg4879rckzaqwtv7w8ezld3cpwmnw3q2vd0z0qc7f606ushnuek69d2t308xkzzuk4lhk9penahfqy8xz6je8s9vh66n2e3ttkv5jq4xsxvclve"
         },
         {
-          "purpose": 0,
           "index": 1,
-          "notePubkey": "01838891144aa1b19ee626ed822c32d80cdde4aee3ed8a787c2e12870faeef96",
-          "cp1": "cp1qxpc3yg5f2smr8hxymkcytpjmqxdme9wu0kc57ru9cfgwrawa7tqeepcx7",
-          "noteSecretKey": "c947a1e8a92df454f206f70e6aecb46f5d76078cc3e469c960e07b6a08dd0310",
-          "sighash": "e12fed7d287652712c2392d9f9166573f87f1bdb8780ec31b65f4f4c12f89f47",
-          "keyPathSignature": "b0411b52bf7b84f055c04996e85a15b56cd98156121eea4057bd889dfd0dfa3aab09f412f79ae38e5e298625fa9f17c826c53913d9960b9de9e068e92a917653",
-          "ck1": "ck1qxpc3yg5f2smr8hxymkcytpjmqxdme9wu0kc57ru9cfgwrawa7ttqsgm22lhhp8s2hqyn9hgtg2m2mxes9tpy8h2gptmmzyal5xl5w4tp86p9au6uw89u2vxyhaf797gymznjy7ejc9em60qdr5j4ytk2vu2gtx8"
+          "notePubkey": "8124e72b9c2021a048ba60ab7984b85cf14269bfc168f0d1abc5d00f4e2d2753",
+          "cp1": "cp1syjww2uuyqs6qj96vz4hnp9ctnc5y6dlc950p5dtchgq7n3dyafs54n84f",
+          "noteSecretKey": "9ce01a15ad5bb400abf2fb24b24bf0cf4d30039cd9b679fd299b642250b4105c",
+          "ownershipSignature": "0394f586263fa42d3479c203c4bda7fed31da441623252e8ca497c778be88275526af03c98f5629065c43a22685375a35ebaac549f40d0a82f30ebc9bba53a8c",
+          "ck1": "ck1syjww2uuyqs6qj96vz4hnp9ctnc5y6dlc950p5dtchgq7n3dyafs8984scnrlfpdx3uuyq7yhknla5ca53qkyvjjar9yjlrh305gya2jdtcrex84v2gxt3p6yf59xadrt6a2c4ylgrg2stesa0ymhff63sf7yf58"
         },
         {
-          "purpose": 0,
           "index": 2,
-          "notePubkey": "2267ed87bcbc979602192f98860e28a93e56a38b4c31784d29dcfedcfacfe76b",
-          "cp1": "cp1yfn7mpauhjtevqse97vgvr3g4yl9dgutfschsnffmnlde7k0ua4sfzvgt9",
-          "noteSecretKey": "0ec907f88bc558d2d918f6b53dbfa01499e95972bbda3123703665a965a2f94f",
-          "sighash": "d79de2c8deeb76425ad4a27fb5370d0dec4034347c72c1a41ddad9f569876b4a",
-          "keyPathSignature": "be966c8315d5f1d545ca82e399c937dacfb1ea38c46cc4b1e6fc8151fd08e5902caaa7cabbaf97255152bb32ee7e490ac6146d09d0829d3171aafaf4d7860513",
-          "ck1": "ck1yfn7mpauhjtevqse97vgvr3g4yl9dgutfschsnffmnlde7k0ua4ma9nvsv2atuw4gh9g9cueeyma4na3aguvgmxyk8n0eq23l5ywtypv42nu4wa0juj4z54mxth8ujg2cc2x6zwss2wnzud2lt6d0ps9zv0np89d"
+          "notePubkey": "1532cf04af6541e51e545f41232b4e60acf342f6cb6a37b833381d89d0db58c9",
+          "cp1": "cp1z5ev7p90v4q728j5taqjx26wvzk0xshked4r0wpn8qwcn5xmtrys3w3phe",
+          "noteSecretKey": "7dea14510f7e706c4877c349d8ccdf0a6d75686dc31f64dbcc851b9ca6131590",
+          "ownershipSignature": "767856cab1e2abeea72b0d6dcf20268ed2120a536da226ada294aeb10c194bd7cc5ed95f7945d95a417fc4ed3627bff91597f3f6c5f9efdf5787f4175966a6ea",
+          "ck1": "ck1z5ev7p90v4q728j5taqjx26wvzk0xshked4r0wpn8qwcn5xmtryhv7zke2c792lw5u4s6mw0yqnga5sjpffkmg3x4k3fft43psv5h47vtmv47729m9dyzl7ya5mz00lezktl8ak9l8ha74u87st4je4xagdn69fr"
         },
         {
-          "purpose": 0,
           "index": 1000,
-          "notePubkey": "5c46836b61c8535341b180d823172d61059e6a8c122e055dbec85632a15834de",
-          "cp1": "cp1t3rgx6mpepf4xsd3srvzx9edvyzeu65vzghq2hd7eptr9g2cxn0qfvaxag",
-          "noteSecretKey": "384e35e55bb3a672b56b750b1ad31b789a201bc73174f7eab49f8675b9dd1f74",
-          "sighash": "922e6d2c63798b531be70cc1b99d3826129174a2f81574cb1bd5e261a8b549ad",
-          "keyPathSignature": "1009573b4da11ec4c3ea20fc1e6e895f310bd4fef123726ba146e27835402bc747562c1b19ed8585379e6188c602d92089e2802374f0d95e670b0f887d1b5857",
-          "ck1": "ck1t3rgx6mpepf4xsd3srvzx9edvyzeu65vzghq2hd7eptr9g2cxn0pqz2h8dx6z8kyc04zplq7d6y47vgt6nl0zgmjdws5dcncx4qzh3682ckpkx0dskzn08np3rrq9kfq383gqgm57rv4uectp7y86x6c2uechusm"
+          "notePubkey": "2f979fa09a26d0518aebb39f0024355d258872ea06d3cdc7a3b277d7e81be2ff",
+          "cp1": "cp197telgy6ymg9rzhtkw0sqfp4t5jcsuh2qmfum3arkfma06qmutlsf2xpw4",
+          "noteSecretKey": "eb3b0029f663016f3ccabe7b99d158b1bdb1ebf951609d9407942627ea4b12a5",
+          "ownershipSignature": "b0b50ed1bc11723fbd9375a4ab9f65279e57342c616929e269c134ccb42f9e64c6fcc627366ce5b992e3e40230c117854a31c3ff3d49c976186bdfa6cc2c6e9b",
+          "ck1": "ck197telgy6ymg9rzhtkw0sqfp4t5jcsuh2qmfum3arkfma06qmutlmpdgw6x7pzu3lhkfhtf9tnajj08jhxskxz6ffuf5uzdxvksheuexxlnrzwdnvukue9clyqgcvz9u9fgcu8leaf8yhvxrtm7nvctrwnvn7v7xm"
         },
         {
-          "purpose": 0,
           "index": 2147483647,
-          "notePubkey": "cf7fa25f11796e0e1121ce3ba5afed78c948a0463034a1eb473c7df3bddf2808",
-          "cp1": "cp1eal6yhc309hquyfpeca6ttld0ry53gzxxq62r668837l80wl9qyqhaqe2l",
-          "noteSecretKey": "704d997259100b564969b3fe7b5e8c71c35850411786aaaf2dfca61568cd3290",
-          "sighash": "99584b7cfbf379ca390a7e0855c1671394f9e9ddd5d5d03aa72810fae4ea0e86",
-          "keyPathSignature": "06d5522f51b5e2843c8436c285900be4688cc767c52a66dc8167aa81a6c9f103c49ee39068764a6dfb409e0db0d17399c13dd604cf6cff600809e02e1235ab45",
-          "ck1": "ck1eal6yhc309hquyfpeca6ttld0ry53gzxxq62r668837l80wl9qyqd42j9agmtc5y8jzrds59jq97g6yvcanu22nxmjqk025p5mylzq7ynm3eq6rkffklksy7pkcdzuuecy7avpx0dnlkqzqfuqhpyddtg5y59urh"
+          "notePubkey": "5c2d2fdc88f241d7306c328f95601eba1debac9f36670c31c890af42b4a4f108",
+          "cp1": "cp1tskjlhyg7fqawvrvx28e2cq7hgw7htylxenscvwgjzh59d9y7yyqte7d6e",
+          "noteSecretKey": "0ac7fd63c68b0181ab5f67165206385658e7e33d2b485e17bb025b19145f9ec3",
+          "ownershipSignature": "ac2eb48f85a6b18b2045e4e9245a7a5cb0f65c19a9b19922aca24f70e0e2a8f4a677130c0c65fd9d40383de98aa8a59fc131448e4e873e8e90d97d5fdc2014bb",
+          "ck1": "ck1tskjlhyg7fqawvrvx28e2cq7hgw7htylxenscvwgjzh59d9y7yy2ct4537z6dvvtypz7f6fytfa9ev8ktsv6nvvey2k2ynmsur323a9xwufscrr9lkw5qwpaax923fvlcyc5frjwsulgayxe040acgq5hvnduwaj"
         },
         {
-          "purpose": 0,
           "index": 2147483648,
-          "notePubkey": "4caf46b86f84d90e30f674b2f3700e673e616f041ed439fc3231b085e2960785",
-          "cp1": "cp1fjh5dwr0snvsuv8kwje0xuqwvulxzmcyrm2rnlpjxxcgtc5kq7zs8ht2sc",
-          "noteSecretKey": "bc1ae9f8ace2cdcc3e18caee508963c110c70c8c631ead2414e4dea78f0a17c3",
-          "sighash": "dafd90efa63b6d4cdd67ad85602e3e8724eae94037f061d3fa661654e172d9cb",
-          "keyPathSignature": "c780e314207a85970db258051d8d0d6d1793f5f10475ec2305d5bf69b14fbb57a07c9770774f9f76856d7611c39e01bdd130b065268a8213d59492f8c129b0f8",
-          "ck1": "ck1fjh5dwr0snvsuv8kwje0xuqwvulxzmcyrm2rnlpjxxcgtc5kq7zu0q8rzss84pvhpke9spga35xk69un7hcsga0vyvzat0mfk98mk4aq0jthqa60namg2mtkz8peuqda6yctqefx32pp84v5jtuvz2dslq3n0x2y"
+          "notePubkey": "5cdd2118ccc7af7709ce26f9f46d5dab285b5a898aef8b9989d123465d895dd4",
+          "cp1": "cp1tnwjzxxvc7hhwzwwymulgm2a4v59kk5f3thchxvf6y35vhvfth2qq4v69c",
+          "noteSecretKey": "bda928700a7e62834c85edfdf0b7c3e8c79c131555ab8ae55844d145a333f6d7",
+          "ownershipSignature": "10f36658eb612f51f53bb90075b148a06c9c54ed3c300d610824b2ea9190673cbb329cd752df0530d412892e0d2f144b9273a9372002314c38b7f213ba81ca76",
+          "ck1": "ck1tnwjzxxvc7hhwzwwymulgm2a4v59kk5f3thchxvf6y35vhvfth2ppumxtr4kzt6375amjqr4k9y2qmyu2nkncvqdvyyzfvh2jxgxw09mx2wdw5klq5cdgy5f9cxj79ztjfe6jdeqqgc5cw9h7gfm4qw2wcgyf33q"
         },
         {
-          "purpose": 0,
           "index": 4294967295,
-          "notePubkey": "a54f9bcf67995b7581c64c7a1608b7c535e9f15f17c99b8097b245415dcab7aa",
-          "cp1": "cp1548ehnm8n9dhtqwxf3apvz9hc567nu2lzlyehqyhkfz5zhw2k74q4r53sr",
-          "noteSecretKey": "1ae4ae995bf71ac336c12db48ba5709616c29b49cb7dbc7f7a129f4f54a508f1",
-          "sighash": "fbfe31c7845c8e6d99ab407b16b17cb8ad9b3a2b884db693fb45e83551be610d",
-          "keyPathSignature": "5ad4b2fe46fb2320d64d47c853344e4fe0b01876a6cc51c50f2e2784f46be3352aac7aa39f7ce26eaba449a3e11b9c7b0a1a7e2e50e7c5ac5e29b7cd5fbf71e9",
-          "ck1": "ck1548ehnm8n9dhtqwxf3apvz9hc567nu2lzlyehqyhkfz5zhw2k749449jler0kgeq6ex50jznx38ylc9srpm2dnz3c58jufuy7347xdf243a288muufh2hfzf50s3h8rmpgd8utjsulz6ch3fklx4l0m3aylmvkkx"
-        },
-        {
-          "purpose": 1,
-          "index": 0,
-          "notePubkey": "07816c5325e63d318cbd768509172fedd8c998f49701d1d0376e09678c457de6",
-          "cp1": "cp1q7qkc5e9uc7nrr9aw6zsj9e0ahvvnx85juqar5phdcyk0rz90hnqw6v8gc",
-          "noteSecretKey": "0508d209921e908a2058e46305d1ad3f0665f1a19c8715f8bbcfdb7d7563bdf5",
-          "sighash": "4d64cb79f63ff20763faca6bfd412dd7dd2542f7e2137d72aedac57324b6af25",
-          "keyPathSignature": "d18073dbff1fa99255ec58a06013504fd059d4dcfba3d57a24160f23c4a70126d0b8112b1fa17279a2e80d6c840520747f453e94172a6e478afc2d29c4742eeb",
-          "ck1": "ck1q7qkc5e9uc7nrr9aw6zsj9e0ahvvnx85juqar5phdcyk0rz90hndrqrnm0l3l2vj2hk93grqzdgyl5ze6nw0hg740gjpvrercjnszfkshqgjk8apwfu696qddjzq2gr50azna9qh9fhy0zhu955ugapwavnymt5m"
-        },
-        {
-          "purpose": 1,
-          "index": 1,
-          "notePubkey": "c6b1545c6fdf851b728c5d049f5f4bf883c49bfc8a52ac4f3e33dfa6d370fdd5",
-          "cp1": "cp1c6c4ghr0m7z3ku5vt5zf7h6tlzpufxlu3ff2cne7x006d5mslh2s67t3le",
-          "noteSecretKey": "c0ea0e1eb59058c1ead48149c29bccd70155763f9d8f55da830bd186362d3301",
-          "sighash": "fd3509b97804bc11f0663c546145e0d77f9e46de9d80a55db0d5cb759e633563",
-          "keyPathSignature": "9e02df8bf987eca81c89ef6de0b397f14ce49eaa28889db4030951876dd288b8d9dfd73dc05943c62dd106fd336aabe1b37f437f4e9558603ef9b323ce405d87",
-          "ck1": "ck1c6c4ghr0m7z3ku5vt5zf7h6tlzpufxlu3ff2cne7x006d5mslh2euqkl30uc0m9grjy77m0qkwtlzn8yn64z3zyakspsj5v8dhfg3wxemltnmszeg0rzm5gxl5ek42lpkdl5xl6wj4vxq0hekv3uuszasudfvuph"
-        },
-        {
-          "purpose": 2,
-          "index": 0,
-          "notePubkey": "e07c0fa90daf64664fcbf325223f23a5acf1c8275c3cbba80c205e01426c0a94",
-          "cp1": "cp1up7ql2gd4ajxvn7t7vjjy0er5kk0rjp8ts7th2qvyp0qzsnvp22qen4urq",
-          "noteSecretKey": "5fc1bdf641ad66e74c3599ac8c32e127b8c040addd096e7c8d0997f4c9d06e1b",
-          "sighash": "030e7298d915b872643b9f59760f511ac9bf7d5a94d47afea517e6bb9ab145a0",
-          "keyPathSignature": "ccc7b08915e01e4bd3919bb3c97eac24177e4eeebc366431e84c15b08f45ad70ccc75e9c422fc46dde01875a5967262ed3982bf76a3265915ebb757f970e9745",
-          "ck1": "ck1up7ql2gd4ajxvn7t7vjjy0er5kk0rjp8ts7th2qvyp0qzsnvp22ve3as3y27q8jt6wgehv7f06kzg9m7fmhtcdnyx85yc9ds3az66uxvca0fcs30c3kauqv8tfvkwf3w6wvzham2xfjezh4mw4lewr5hg57kqhuh"
-        },
-        {
-          "purpose": 2,
-          "index": 1,
-          "notePubkey": "d8e4a6f71b8be59602afa8178f805ab59dab7170e35eb64ed47f0bd964e8f95c",
-          "cp1": "cp1mrj2dacm30jevq404qtclqz6kkw6kutsud0tvnk50u9aje8gl9wqnn2zl6",
-          "noteSecretKey": "144cd917cdc82082857e1fd7b4cf4db6932a501a12e1ea05a2eb303ff5f8cf5d",
-          "sighash": "b175d5d3727450636a82164b78cb6933b26f71d172cd2e7b4ad81e55a5080c67",
-          "keyPathSignature": "34894986897bf281f74c51f3f9f105d53c5dfc5412bb9563864fa636c5bf20d61d16f887d0f59de0423a3415c8e239d0dc4851ff5499c2f8f81a8087332e1457",
-          "ck1": "ck1mrj2dacm30jevq404qtclqz6kkw6kutsud0tvnk50u9aje8gl9wrfz2fs6yhhu5p7ax9rule7yza20zal32p9wu4vwrylf3kckljp4sazmug0584nhsyyw35zhywywwsm3y9rl65n8p037q6szrnxts52uskva87"
+          "notePubkey": "c8fe18ceac5aa0f6fb670af38d8d2a7a4ef98ba80be5958ecce03a85cc6aef40",
+          "cp1": "cp1erlp3n4vt2s0d7m8ptecmrf20f80nzagp0jetrkvuqagtnr2aaqqkdm2q6",
+          "noteSecretKey": "643a68037db5ec03145fb6ac583635d2bb30e05d475f688db5346a139282f3b1",
+          "ownershipSignature": "feb4092b678977420f003f95568bf9da8e5996c19f36af3c4e6a5eb8d8d9dbc9b7e617ad874bad24c217c1a7fe1acf114ff8e25b9abeb24585e29819f31a8f59",
+          "ck1": "ck1erlp3n4vt2s0d7m8ptecmrf20f80nzagp0jetrkvuqagtnr2aaq0adqf9dncja6zpuqrl92k30ua4rjejmqe7d40838x5h4cmrvahjdhuct6mp6t45jvy97p5llp4nc3fluwyku6h6eytp0znqvlxx50tymcylmf"
         }
       ]
     },
@@ -293,7 +176,6 @@
       "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
       "seedHex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
       "host": "moneyer.dev",
-      "domain": "moneyer.dev",
       "cashRoot": "c7a2496e9b453a67c5d2a1f04936ec1259440d45454c795a99a66269e4cd3005111e1cc966fca2fe32f054f14caceab90449e536d94cf6935ea12a087e414f60",
       "domainIndices": [
         170666588,
@@ -308,114 +190,60 @@
       "cx1": "cx1s3kgx0p8lzqpt967r80hcj4n8xtk0kk20qfkqhk6cf94emzdrp7396mt2eu4nhx36a2djgvnk964j0hgwt60zlglr97vr8cq367wc2sang3dz",
       "notes": [
         {
-          "purpose": 0,
           "index": 0,
-          "notePubkey": "89e7d56a98bb917c2c3cfb1352e5fb007fdac0945053d13d69ba9c789a5467ac",
-          "cp1": "cp138na265chwghctpulvf49e0mqpla4sy52pfaz0tfh2w83xj5v7kq2lvyqy",
-          "noteSecretKey": "b9c156530fba214f10d67987ea1349373fa62701fccd4a90cda244c2417efbe5",
-          "sighash": "93ea8e5c536904455902d4166cef91ebdb7e42d607539498df384dc87688b25d",
-          "keyPathSignature": "8399d550b76364a8a6bfca7c918f9b20d0045a04d0ebfd87015ae668f5cdc0795b393b20a9972212ba0e12f96c8e3d8a3e8ec92e4b8a703e7f70bbf93ca53895",
-          "ck1": "ck138na265chwghctpulvf49e0mqpla4sy52pfaz0tfh2w83xj5v7kg8xw42zmkxe9g56lu5ly337djp5qytgzdp6lasuq44eng7hxuq72m8yajp2vhygft5rsjl9kgu0v2868vjtjt3fcrulmsh0uneffcj5aelkqh"
+          "notePubkey": "5b1f483cd1a9dd69698545d64b7360a03eacd867224063ada94f5cad1e8974da",
+          "cp1": "cp1tv05s0x348wkj6v9ghtykumq5ql2ekr8yfqx8tdffaw2685fwndqmf5xk4",
+          "noteSecretKey": "8bfe12e5f4a91ad4f158bbfb87c24cc479f3124163aaee1c657183f2b1248fcd",
+          "ownershipSignature": "9f272ed731735addb07652459ca93ae23bd2b0e4d092fef8fbbf913d2620274a3e03c9cd5e23236ad78ed6ec10003094d8cd56304b11d8805b8d41a5e9059c66",
+          "ck1": "ck1tv05s0x348wkj6v9ghtykumq5ql2ekr8yfqx8tdffaw2685fwndf7few6uchxkkakpm9y3vu4yawyw7jkrjdpyh7lramlyfaycszwj37q0yu6h3ryd4d0rkkasgqqvy5mrx4vvztz8vgqkudgxj7jpvuvccmfv9w"
         },
         {
-          "purpose": 0,
           "index": 1,
-          "notePubkey": "1885f5bd3a7af4c5d850d2177d0347188de52a318f8c47fa5c1b492a7ebef600",
-          "cp1": "cp1rzzlt0f60t6vtkzs6gth6q68rzx7223337xy07jurdyj5l477cqq07h92p",
-          "noteSecretKey": "87c1583f4ac27fa5201fbf511de355fc4c3ad734c05575503626f99a466e8953",
-          "sighash": "3f65fdbb806fe30bf08d10eb3da8cc9d80546d68cafa0cff514a64f2315e97aa",
-          "keyPathSignature": "52e40794cc8730287b1c635aa86e7f8c2000876b49d639edf9454195ee993f6cae5c87d1eb8d3fecfca9c7e533e7b25d004d6aa81e0b7ba812405e72a821c5d0",
-          "ck1": "ck1rzzlt0f60t6vtkzs6gth6q68rzx7223337xy07jurdyj5l477cq99eq8jnxgwvpg0vwxxk4gdelccgqqsa45n43eahu52sv4a6vn7m9wtjrar6ud8lk0e2w8u5e70vjaqpxk42q7pda6syjqtee2sgw96q6s83an"
+          "notePubkey": "363b2e76bfc38eaaeb2ee19ea0c9e5dbf02e26cd9cd7a21576b20a171af4e9ac",
+          "cp1": "cp1xcajua4lcw8246ewux02pj09m0czufkdnnt6y9tkkg9pwxh5axkqc76vny",
+          "noteSecretKey": "f4d9f5edb0ec36545f05eba9da357b3c1041aaf13ab4508831ffeb39664f6e9f",
+          "ownershipSignature": "efd33573760e4bb4a2d2e52851dfee5fea8107098ba2424bae5173876e21bb4744b54ff0797af15f8ea2e0a3d5af5311bd9d013f43392102da0b0832139c4a6e",
+          "ck1": "ck1xcajua4lcw8246ewux02pj09m0czufkdnnt6y9tkkg9pwxh5axkwl5e4wdmquja55tfw22z3mlh9l65pquychgjzfwh9zuu8dcsmk36yk48lq7t6790caghq502675c3hkwsz06r8yss9kstpqep88z2dcdkkmx3"
         },
         {
-          "purpose": 0,
           "index": 2,
-          "notePubkey": "37337ddeaaad5e3e99d8d7a4c5b9a7bd1a7e5f041ef81cfdc07f1c7140fd21de",
-          "cp1": "cp1xuehmh42440raxwc67jvtwd8h5d8uhcyrmupelwq0uw8zs8ay80qz3ajdz",
-          "noteSecretKey": "3049c8c51f40aa13057382140cc30cce3806ff03ff6ccf92688e4fd3611ba792",
-          "sighash": "59853290b501a5c806e92dd016a51b845103a4003ba7e05394dca70bddc11f7c",
-          "keyPathSignature": "9f26a70e7c779afb64ee338c45233b7279d8a05cd71bf131782a4ef4e57dd92846404a4909d92b4249ffc811d6f92f4ff6a3724f0859d589323bcfb79560fa1f",
-          "ck1": "ck1xuehmh42440raxwc67jvtwd8h5d8uhcyrmupelwq0uw8zs8ay80f7f48pe780xhmvnhr8rz9yvahy7wc5pwdwxl3x9uz5nh5u47aj2zxgp9yjzwe9dpynl7gz8t0jt60763hyncgt82cjv3me7me2c86rucchg07"
+          "notePubkey": "93032e763ed5f04fbd768ff57842c23e4ac65dbb40bb653aa12c257d6afd204b",
+          "cp1": "cp1jvpjua376hcyl0tk3l6hsskz8e9vvhdmgzak2w4p9sjh66hayp9sqrecm0",
+          "noteSecretKey": "53c71bf03590bfc60410ea1f5f10adb41e797f73aa868a9f0224dd5628734a9b",
+          "ownershipSignature": "97ddd57762ffa4602542ed4bbdcccbac0a80f3574be1d87b520088d33a9aebf143478947e31f1c534c04a028da3f51f29a7e615404aa62ded1739c4d3a0c80f2",
+          "ck1": "ck1jvpjua376hcyl0tk3l6hsskz8e9vvhdmgzak2w4p9sjh66hayp9e0hw4wa30lfrqy4pw6jaaen96cz5q7dt5hcwc0dfqpzxn82dwhu2rg7y50cclr3f5cp9q9rdr750jnflxz4qy4f3da5tnn3xn5ryq7g42xn82"
         },
         {
-          "purpose": 0,
           "index": 1000,
-          "notePubkey": "0314ffda4752ec834fd15b4e0e83768c09020fd4021f3cb4e8088ed1a5bdb247",
-          "cp1": "cp1qv20lkj82tkgxn73td8qaqmk3sysyr75qg0ned8gpz8drfdakfrslzfgj8",
-          "noteSecretKey": "64f88db7fb12e25b2afaed4a871f792d82c34b1378a5a81ca4bd78ccea7bd0d9",
-          "sighash": "16cf02be6d3f4af646672aabfd5f2def17c01d414ac63b2837f2584659765df7",
-          "keyPathSignature": "4c3c604fdd41632e4c6e2712a8e590251a901d92760d51889e4a1aed44e910a47407501aa3cd3d9985288de00a33c03f3120a8066eef6ba758ba5c887e38335b",
-          "ck1": "ck1qv20lkj82tkgxn73td8qaqmk3sysyr75qg0ned8gpz8drfdakfr5c0rqflw5zcewf3hzwy4gukgz2x5srkf8vr233z0y5xhdgn53pfr5qagp4g7d8kvc22yduq9r8splxys2spnwaa46wk96tjy8uwpntvvkw0cl"
+          "notePubkey": "3f31c20cf6a8c098eb352f6ad5fe1899cec0117aba538c28b5b22300596dda91",
+          "cp1": "cp18ucuyr8k4rqf36e49a4dtlscn88vqyt6hffcc294kg3sqktdm2gstfxwlk",
+          "noteSecretKey": "cbc0c8140f2123a96ceae88aea28cd94d91fa7ab2d87c0e876dfadd212c66211",
+          "ownershipSignature": "36b343528fffb3b2a352fdb3082bf2378dbb695afd6f949c517522336232640ae08b0c17cb20662d452430fd093434766d0726176bec0c5b180214aa74fc4af5",
+          "ck1": "ck18ucuyr8k4rqf36e49a4dtlscn88vqyt6hffcc294kg3sqktdm2gndv6r228llvaj5df0mvcg90er0rdmd9d06mu5n3gh2g3nvgexgzhq3vxp0jeqvck52fpsl5yngdrkd5rjv9mtasx9kxqzzj48flz2759rpryw"
         },
         {
-          "purpose": 0,
           "index": 2147483647,
-          "notePubkey": "84bb56960b0468adea31bb5454c400167a6eacb03c95eb1976a4f8efe59f49fd",
-          "cp1": "cp1sja4d9stq352m633hd29f3qqzeaxat9s8j27kxtk5nuwlevlf87s0huu8p",
-          "noteSecretKey": "33c7651fad44846cc5f7c39d9b191900863ca5275f8f622a3cc28de4c250c8c3",
-          "sighash": "392af345953851aab48a8fb36d7a3cfc9d13d51d57bd87488c78e1cd2b6908cf",
-          "keyPathSignature": "4413c0939cefca6e8aaddc22b9ee9fb2c19a976cd3cdd6dc74e111d66b0b985c0620741729e25ebed85f5e3baf3f7c7ada22df245f24924cb430edc937214d1a",
-          "ck1": "ck1sja4d9stq352m633hd29f3qqzeaxat9s8j27kxtk5nuwlevlf875gy7qjwwwljnw32kacg4ea60m9sv6jakd8nwkm36wzywkdv9eshqxyp6pw20zt6ldsh678whn7lr6mg3d7fzlyjfyedpsahynwg2drgy9drk3"
+          "notePubkey": "bcfd0498b16da7ce1f115e8b99d66a241c223591e9709ce6c1a35e7f31047c8b",
+          "cp1": "cp1hn7sfx93dknuu8c3t69en4n2yswzydv3a9cfeekp5d087vgy0j9snkxvxd",
+          "noteSecretKey": "829dc129eb3b2fd713ef13626d69ea79e7b950cd2eba5af4c2cc5d9a38c3de27",
+          "ownershipSignature": "1ff91557c5e77d6c5a9daf10b376c24562d2337d85277adaa5af6da3baefbb6c2bb63eac6993ecdd275b62166e4646ae4cd12d3b73a4ed1657fb986e5628bf0b",
+          "ck1": "ck1hn7sfx93dknuu8c3t69en4n2yswzydv3a9cfeekp5d087vgy0j93l7g42lz7wltvt2w67y9nwmpy2ckjxd7c2fm6m2j67mdrhthmkmptkcl2c6vnanwjwkmzzehyv34wfngj6wmn5nk3v4lmnph9v29lpvgeu429"
         },
         {
-          "purpose": 0,
           "index": 2147483648,
-          "notePubkey": "d9efb6bae9592736fa3a8594b290e4f20dc560eb78a090d90b84a1a88daf3ad2",
-          "cp1": "cp1m8hmdwhftynnd736sk2t9y8y7gxu2c8t0zsfpkgtsjs63rd08tfqhnfcnz",
-          "noteSecretKey": "66b2b094922ad1246847a3d1f2eeb34b099dbbce5306dedce02583befa52ef86",
-          "sighash": "43975bbd8f87b357d35e2b550bc4505d14979a5da41d8ff01563c6cdda22d958",
-          "keyPathSignature": "1957172a56878c13ffda9de538daf6a6efb4528cde8a1a5b5e9443358537b1e2e837dcaa0fe57877985b7e37dbff983726f8240846782b2c9d52ab54287c08d9",
-          "ck1": "ck1m8hmdwhftynnd736sk2t9y8y7gxu2c8t0zsfpkgtsjs63rd08tfpj4ch9ftg0rqnlldfmefcmtm2dma522xdazs6td0fgse4s5mmrchgxlw25rl90pmeskm7xldllxphymuzgzzx0q4je82j4d2zslqgmykzcgwv"
+          "notePubkey": "b5ca316fd6f7cb522b3c0866df32f72ed4f2c2364c55536eec552d4963937be9",
+          "cp1": "cp1kh9rzm7k7l94y2euppnd7vhh9m209s3kf324xmhv25k5jcun005s3znr7x",
+          "noteSecretKey": "a9c23b077abc0a992213800d0a0d55dc6ffeb9f4a1f83582799715627c8ca76c",
+          "ownershipSignature": "41bc54cc1c94c21a224d1f37868132417020bd8d9538a22399e79c929aa541355ec373395b21db0382c343879459cda349470e1844b001beec9f377c2a52aa31",
+          "ck1": "ck1kh9rzm7k7l94y2euppnd7vhh9m209s3kf324xmhv25k5jcun0055r0z5eswffss6yfx37duxsyeyzupqhkxe2w9zywv708yjn2j5zd27cdenjkepmvpc9s6rs729nndrf9rsuxzykqqmamylxa7z5542xyv8xsll"
         },
         {
-          "purpose": 0,
           "index": 4294967295,
-          "notePubkey": "08029e3488cbd21b91d634b40a77e46126392a6a54901078af38828479622602",
-          "cp1": "cp1pqpfudyge0fphywkxj6q5alyvynrj2n22jgpq7908zpgg7tzycpq0n5z28",
-          "noteSecretKey": "d08a723cc59696ebdc4f9b0cdf82354bcc670eff8895a6ccffb37b1bd397309a",
-          "sighash": "58b69659a9b352301e7f3124a57ead482c1af7bc5c392aba7b4929d05a36cbee",
-          "keyPathSignature": "430c2aceb98d04c3235f6a7d896ab8f96ea5b52b8219dbfaa83b4d4d243609378cc9e662d8d7d5d1c45ee81c4cd2c219f4648f470774edd563d57c553ec270f5",
-          "ck1": "ck1pqpfudyge0fphywkxj6q5alyvynrj2n22jgpq7908zpgg7tzycpyxrp2e6uc6pxryd0k5lvfd2u0jm49k54cyxwml25rkn2dysmqjduve8nx9kxh6hgughhgr3xd9sse73jg73c8wnka2c74032nasns75qvusp5"
-        },
-        {
-          "purpose": 1,
-          "index": 0,
-          "notePubkey": "cfeec92ba10fbc43218f6cd81d9c2f2ab1e30075c92685310104d3360504e753",
-          "cp1": "cp1elhvj2app77yxgv0dnvpm8p092c7xqr4eyng2vgpqnfnvpgyuafsszlaz7",
-          "noteSecretKey": "b915a45b9ea13c11f24c5b44a4493345aaebc2e2a24d10457e6f0f5928814e19",
-          "sighash": "b8f697d05818ed547519252e7f6d6c76714459486ab4a6a58d7130c79efa40ad",
-          "keyPathSignature": "7d10b831f2bd63b95d594c3bdfb5eac55469f71484eda8c8819c63ae50b08f456968032aa1a0338070dcd5198df8be19d0b96fec1136ef346e269e90dcd1ed58",
-          "ck1": "ck1elhvj2app77yxgv0dnvpm8p092c7xqr4eyng2vgpqnfnvpgyuafh6y9cx8et6caet4v5cw7lkh4v24rf7u2gfmdgezqeccaw2zcg73tfdqpj4gdqxwq8phx4rxxl30se6zuklmq3xmhngm3xn6gde50dtqmuq5x3"
-        },
-        {
-          "purpose": 1,
-          "index": 1,
-          "notePubkey": "f66298ffd04d03d430383dc5559ec47bf91f46dae35448cc40e8e5aa074a0fce",
-          "cp1": "cp17e3f3l7sf5pagvpc8hz4t8ky00u373k6ud2y3nzqarj65p62pl8qrzmkye",
-          "noteSecretKey": "3bbe1d623e5e98b2fe1a2a268809374feaffc7c65710079113abaff23d2b604b",
-          "sighash": "5eb67594442a8cb4bdee75ec97c1dc1518a903bb2d2628a1c9ade1e38a5031d3",
-          "keyPathSignature": "f8d5e736777280ad87b02f626376f27f841cf36032f4eac2797d1fa7e3553fe19f31278f505222ad63e04117ffc8d629df5d55a6720fd972014c227c83bef89f",
-          "ck1": "ck17e3f3l7sf5pagvpc8hz4t8ky00u373k6ud2y3nzqarj65p62pl803408xemh9q9ds7cz7cnrwme8lpqu7dsr9a82cfuh68a8ud2nlcvlxync75zjy2kk8czpzllu343fmaw4tfnjplvhyq2vyf7g80hcnuhe4ec3"
-        },
-        {
-          "purpose": 2,
-          "index": 0,
-          "notePubkey": "12bfe16e08191c193b103a8cfaacc4a86523151733256afd71343712142d98d8",
-          "cp1": "cp1z2l7zmsgrywpjwcs82x04txy4pjjx9ghxvjk4lt3xsm3y9pdnrvqq3zun4",
-          "noteSecretKey": "5eafe28761840751f141b7e02dc82ad1f75ea131d3b6537206b600d69383ae19",
-          "sighash": "3b7ded8bcf122491fa477f39b2f6b93c8f6e0f3a244977a805b2e8ef46578a93",
-          "keyPathSignature": "fe0209af190dd88c0fa622fafbfea4872b15684fcb3ffa967791662ec3234a16d1c4e31af864cd32ac32538524e5d92948e7df135014c9cb6c967d607ec24225",
-          "ck1": "ck1z2l7zmsgrywpjwcs82x04txy4pjjx9ghxvjk4lt3xsm3y9pdnrv0uqsf4uvsmkyvp7nz97hml6jgw2c4dp8uk0l6jemeze3wcv3559k3cn3347rye5e2cvjns5jwtkfffrna7y6sznyukmyk04s8asjzy55tqfwn"
-        },
-        {
-          "purpose": 2,
-          "index": 1,
-          "notePubkey": "068a36d4dc1df5f0b83650a6948e700253780f65f98804bf090ed709b9b18dca",
-          "cp1": "cp1q69rd4xurh6lpwpk2znffrnsqffhsrm9lxyqf0cfpmtsnwd33h9q77u53f",
-          "noteSecretKey": "2055ca6623ea49ddc5b41b520acee3540f850591e01066f00f9188e8646c98ce",
-          "sighash": "fac80c0283240f9e50f36ec524c4c055f94b27a1850666aeffe4d22f134a98a6",
-          "keyPathSignature": "b08de93c9acfe6896060816dc007acb629b2c8ce6e29d7bed71e303c9952c244857ef366f60fc00af9714e89728b2e40da5d5d5bcfa6f678f8fd585096f60416",
-          "ck1": "ck1q69rd4xurh6lpwpk2znffrnsqffhsrm9lxyqf0cfpmtsnwd33h9tpr0f8jdvle5fvpsgzmwqq7ktv2djer8xu2whhmt3uvpun9fvy3y90mekdas0cq90ju2w39egktjqmfw46k705mm8378atpgfdasyzcxtlutf"
+          "notePubkey": "881946499ffb191818aafdba77f466ec42abb9ad0a92fb08d8b0f154cbd59cbd",
+          "cp1": "cp13qv5vjvllvv3sx92lka80arxa3p2hwddp2f0kzxckrc4fj74nj7sfe7crh",
+          "noteSecretKey": "27aaeece9e4ae4d021527956c99aa6b08aa55f4ba505f4ab02863289cbc29810",
+          "ownershipSignature": "82fc5b9e6f803766f2ff548da1342b4d924661dbabbe93b1e1f16ecc63cb21487597a762df8643caee20dc8d2e7d674a371323ef2dc5c1843ff95f6e9cb1f07b",
+          "ck1": "ck13qv5vjvllvv3sx92lka80arxa3p2hwddp2f0kzxckrc4fj74nj7c9lzmnehcqdmx7tl4frdpxs45myjxv8d6h05nk8slzmkvv09jzjr4j7nk9huxg09wugxu35h86e62xufj8medchqcg0letahfev0s0vqmc3v0"
         }
       ]
     },
@@ -423,7 +251,6 @@
       "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
       "seedHex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
       "host": "localhost:3338",
-      "domain": "localhost",
       "cashRoot": "c7a2496e9b453a67c5d2a1f04936ec1259440d45454c795a99a66269e4cd3005111e1cc966fca2fe32f054f14caceab90449e536d94cf6935ea12a087e414f60",
       "domainIndices": [
         3080310222,
@@ -438,114 +265,60 @@
       "cx1": "cx1q2l9k5pxpwmls8fc2h2rd3c5jtw5qafkdy05y4kecppkzw02lel7raxuafua9uds9dajqqndu29ujmaplxz9xytzjqlsj8w5s4wsecc3xd38e",
       "notes": [
         {
-          "purpose": 0,
           "index": 0,
-          "notePubkey": "c101db503a35db690ab5050949476fa1e1c11db15afaf988946b5c161cca8883",
-          "cp1": "cp1cyqak5p6xhdkjz44q5y5j3m058suz8d3tta0nzy5ddwpv8x23zpsddw298",
-          "noteSecretKey": "3abe3031e160ca1c8c9ed05d104b3bfe9185cce2f10211554c8ac02c3fb33762",
-          "sighash": "8bc11463f6d2477f5ff4a28d7a9b2ef78066d6da705b6c7aa8cd624a19330f85",
-          "keyPathSignature": "fe4b4dbc112464c3854942194b529b3ccdf85b0756d4fb6b223a47b2ea5197007064ed10245cfbeed532ab039e6f515a5f990732bd76a3c914d8f4a3cf924351",
-          "ck1": "ck1cyqak5p6xhdkjz44q5y5j3m058suz8d3tta0nzy5ddwpv8x23zpluj6dhsgjgexrs4y5yx2t22dnen0ctvr4d48mdv3r53ajafgewqrsvnk3qfzul0hd2v4tqw0x7526t7vswv4aw63uj9xc7j3ulyjr2yu0te39"
+          "notePubkey": "875576bfc702fc8c5181d7c4fd26c15fa3208be72e432f884a184e47c53e23b4",
+          "cp1": "cp1sa2hd078qt7gc5vp6lz06fkpt73jpzl89epjlzz2rp8y03f7yw6qxvs5qq",
+          "noteSecretKey": "65b3559663b9003638bd6d6a9e58c035269f4fb7341f2316dbd2197050350af7",
+          "ownershipSignature": "a52396d9a59eefe38f2f5a457cdb77806dcbdd4c162df53f744a5d48ef109dce293f1aa9850e20c03ce5b5603694c12175685465490e9f9cbe86a09eaf84a832",
+          "ck1": "ck1sa2hd078qt7gc5vp6lz06fkpt73jpzl89epjlzz2rp8y03f7yw622gukmxjeamlr3uh453tumdmcqmwtm4xpvt048a6y5h2gaugfmn3f8ud2npgwyrqreed4vqmffsfpw459ge2fp60ee05x5z02lp9gxghtmx2c"
         },
         {
-          "purpose": 0,
           "index": 1,
-          "notePubkey": "c45b541ff21de845c4c7d464c98b0eadbe63bfc533de04940c98625803a96f75",
-          "cp1": "cp1c3d4g8ljrh5yt3x863jvnzcw4klx8079x00qf9qvnp39sqafda6sz9yjp8",
-          "noteSecretKey": "6ffb61d4f9e3cf2b57516d2b85b3afb0ea9e14c480ff274c689bdaf4ba4eb2a3",
-          "sighash": "5281b57c67a8bc7e00743aecdfad9e7c45435d167734e653a4481369122f1295",
-          "keyPathSignature": "b8c873a0884e939bba24e85be8455b4e9c6f3466479076edf7bc9e9cec7672911a75216857faab42be3218c3d8f60d7bc3304c6535e543cdfd0ed2cfd845eb97",
-          "ck1": "ck1c3d4g8ljrh5yt3x863jvnzcw4klx8079x00qf9qvnp39sqafda6m3jrn5zyyayumhgjwsklgg4d5a8r0x3ny0yrkahmme85ua3m89yg6w5sks4l64dptuvscc0v0vrtmcvcycef4u4pumlgw6t8as30tju8l9kmr"
+          "notePubkey": "816e575f5408140366b94ef375f97b3ac603973b946fa3d6e74fde51ce078ddb",
+          "cp1": "cp1s9h9wh65pq2qxe4efmeht7tm8trq89emj3h684h8fl09rns83hds5fxp8r",
+          "noteSecretKey": "98b75c0a05e8f179ad8cdafbc462cf54e83fcd2c867c428031ab2fc116f97341",
+          "ownershipSignature": "e312c3f8bd7ed92c71e072b7ba862693811fe4cba5dc295979a2d744e473e77aa91e466a66686e1188c4b207124b4f25731f1b6537d3ce3ccbc8e9b786a11330",
+          "ck1": "ck1s9h9wh65pq2qxe4efmeht7tm8trq89emj3h684h8fl09rns83hd7xykrlz7hakfvw8s89da6scnf8qglun96thpft9u6946yu3e7w74frerx5engdcgc339jqufykne9wv03kefh608rej7gaxmcdggnxq2n4ezq"
         },
         {
-          "purpose": 0,
           "index": 2,
-          "notePubkey": "69e912f5fa354dbb9a2ce04e17e9f9197ead9db9394cca7adf3957ee96672720",
-          "cp1": "cp1d8539a06x4xmhx3vup8p060er9l2m8de89xv57kl89t7a9n8yusqf0lhd6",
-          "noteSecretKey": "c81f35179a94e1f97adc7e658d9d5211d86b32fee0b4fc69d3e6f7bc11e03307",
-          "sighash": "c1d923781dfd8f6b9397531c9ca4a9fd7e6e760b57e62291835ae65a44b4603a",
-          "keyPathSignature": "5a7631cad669f05a999c47119fba2a94489b5ccfb4cfd3209ca0e7a1204358f3e8ce535cab5f37cebc2cc8a30ea0e26671394c639c5ee67adc5ea3791f610587",
-          "ck1": "ck1d8539a06x4xmhx3vup8p060er9l2m8de89xv57kl89t7a9n8yus95a33ettxnuz6nxwywyvlhg4fgjymtn8mfn7nyzw2peapypp43ulgeef4e26lxl8tctxg5v82pcnxwyu5ccuutmn84hz75du37cg9sunwfmzx"
+          "notePubkey": "c6dd10a53c1b0fa0b157a062c4706b4348847b21fe1005d6fb4add339a9c3cf6",
+          "cp1": "cp1cmw3pffurv86pv2h5p3vgurtgdygg7eplcgqt4hmftwn8x5u8nmq88ue0c",
+          "noteSecretKey": "98edfbfe12df3c424770c02aeeac9ce8c841b17827a0e729c74364a4ea8c4342",
+          "ownershipSignature": "e3d32f3bbca335b01d859f0b1fd7d41e78844277d78fac2500bb35dd23bc25b883e11d3595d3d410d63cddfc587d2c8499ba508d69f16fc936dde2b862e8e2b6",
+          "ck1": "ck1cmw3pffurv86pv2h5p3vgurtgdygg7eplcgqt4hmftwn8x5u8nmw85e08w72xddsrkze7zcl6l2pu7yygfma0ravy5qtkdwayw7ztwyruywnt9wn6sgdv0xal3v86tyynxa9prtf79hujdkau2ux968zkcc0hmy9"
         },
         {
-          "purpose": 0,
           "index": 1000,
-          "notePubkey": "c354578dda2f84e8401af6701f40a1b16617e08c8adc8921d99422d6ff8345dd",
-          "cp1": "cp1cd290rw697zwssq67ecp7s9pk9np0cyv3twgjgwejs3ddlurghwsh8kvgv",
-          "noteSecretKey": "bd289ce3b1d73d290cac4034c7597d2aa8e5d9f71217fbca911eb85365641d1f",
-          "sighash": "a65abb0740933cd69492c0c9cf7c7ef3533a2254c4130b01a177f9d5da36999d",
-          "keyPathSignature": "a04165fde2102b00fcfb7a602d73fbf2661b53760d95bb73cd2bea43add37484c42a61be68daa031f599c921c93972b27997ef324a3a6271445210036b62f616",
-          "ck1": "ck1cd290rw697zwssq67ecp7s9pk9np0cyv3twgjgwejs3ddlurghw6qst9lh3pq2cqlnah5cpdw0alyesm2dmqm9dmw0xjh6jr4hfhfpxy9fsmu6x65qcltxwfy8ynju4j0xt77vj28f38z3zjzqpkkchkzcnv68wy"
+          "notePubkey": "d624be2b89484dbc196a433372b03166837ef75c040312bae27e1012a3c5729a",
+          "cp1": "cp16cjtu2uffpxmcxt2gveh9vp3v6phaa6uqsp39whz0cgp9g79w2dq2l6ep6",
+          "noteSecretKey": "3d09315879724ee07b1aedb8688778d77a53270cb945a0bf8bd08b0c8ea50ac3",
+          "ownershipSignature": "f27f1103ac2759557280810ef5c303482e3e5418312ca73ba2d79c5faba4b23918f92a98a570e3735b7220d9628aa9abec12e3827fcb74d250af010cc075733d",
+          "ck1": "ck16cjtu2uffpxmcxt2gveh9vp3v6phaa6uqsp39whz0cgp9g79w2d0ylc3qwkzwk24w2qgzrh4cvp5st372svrzt988w3d08zl4wjtywgcly4f3ftsude4ku3qm93g42dtasfw8qnled6dy590qyxvqatn85nkrha3"
         },
         {
-          "purpose": 0,
           "index": 2147483647,
-          "notePubkey": "eb8774e6eb65f0e75b40f3f45d1591a7402cb5b65307b05cbcd716c0ae6eb60e",
-          "cp1": "cp1awrhfehtvhcwwk6q706969v35aqzeddk2vrmqh9u6utvptnwkc8q6pcdrd",
-          "noteSecretKey": "cdb83f413a93ed7abd01666cbf4236aae07f1094edc8de75f5935d69aaf19edf",
-          "sighash": "dd024d850fcf0461af440e9975877dd45d39b9a99c4f6feaeb6fa5cb709a7f2f",
-          "keyPathSignature": "31df75cb351afacb0bd9b64d3464a87c3a416e0f16f4cd67bb6556c9dc2426a5d6310be0571ac3b35be7a79f61304cb342190f7574adc1e3d22284917a2b6239",
-          "ck1": "ck1awrhfehtvhcwwk6q706969v35aqzeddk2vrmqh9u6utvptnwkc8rrhm4ev6347ktp0vmvnf5vj58cwjpdc83daxdv7ak24kfmsjzdfwkxy97q4c6cwe4hea8nasnqn9nggvs7at54hq7853zsjgh52mz8ydee0wd"
+          "notePubkey": "d7abbf83d30005b67e033b275d10532f428fd7dbbd97604ab1f19559cac0b84d",
+          "cp1": "cp1674mlq7nqqzmvlsr8vn46yzn9apgl47mhktkqj437x24njkqhpxs8lejxk",
+          "noteSecretKey": "eb3646de93bea75e530f169950bfc1e328420651827465ba5cbc5dda73394923",
+          "ownershipSignature": "fc07c057b097577d418ec56d9e4f09358aeb16bb27cf74a7d1d26ad8d4c0e1f8604998efd4875b8414300868286ae3d5f4e14f0501d8f2dd8b9ffb1c121ae2bb",
+          "ck1": "ck1674mlq7nqqzmvlsr8vn46yzn9apgl47mhktkqj437x24njkqhpxlcp7q27cfw4magx8v2mv7fuyntzhtz6aj0nm55lgay6kc6nqwr7rqfxvwl4y8twzpgvqgdq5x4c747ns57pgpmredmzullvwpyxhzhv02y9g5"
         },
         {
-          "purpose": 0,
           "index": 2147483648,
-          "notePubkey": "9943eace7d87279739f7b43d26afe29885d308c47fe432dfe72beb5ddbeca43d",
-          "cp1": "cp1n9p74nnasuneww0hks7jdtlznzzaxzxy0ljr9hl89044mklv5s7sptussc",
-          "noteSecretKey": "a01957c126c40573211e331b2107b67f3944281667c94b41e3e5d163ebfa6a6f",
-          "sighash": "0004bfaa4d241c7b095660cc8fee2bd07155661959bd99462baff520ca235593",
-          "keyPathSignature": "bbd142d8438b3b23ac081370ced35ee06adc742570d8ae478ee4da7f3427f155f23aba432cd04f7188c39492d3bcbd03e5cdf568ec65b534716f6992587a2d36",
-          "ck1": "ck1n9p74nnasuneww0hks7jdtlznzzaxzxy0ljr9hl89044mklv5s7mh52zmppckwer4sypxuxw6d0wq6kuwsjhpk9wg78wfknlxsnlz40j82ayxtxsfacc3su5jtfme0gruhxl268vvk6ngut0dxf9s73dxcu2lf60"
+          "notePubkey": "b07f4e7490a9d65bbe825f8925a247c01e6acb8a9ed0e04b5ad577560c76566d",
+          "cp1": "cp1kpl5uays48t9h05zt7yjtgj8cq0x4ju2nmgwqj6664m4vrrk2eksu8k5k6",
+          "noteSecretKey": "c2a3340d8a034229ff5be55c2cf21861d3eb85955e773245df1e85f9b07a91af",
+          "ownershipSignature": "a12a03305364b00e030b0fb3bc3af8eddb4acb0be80505520b20a872bc6467b834c9a9275557d0e77ef2b8c7fbcd19121e4b07d5eb489a136be30543841631eb",
+          "ck1": "ck1kpl5uays48t9h05zt7yjtgj8cq0x4ju2nmgwqj6664m4vrrk2ek6z2srxpfkfvqwqv9slvau8tuwmk62ev97spg92g9jp2rjh3jx0wp5ex5jw42h6rnhau4cclau6xgjre9s040tfzdpx6lrq4pcg933avw9f2zz"
         },
         {
-          "purpose": 0,
           "index": 4294967295,
-          "notePubkey": "84add5b049e77239a5c1ba56b236e41a411b5b66e4be2638117d9fee4a8a2bca",
-          "cp1": "cp1sjkatvzfuaernfwphfttydhyrfq3kkmxujlzvwq30k07uj52909qjs9cs7",
-          "noteSecretKey": "53b81d08afa467e5274b995c84a6b07da2f4551d219acc94bbc3e37287711b8d",
-          "sighash": "73f574628e8ef1c1024e25df9f0dcf086f4672ab7166a18cf0b0a35eca4b2f09",
-          "keyPathSignature": "30a9857c7e7551973de94f9908fb06c1cda3ccfce2af334c1b9990f07deb278d661480996a7e2831ed5f1ef55d7871a83996fd1172454df885b3ed23414bc782",
-          "ck1": "ck1sjkatvzfuaernfwphfttydhyrfq3kkmxujlzvwq30k07uj52909rp2v903l825vh8h55lxgglvrvrndren7w9tenfsdeny8s0h4j0rtxzjqfj6n79qc76hc774whsudg8xt06ytjg4xl3pdna535zj78sg8q0gzp"
-        },
-        {
-          "purpose": 1,
-          "index": 0,
-          "notePubkey": "8bb550c06a02b833b334581f3644f527326108a854960bfffc208dd6b3eee42a",
-          "cp1": "cp13w64psr2q2ur8ve5tq0nv384yuexzz9g2jtqhlluyzxadvlwus4qev7grz",
-          "noteSecretKey": "2a53cdb5f6e0553580080a6691cb77352c3baeb70b7c53c110159441880fcfc7",
-          "sighash": "ea8e2ebfc88d6dac7338f12e0be8270c7f7756768f01e299a6757436c443bb20",
-          "keyPathSignature": "174f4d4f47ff35dd435d3da2f5177bd2022339183ea3fe3361b9b32ece66aeff9af27da76c3b75f5ed4ba982089f29727c14e14281a61fec904f4f99cfae1f26",
-          "ck1": "ck13w64psr2q2ur8ve5tq0nv384yuexzz9g2jtqhlluyzxadvlwus4pwn6dfarl7dwagdwnmgh4zaaayq3r8yvragl7xdsmnveween2alu67f76wmpmwh676jafsgyf72tj0s2wzs5p5c07eyz0f7vultslyczm099w"
-        },
-        {
-          "purpose": 1,
-          "index": 1,
-          "notePubkey": "4bb8bd6534989cda06a50768545efe33c3c5246f6e3560f8badf3d75e55b5e0e",
-          "cp1": "cp1fwut6ef5nzwd5p49qa59ghh7x0pu2fr0dc6kp796mu7hte2mtc8q0umwzv",
-          "noteSecretKey": "7f1f1368f0a82fc0159f6c51836eb62496c2669779759c595e96b7e0a9c9f2b3",
-          "sighash": "0c115c080b505f4fbe0132d38352018cc4d6513ddf606238c2e6ea3309fd561d",
-          "keyPathSignature": "999eced1f317a2ca7e1b123c37510a8ac5cbd19193bca5d9f47be08c6a148b00f2804a9daa2d037e58420acbeee1f5c7a157a4acbb3c81b196f4fdbbb7e1bba5",
-          "ck1": "ck1fwut6ef5nzwd5p49qa59ghh7x0pu2fr0dc6kp796mu7hte2mtc8fn8kw68e30gk20cd3y0ph2y9g43wt6xge8099m868hcyvdg2gkq8jsp9fm23dqdl9sss2e0hwraw859t6ft9m8jqmr9h5lkam0cdm5590mp2v"
-        },
-        {
-          "purpose": 2,
-          "index": 0,
-          "notePubkey": "6039f45c162599400e23a913f31f37756ecf283a5994e4202f2396f541b728d0",
-          "cp1": "cp1vqulghqkykv5qr3r4yflx8ehw4hv72p6tx2wggp0ywt02sdh9rgq9u6wje",
-          "noteSecretKey": "495a89faac53f423ff01aaa0e7f0a35e93ecacd628ce60da717b4104fec97c33",
-          "sighash": "21f518a553714c2bdaa029d59f7f8d4c51e6c235190f2d88be953ef28523a793",
-          "keyPathSignature": "d27951f3987d009ad41a51a2fc1a3d9190045599157475168bb92f817bdc511fda2c87c874682cd307f19557f5c278016f9d2b6404026a13e7085c42ab2a7cae",
-          "ck1": "ck1vqulghqkykv5qr3r4yflx8ehw4hv72p6tx2wggp0ywt02sdh9rgdy7237wv86qy66sd9rghurg7eryqy2kv32ar4z69mjtup00w9z8769jrusarg9nfs0uv42l6uy7qpd7wjkeqyqf4p8ecgt3p2k2nu4czmxkgz"
-        },
-        {
-          "purpose": 2,
-          "index": 1,
-          "notePubkey": "c2e03b7fbdd42b3d07c0af458ce32b7b2b25a8716e78a14f0728cc3e24294065",
-          "cp1": "cp1ctsrklaa6s4n6p7q4azcecet0v4jt2r3deu2znc89rxrufpfgpjslrpsel",
-          "noteSecretKey": "c8743a27a179dd287cee5460bc21e432358a519713cd0e7c5f53a73f416641b0",
-          "sighash": "f8765304c2362b31a6fc4ad68a1b45af006445bb1c29eb94e2f6d920622bf54c",
-          "keyPathSignature": "1a1e6196352781e75999ab70c79cfb3ab88db6251bdea12a5a1f3b2634f15ee4a9d6d29788efdef530763eb48585b6918894e81eccfc553d0a505eaee61f46ec",
-          "ck1": "ck1ctsrklaa6s4n6p7q4azcecet0v4jt2r3deu2znc89rxrufpfgpj358npjc6j0q08txv6kux8nnan4wydkcj3hh4p9fdp7wexxnc4ae9f6mff0z80mm6nqa37kjzctd533z2ws8kvl32n6zjst6hwv86xas9zankv"
+          "notePubkey": "5471a39afe5452a132fa8d27404456e4c883a8cf2c9bf3f2cb79575ec74fd357",
+          "cp1": "cp123c68xh723f2zvh635n5q3zkunyg82x09jdl8ukt09t4a3606dts57mqnq",
+          "noteSecretKey": "e65c044e42c25f5cea76a367f2f9034a946f2f911f486b682508f34aa861209d",
+          "ownershipSignature": "26c4c96a9c2576a54e567b48afbf880ab9a0bbf2093fe400066d202381e44aa32aeccfbc8d164049c89cda42f5a378d1f7959efd53367e9ce32df39fd20de5f2",
+          "ck1": "ck123c68xh723f2zvh635n5q3zkunyg82x09jdl8ukt09t4a3606dtjd3xfd2wz2a49fet8kj90h7yq4wdqh0eqj0lyqqrx6gprs8jy4ge2an8mergkgpyu38x6gt66x7x3772eal2nxelfeced7w0ayr097gkkjsdw"
         }
       ]
     },
@@ -553,7 +326,6 @@
       "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
       "seedHex": "878386efb78845b3355bd15ea4d39ef97d179cb712b77d5c12b6be415fffeffe5f377ba02bf3f8544ab800b955e51fbff09828f682052a20faa6addbbddfb096",
       "host": "mint.example",
-      "domain": "mint.example",
       "cashRoot": "e58252908e0c10965d15d1e3894cbf206a2102c20eb9519e466e2e0e852075d430afaa22bb69ef2151cdffacc463e51068e854152b0b7c08fa2f93e6b8d16741",
       "domainIndices": [
         3862277158,
@@ -568,114 +340,60 @@
       "cx1": "cx1wsdyyztv602vkjeusn8w69rckek3rz6avskkd76m6dj4a3ptt6rft8vkhsxqw5v9laesgg2yj6nc7saj96j3r7t6006qs3220c7n4pg7ymweg",
       "notes": [
         {
-          "purpose": 0,
           "index": 0,
-          "notePubkey": "20576194cb89e21da4df5ab99ec3e5f532f63881390f68f3739b1b3252c5387c",
-          "cp1": "cp1yptkr9xt383pmfxlt2ueasl975e0vwyp8y8k3umnnvdny5k98p7qp9f6dn",
-          "noteSecretKey": "3f4157a4297e75339edd117705c77298dadf9815aa3180a8c2540442655f7e92",
-          "sighash": "a6f1513de375bf791c926b406f15b38a88ff995fd37dcd7f97a87c57b355f3f1",
-          "keyPathSignature": "87c80dc8ff7f951c4fbf405fe64121bfc0d7435c40803563090b99aee9ac9a912968ce604f1454de4e864e62cb12191f2a9011065e7e7782f34fb723432b94fd",
-          "ck1": "ck1yptkr9xt383pmfxlt2ueasl975e0vwyp8y8k3umnnvdny5k98p7g0jqderlhl9guf7l5qhlxgysmlsxhgdwypqp4vvyshxdwaxkf4yffdr8xqnc52n0yapjwvt93yxgl92gpzpj70emc9u60ku35x2u5l5ew2mnn"
+          "notePubkey": "05950672290d9374d8e02b860c494a8407fa7e5917626ff4d983897b69acd5b2",
+          "cp1": "cp1qk2svu3fpkfhfk8q9wrqcj22ssrl5ljeza3xlaxeswyhk6dv6keqf9h6lv",
+          "noteSecretKey": "6f9a9325e6f338fcd67987936dd84b908263878c10f858af1d7143cf0844e460",
+          "ownershipSignature": "d8da53ea15e66d9c652ec936b4c78d8dafeae0300c0d6182b63f3af6c85d6b4676fc1d7dcf2502906e2d5cca2a1c686574a77c770ec2895b0654f21333be6ae1",
+          "ck1": "ck1qk2svu3fpkfhfk8q9wrqcj22ssrl5ljeza3xlaxeswyhk6dv6ked3kjnag27vmvuv5hvjd45c7xcmtl2uqcqcrtps2mr7whkepwkk3nklswhmne9q2gxut2ueg4pc6r9wjnhcacwc2y4kpj57gfn80n2uyr9tpk2"
         },
         {
-          "purpose": 0,
           "index": 1,
-          "notePubkey": "ad8477405cfd9558c849c1bbdfef2ca8422536341aef664d9c782f2b22c6e812",
-          "cp1": "cp14kz8wszulk243jzfcxaalmev4ppz2d35rthkvnvu0qhjkgkxaqfq9v3afg",
-          "noteSecretKey": "ab2634cdbc8499a1fb751b01fa1fa858e45e91ebe7ae07c46a0db9c357f79968",
-          "sighash": "d2103b4b73829cb56b7c35b72f883308d5a7caccfe579d6e52e7673d10f3cb57",
-          "keyPathSignature": "2e847ff43ac5e1bd44de73d4a018416e67088314eed681e85f0b420f34cc6cec85f0b75e44053fe288da71450dd8592d77b46718f899202172103790f45ae848",
-          "ck1": "ck14kz8wszulk243jzfcxaalmev4ppz2d35rthkvnvu0qhjkgkxaqfzaprl7savtcdagn08849qrpqkuecgsv2wa45pap0skss0xnxxemy97zm4u3q98l3g3kn3g5xaskfdw76xwx8cnyszzussx7g0gkhgfq8g5wp7"
+          "notePubkey": "239e376d932f023ecbd002b6bb4ae5cdcbf66cc98e022318acd40acb6b4ce331",
+          "cp1": "cp1yw0rwmvn9upraj7sq2mtkjh9eh9lvmxf3cpzxx9v6s9vk66vuvcsp43lgs",
+          "noteSecretKey": "4f1b6c8c2466ed0e16e613b990e73d1b55fe8096da92562c11038f8d109b5e83",
+          "ownershipSignature": "e5b4c97e47b557de63651b59709072c01a53f04c5fa9d65c1752dde25a08252cdb84ee08ffc0f64dddeea1d54d77d03a2e76916bb9244f8799e83b0c8804c93b",
+          "ck1": "ck1yw0rwmvn9upraj7sq2mtkjh9eh9lvmxf3cpzxx9v6s9vk66vuvc7tdxf0erm2477vdj3kktsjpevqxjn7px9l2wktst49h0ztgyz2txmsnhq3l7q7examm4p64xh05p69emfz6aey38c0x0g8vxgspxf8vtcgyzx"
         },
         {
-          "purpose": 0,
           "index": 2,
-          "notePubkey": "c43a2f72c929be647690202cbc06b26ac3e794920323755466022da34fbb30a2",
-          "cp1": "cp1csaz7ukf9xlxga5syqktcp4jdtp709yjqv3h24rxqgk6xnamxz3qshr2df",
-          "noteSecretKey": "f4f85e41c8c324a884bdeedd432fdfd90315d081f0dc3dfa4fb65766745ff019",
-          "sighash": "9aeff5d115b9dea0d0bc6c6c1beb64cd8121cb6c3809df6bdcba1b132f47de65",
-          "keyPathSignature": "b03709ad7835e0e189d939c0c1ece18401d02c1765f809e0b52b854fd0fdcb3f0e85b798cd30961f3d57435a331df6a3187c9cf11b9fbc4a0f4094c55c8458b1",
-          "ck1": "ck1csaz7ukf9xlxga5syqktcp4jdtp709yjqv3h24rxqgk6xnamxz3tqdcf44urtc8p38vnnsxpanscgqws9stkt7qfuz6jhp206r7uk0cwskme3nfsjc0n646rtge3ma4rrp7feugmn77y5r6qjnz4epzcky0sfa9n"
+          "notePubkey": "41d41bc4bd4d171e7772e3ac76fa06fcd03e713ec49c62d276003dd36164e23b",
+          "cp1": "cp1g82ph39af5t3uamjuwk8d7sxlngruuf7cjwx95nkqq7axctyugas0g8awf",
+          "noteSecretKey": "eff45be20b90660bb4c6ce81b764425051f11469f10c8a582f6526a85be96637",
+          "ownershipSignature": "7e6a553ce36220cf347d9bf846fb23a05a549480683c1680623ebfe27c2a289823e408fa8c2745a9c3ddf57d624f0c527064603c78347a75c97b820ae0f68517",
+          "ck1": "ck1g82ph39af5t3uamjuwk8d7sxlngruuf7cjwx95nkqq7axctyugahu6j48n3kygx0x37eh7zxlv36qkj5jjqxs0qksp3ra0lz0s4z3xprusy04rp8gk5u8h04043y7rzjwpjxq0rcx3a8tjtmsg9wpa59zu0awzmv"
         },
         {
-          "purpose": 0,
           "index": 1000,
-          "notePubkey": "87a4964fbe8f5ce5e32e65731b214bba77f7574b3ac8cf1d1c4ef7e1466a8449",
-          "cp1": "cp1s7jfvna73awwtcewv4e3kg2thfmlw46t8tyv78gufmm7z3n2s3ys8hy6zd",
-          "noteSecretKey": "06b0a3b65dee122929d78648eda4350c778100a1b8ec371137ff174cc31c48c2",
-          "sighash": "dccac02617aec2504cc97be75d1e336d6064ef0de4b876f5fec6feee7de7c014",
-          "keyPathSignature": "fb476e03f2d278881d95b282303db2bbce805a82ec422427c0f7b6fa8af89a72eda43630cdcd3cf34b2adcc05823695af66837cc0421a86dd9c659567beac415",
-          "ck1": "ck1s7jfvna73awwtcewv4e3kg2thfmlw46t8tyv78gufmm7z3n2s3ylk3mwq0edy7ygrk2m9q3s8kethn5qt2pwcs3yylq00dh63tuf5uhd5smrpnwd8ne5k2kucpvzx6267e5r0nqyyx5xmkwxt9t8h6kyz5r3r7lf"
+          "notePubkey": "c2b0508ca9121ba15257feea169e2c31c543b539e1aa8235b7f16b44ecfb0c3d",
+          "cp1": "cp1c2c9pr9fzgd6z5jhlm4pd83vx8z58dfeux4gyddh7945fm8mps7s055jts",
+          "noteSecretKey": "223b80bc6164e96bbdb8db17126a71bad9cf691b2cc80a2d92d5fa27ebf3f1f3",
+          "ownershipSignature": "5bb77b40b80926be6b82b5f9514daa6ee47f6bf603a29ea48b5828caa432a50426905b3cb25c02ae06e94569ed6a71d73a71d8c6262e5d2ce1649e3699e06e66",
+          "ck1": "ck1c2c9pr9fzgd6z5jhlm4pd83vx8z58dfeux4gyddh7945fm8mps74hdmmgzuqjf47dwptt723fk4xaerld0mq8g575j94s2x25se22ppxjpdnevjuq2hqd629d8kk5uwh8fca333x9ewjectyncmfncrwvcehdhhe"
         },
         {
-          "purpose": 0,
           "index": 2147483647,
-          "notePubkey": "898481af1579747f28cf69d1728dec7f31b4638c9663a2b01660987285efb912",
-          "cp1": "cp13xzgrtc4096872x0d8gh9r0v0ucmgcuvje369vqkvzv89p00hyfqmfufky",
-          "noteSecretKey": "fee38957fa18682d35fd09bf41e5be8b2f19c73fc55544e1ca9056d7a1acb415",
-          "sighash": "1c7da47a5b2733f1023bba8f542397dd539234dc4aede7557a6d6ada6c594390",
-          "keyPathSignature": "c5c2cb3b1e91a1ef4aa8941ccce510625ec256f73729661c7e944e58d64283d3edaac69f959d1cc3eadcae7447959b93e8444d4b704f5442819c8ad0a3b8f028",
-          "ck1": "ck13xzgrtc4096872x0d8gh9r0v0ucmgcuvje369vqkvzv89p00hyfvtskt8v0frg00f25fg8xvu5gxyhkz2mmnw2txr3lfgnjc6epg85ld4trfl9varnp74h9ww3retxunapzy6jmsfa2y9qvu3tg28w8s9q0utd78"
+          "notePubkey": "9876e769a068f1fbfb784dd7d0c942cdef095228212fb57e0657a88f006472e3",
+          "cp1": "cp1npmww6dqdrclh7mcfhtapj2zehhsj53gyyhm2lsx275g7qrywt3s85h527",
+          "noteSecretKey": "957356314d74639a2b00a31c45d554286997c5b605b9263a889d9cc4302fc93c",
+          "ownershipSignature": "640b5df33653b3df6b34a3fed97932a275d6ff32db607ebcae77e3df99a8fcc94f4d2ebbfe9f11be019ece24d4868bdd356b1cec871e7ef7ca48b34198ae4a6b",
+          "ck1": "ck1npmww6dqdrclh7mcfhtapj2zehhsj53gyyhm2lsx275g7qrywt3kgz6a7vm98v7ldv628lke0ye2yawkluedkcr7hjh80c7lnx50ej20f5hthl5lzxlqr8kwyn2gdz7ax443emy8rel00jjgkdqe3tj2dvgtx6we"
         },
         {
-          "purpose": 0,
           "index": 2147483648,
-          "notePubkey": "e4f18334a54870a1c0f140b48ff7e075bf0535ad498c0ed2f1be2770bfd23e39",
-          "cp1": "cp1unccxd99fpc2rs83gz6glalqwkls2dddfxxqa5h3hcnhp07j8cusyvkp08",
-          "noteSecretKey": "2eaabac6f46f75c92e01270a5a2d0d162a27a67c653204085a67cb75ba5b47f6",
-          "sighash": "09e9b1e1cba096ca9e24a617f97d843a85ac47124ffdc977dd51e763edc74d4a",
-          "keyPathSignature": "91066ab8715c8968b08620954e3109c58672a4447eda0703fcfc221faf46250b02a17c5096f668aca2caa4d3a25d197501f4bec51a9fd3306de9ee8179400137",
-          "ck1": "ck1unccxd99fpc2rs83gz6glalqwkls2dddfxxqa5h3hcnhp07j8cuezpn2hpc4eztgkzrzp92wxyyutpnj53z8aks8q070cgsl4arz2zcz5979p9hkdzk29j4y6w396xt4q86ta3g6nlfnqm0fa6qhjsqpxugg3kwf"
+          "notePubkey": "21d05d283166205e349a029785ec020e3f5c3f4f12c22ab946e331b8bf5ebe14",
+          "cp1": "cp1y8g962p3vcs9udy6q2tctmqzpcl4c060ztpz4w2xuvcm3067hc2qqqxjc8",
+          "noteSecretKey": "41c55647f714e81af30e24f1a553928ee444f4f913b258f8ccb200623ecb36d9",
+          "ownershipSignature": "0f3da05175598176ce3d256d69ce0cfaf5c79bf05d8838d4d3a551d7d154500f2c72bfb3f12529c29f78e4decc21cbafcc3caaff1162808f36640ec8fe0769b1",
+          "ck1": "ck1y8g962p3vcs9udy6q2tctmqzpcl4c060ztpz4w2xuvcm3067hc2q70dq2964nqtkec7j2mtfecx04aw8n0c9mzpc6nf625wh6929qrevw2lm8uf998pf778ymmxzrja0es724lc3v2qg7dnypmy0upmfkyn903py"
         },
         {
-          "purpose": 0,
           "index": 4294967295,
-          "notePubkey": "acd033e845d1904635091bade1e5c02d9e4dfd7cf1df3180271fbe2b2bae841d",
-          "cp1": "cp14ngr86z96xgyvdgfrwk7rewq9k0ymltu780nrqp8r7lzk2awsswsvxava3",
-          "noteSecretKey": "145429bf1a371780fdc2970e336e233a33cce5ef4544dcc6c91be0cc7e83d048",
-          "sighash": "d45e6178069e568ede8f80b4d2ee8daaf1cb64d97d43de3b32ef08e9a52698af",
-          "keyPathSignature": "b7b4f568573b8745bef3d4089e7c3759e470201d0aedd673450953388241deba6ba35cc77dcaa9fec3f3a6326fbf62613578b953d973375d5b1075426c4fe56d",
-          "ck1": "ck14ngr86z96xgyvdgfrwk7rewq9k0ymltu780nrqp8r7lzk2awsswm0d84dptnhp69hmeagzy70sm4nersyqws4mwkwdzsj5ecsfqaawnt5dwvwlw248lv8uaxxfhm7cnpx4utj57ewvm46kcsw4pxcnl9d5wtlljp"
-        },
-        {
-          "purpose": 1,
-          "index": 0,
-          "notePubkey": "0f8e9128694f577d0a06f14d4d49ee6f64d0f9aa6e702319d82417865be0155b",
-          "cp1": "cp1p78fz2rffath6zsx79x56j0wdajdp7d2deczxxwcystcvklqz4dsjtgj6t",
-          "noteSecretKey": "1ea789197f9869ef6675c89fdbbf56ccb40257f23d2c55f1abc1849f4e8430f1",
-          "sighash": "972286cd6e75c56303c41e475ba8fd7285a2370935153068df8f17a3438efbed",
-          "keyPathSignature": "5167ae04b563d031b0a96d7009a7a02cf1dc3f663c463028366f528508efa5743bfb0f4ea08d8b1df5c3c25841dc67c3c94885f59a7706faef76cfeda04359d7",
-          "ck1": "ck1p78fz2rffath6zsx79x56j0wdajdp7d2deczxxwcystcvklqz4d4zeawqj6k85p3kz5k6uqf57szeuwu8anrc33s9qmx7559prh62apmlv85agyd3vwlts7ztpqace7re9ygtav6wur04mmkelk6qs6e6uetwkhh"
-        },
-        {
-          "purpose": 1,
-          "index": 1,
-          "notePubkey": "21f637c17c70d68d6b84c742d763c9c40c30f9f93fcf586c43cd9afd963740a2",
-          "cp1": "cp1y8mr0stuwrtg66uycapdwc7fcsxrp70e8l84smzrekd0m93hgz3qun2ujk",
-          "noteSecretKey": "1955b4432cc7eae04b6b75daa9a86a67765c56e03a2b09a003dd3188b94bf85d",
-          "sighash": "be29c5bb46fef2cbb3c61acc63ebcadf55b99fb63d5b47dfe7dba8722f7c419a",
-          "keyPathSignature": "70707777815958c0c0ebc8f913f8278786b2e528cb9dbc55a2d60ebdb593cd03b8f5b8ddccc35bbb5aa91a7a74f1964148bd3df16cd3e5aeb8a8a3239dc0f237",
-          "ck1": "ck1y8mr0stuwrtg66uycapdwc7fcsxrp70e8l84smzrekd0m93hgz38qurhw7q4jkxqcr4u37gnlqnc0p4ju55vh8du2k3dvr4akkfu6qac7kudmnxrtwa442g60f60r9jpfz7nmutv60j6aw9g5v3ems8jxu9tm8ar"
-        },
-        {
-          "purpose": 2,
-          "index": 0,
-          "notePubkey": "1821594294f250de9590a7eb833123881a7307105f6810320437c7c568b240e4",
-          "cp1": "cp1rqs4js557fgda9vs5l4cxvfr3qd8xpcsta5pqvsyxlru269jgrjqcc8nxr",
-          "noteSecretKey": "22836eb1b40ea316a6fdd9c790c1b64239e52a91e3529b4fced003e413922721",
-          "sighash": "e158a7305a6bcbe0cfda20c4f511b154fbb1536c107af275e334dc8ae3609b9d",
-          "keyPathSignature": "01224a52129408899535e697b7b8476fff90a96a845866ee0fe8f797a7062728464a31a7776777475d6fa4e9df96c9409171fe1f5f339a63f11d97d83165d75e",
-          "ck1": "ck1rqs4js557fgda9vs5l4cxvfr3qd8xpcsta5pqvsyxlru269jgrjqzgj22gffgzyfj567d9ahhprkllus494ggkrxac873auh5urzw2zxfgc6wam8war46maya80edj2qj9clu86lxwdx8ugajlvrzewhtc6ctznj"
-        },
-        {
-          "purpose": 2,
-          "index": 1,
-          "notePubkey": "49a103f4ceb49decb6f21786c587b7aa6be516d3a94e575d4217eb24254b017a",
-          "cp1": "cp1fxss8axwkjw7edhjz7rvtpah4f4729kn4989wh2zzl4jgf2tq9aqrm0hmg",
-          "noteSecretKey": "41e830fc7a6a5881e6ff62433b9e88526abd2a39b4375131512f64b281d1fc47",
-          "sighash": "dbd2e8f37897e7b1a3a1f4c9463d29d33ba8d8b9488dc9dc7bca2dca415e41f1",
-          "keyPathSignature": "3df50b969d5d371889823026fff0ad2f261cceef9f62eef57374ad2697bd11013ac8f69f7e4eb64d4018e640050e301b45077eec2f54095bf2448a629b4c9113",
-          "ck1": "ck1fxss8axwkjw7edhjz7rvtpah4f4729kn4989wh2zzl4jgf2tq9armagtj6w46dcc3xprqfhl7zkj7fsuemhe7chw74ehftfxj773zqf6ermf7ljwkex5qx8xgqzsuvqmg5rhamp02sy4hujy3f3fkny3zvtdepph"
+          "notePubkey": "2e288c8f4b408bc82a17fcacfc092ec982ea6f8ce6f130f2c8426119aca9ee9e",
+          "cp1": "cp19c5ger6tgz9us2shljk0czfwexpw5muvumcnpukggfs3nt9fa60qxdpvgy",
+          "noteSecretKey": "86df284dcd2a6b50672bf9232820c1c4cfd96388ff70bee45dbea404ccf46169",
+          "ownershipSignature": "e8d9800e4cd53e6424645e5f7ab56916c72ed91ad973f6a3f3ad467f5056df13bfb57024edcd9905f07eeb88aa155943ef0d1e122064b378844f8920df83f297",
+          "ck1": "ck19c5ger6tgz9us2shljk0czfwexpw5muvumcnpukggfs3nt9fa60w3kvqpexd20nyy3j9uhm6k453d3ewmyddjulk50e663nl2ptd7yalk4czfmwdnyzlqlht3z4p2k2raux3uy3qvjeh3pz03ysdlqljju6lgaff"
         }
       ]
     },
@@ -683,7 +401,6 @@
       "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
       "seedHex": "878386efb78845b3355bd15ea4d39ef97d179cb712b77d5c12b6be415fffeffe5f377ba02bf3f8544ab800b955e51fbff09828f682052a20faa6addbbddfb096",
       "host": "mint.lnurlcash.com",
-      "domain": "mint.lnurlcash.com",
       "cashRoot": "e58252908e0c10965d15d1e3894cbf206a2102c20eb9519e466e2e0e852075d430afaa22bb69ef2151cdffacc463e51068e854152b0b7c08fa2f93e6b8d16741",
       "domainIndices": [
         1197381413,
@@ -698,114 +415,60 @@
       "cx1": "cx1e6u4sgacmetm7knu7uhh6f2e5dk2t8ndwvyfycj6lg7n2zxrnvt88r57q35pfnfrhxnz6dt3ltfvm8ptp9xetkhrjt44h64eup7732sp0kll6",
       "notes": [
         {
-          "purpose": 0,
           "index": 0,
-          "notePubkey": "e283ad5c2e67559456fe9e15b9131ab64046ac987bfd93787a4615e00ab7a270",
-          "cp1": "cp1u2p66hpwva2eg4h7nc2mjyc6keqydtyc007ex7r6gc27qz4h5fcq4me7sm",
-          "noteSecretKey": "7caf1e2888ef693a372de6086d2945d0bbeee81f55eba6ce2b970a7d5a244afe",
-          "sighash": "6d212aee7cc648c6156583097ddaf466435e23b39c049e49bc24660298231a61",
-          "keyPathSignature": "d9cfce9c97f917e1c04e0a82597eddcecdd183591aba05e66146f4a2b5ffb1890899c36461ee7586c0f4926e1df320215771429976ada0a8f3eb0820527400ce",
-          "ck1": "ck1u2p66hpwva2eg4h7nc2mjyc6keqydtyc007ex7r6gc27qz4h5fcdnn7wnjtlj9lpcp8q4qje0mwuanw3sdv34ws9ues5da9zkhlmrzggn8pkgc0wwkrvpayjdcwlxgpp2ac59xtk4ks23ultpqs9yaqqecx7l5gh"
+          "notePubkey": "e10932ea7796d0f28deb03a64718dd3f5b7079ae5c52348408420dcc9673e58e",
+          "cp1": "cp1uyyn96nhjmg09r0tqwnywxxa8adhq7dwt3frfpqgggxue9nnuk8qrf9uem",
+          "noteSecretKey": "96f38ca3c2cf1a166d4a420a9ffacd203326a4001a2c74a9321b9f939221c531",
+          "ownershipSignature": "4295bcf6fccc4ddb63d4e4d8c94dedbaff4568a3b177be2865a471e875e6c52a3c6bf2ec92142f21a138e0a0e5f7d6ffccb0360a12fccef2bf31ce591331156e",
+          "ck1": "ck1uyyn96nhjmg09r0tqwnywxxa8adhq7dwt3frfpqgggxue9nnuk8y99du7m7vcnwmv02wfkxffhkm4l69dz3mzaa79pj6gu0gwhnv223ud0eweys59us6zw8q5rjl04hlejcrvzsjln8090e3eev3xvg4dc9c292g"
         },
         {
-          "purpose": 0,
           "index": 1,
-          "notePubkey": "d75e6df9ca86c5f9d16ff5d7cc2f2b8497355c084f9d27ad26f1a73c43f5d38f",
-          "cp1": "cp16a0xm7w2smzln5t07htuctetsjtn2hqgf7wj0tfx7xnncsl46w8s4rmzzr",
-          "noteSecretKey": "fccf2488de7002415d0b4fe38c4e5fd88785adba01d3dc7704694cafd53f6088",
-          "sighash": "ee4405154bf31c31f96dd93acf7e46737dd5fb5911d5188c2d767d766e9b8b16",
-          "keyPathSignature": "3e00406a9c898e700e0a2cd3295fde481f0a561bcdfd3ce5a269449cd39ad8fd04581c4fd33d578b43c96d953f847d3afd34e4ba29eef0ec0172a498130e684f",
-          "ck1": "ck16a0xm7w2smzln5t07htuctetsjtn2hqgf7wj0tfx7xnncsl46w8nuqzqd2wgnrnspc9ze5eftl0ys8c22cdumlfuuk3xj3yu6wdd3lgytqwyl5ea27958jtdj5lcglf6l56wfw3famcwcqtj5jvpxrngfuvn9kk3"
+          "notePubkey": "6c78e2072455b3a0c0e52903dab5324f74b1d3c3b92147bd5ecdf4faa440186d",
+          "cp1": "cp1d3uwypey2ke6ps899ypa4dfjfa6tr57rhys50027eh604fzqrpksj79rmy",
+          "noteSecretKey": "ede070d13b4590f2c4f98f0fa72a9681721943fde53582a6b4f843236dc55dc2",
+          "ownershipSignature": "65a6719331097f92cc888315ba6f4d26bc77b0ca27c1f5b37a4ded043c0acd5eb219b452b6bbf1a6c40904f2218a6b98fb2d76f830bc53ad6e91ac40dfc8113c",
+          "ck1": "ck1d3uwypey2ke6ps899ypa4dfjfa6tr57rhys50027eh604fzqrpkktfn3jvcsjlujejygx9d6daxjd0rhkr9z0s04kdaymmgy8s9v6h4jrx699d4m7xnvgzgy7gsc56uclvkhd7psh3f66m5343qdljq38sqv89dq"
         },
         {
-          "purpose": 0,
           "index": 2,
-          "notePubkey": "33a1fa539354a1d62c6a5082a080163b9b43036e2f6c897fb47e184ddde12d27",
-          "cp1": "cp1xwsl55un2jsavtr22zp2pqqk8wd5xqmw9akgjla50cvymh0p95ns2gyj2k",
-          "noteSecretKey": "af070c3ceed517d42cb815bbe33c1223a9660880fa0cb0da5b05ffe7ef705733",
-          "sighash": "420572457d1e35a66681edf448655a0b5b410db369b874568f399edc14371eb9",
-          "keyPathSignature": "d1bad7b8999cdedd70733646363e035c377a365f164dac9ee6fe132a3518be986a1959fb8267a8dcb9f8dd278d8ce3850e9c056792a7356488b20612e8b4ea17",
-          "ck1": "ck1xwsl55un2jsavtr22zp2pqqk8wd5xqmw9akgjla50cvymh0p95narwkhhzveehkawpenv33k8cp4cdm6xe03vndvnmn0uye2x5vtaxr2r9vlhqn84rwtn7xay7xcecu9p6wq2euj5u6kfz9jqcfw3d82zuvekr9k"
+          "notePubkey": "ba3c45375140dbb4b726ff352fbd7f9b2a81d22f28c4424349ec9eea23336091",
+          "cp1": "cp1hg7y2d63grdmfdexlu6jl0tlnv4gr5309rzyys6faj0w5genvzgsygxyed",
+          "noteSecretKey": "e01f025ee069a28b7070f073ca50e4c572d6297c78987d233cae38600843948b",
+          "ownershipSignature": "f668349ac3eb77844198b03919031c1e5a932f193cbf3380dc19b4d38e02f36547c0026e99d77ba45220ab76c19279a5a4a7c03e83bf0faac4b76b025025b269",
+          "ck1": "ck1hg7y2d63grdmfdexlu6jl0tlnv4gr5309rzyys6faj0w5genvzglv6p5ntp7kauygxvtqwgeqvwpuk5n9uvne0ensrwpndxn3cp0xe28cqpxaxwh0wj9yg9twmqey7d95jnuq05rhu86439hdvp9qfdjdyrgq6r8"
         },
         {
-          "purpose": 0,
           "index": 1000,
-          "notePubkey": "724053abe90ad1e08f2e1ce3553245314e4f4868f0890681f7900f510adc87f6",
-          "cp1": "cp1wfq982lfptg7prewrn342vj9x98y7jrg7zysdq0hjq84zzkuslmqycfq3a",
-          "noteSecretKey": "fbe11bd5a2b6703d622c73954c17f8a712a048d3e74e279c582f2f340530870c",
-          "sighash": "cee4f6ec3f8de10a68b14dde9b3b8f78e85c9444df19065d49f4a43c3d81cb37",
-          "keyPathSignature": "7018f00b933672e7ab2258ca9e31917f40ff63726bab3c5e911b96bbd36fb16c214ea61ca871d26fb35d0544b27253d9808d21d1b7bad36abd9f763984be085d",
-          "ck1": "ck1wfq982lfptg7prewrn342vj9x98y7jrg7zysdq0hjq84zzkuslm8qx8spwfnvuh84v393j57xxgh7s8lvdexh2eut6g3h94m6dhmzmppf6npe2r36fhmxhg9gje8y57eszxjr5dhhtfk40vlwcucf0sgt54yryus"
+          "notePubkey": "991367b57da7cbd897ca0fe9a4215c4ef2dc8d9dd097ccb66833648f6f34334c",
+          "cp1": "cp1nyfk0dta5l9a3972pl56gg2ufmederva6ztuedngxdjg7me5xdxq4evpzr",
+          "noteSecretKey": "489b61810962486b73596b2104fd2b10a43fca13cadffa961a4ea4de9788d128",
+          "ownershipSignature": "a5e0c184d03d8fcc1310745060b93d028ee53a2a99ce8f86d41c31ed7fc1b6e1347a4c37bbda416617c8176f11a9e6daf1cf1bc25945eec10a0b1a3eec9c34a6",
+          "ck1": "ck1nyfk0dta5l9a3972pl56gg2ufmederva6ztuedngxdjg7me5xdx2tcxpsngrmr7vzvg8g5rqhy7s9rh98g4fnn50sm2pcv0d0lqmdcf50fxr0w76g9np0jqhdug6nek67883hsjeghhvzzstrglwe8p55c78wmmu"
         },
         {
-          "purpose": 0,
           "index": 2147483647,
-          "notePubkey": "bb82925f03629684ce1d7a3430faa8bd98222d9d6aa6a2ae91f46e469dc00d7e",
-          "cp1": "cp1hwpfyhcrv2tgfnsa0g6rp74ghkvzytvad2n29t5373hyd8wqp4lqg2uzhm",
-          "noteSecretKey": "adff75283b833d820a9fd2b452ef807104969f04d9e93cf8d84d908fccfec0df",
-          "sighash": "6a501a017a954120110b4a747e0dcbc1421f35b2f8d6b93719a87f8def7e8ae1",
-          "keyPathSignature": "ceb60a094852a5abba7964d4c2c2c7eb2cc15bdb2b701f28fae16609999233ffe054985f2a172f371d4200274f032f122de96bcfbf2f53ebddea118d9725bcbb",
-          "ck1": "ck1hwpfyhcrv2tgfnsa0g6rp74ghkvzytvad2n29t5373hyd8wqp4lvads2p9y99fdthfukf4xzctr7ktxpt0djkuql9rawzesfnxfr8llq2jv972sh9um36ssqya8sxtcj9h5khnal9af7hh02zxxewfduhvy47qag"
+          "notePubkey": "de7ff3cb078718fa6305f3c90811c96803b1177b4dc5698b8cacfce7d2a0b7de",
+          "cp1": "cp1mell8jc8suv05cc970yssywfdqpmz9mmfhzknzuv4n7w054qkl0qkdnjvq",
+          "noteSecretKey": "f4b1e6d067693064c82dc5de1ba6802f489989d710152b0eded6d1a5faf2cd49",
+          "ownershipSignature": "44ea1fd7b424abf2a188f0f14b9891a51cd035e18b76dc6c5bed5f89001ebc7a2a9c5989f5ca679a4f0b5b8392f36a8becd0d986bb2302a019a9f37c52083813",
+          "ck1": "ck1mell8jc8suv05cc970yssywfdqpmz9mmfhzknzuv4n7w054qkl0yf6sl676zf2lj5xy0pu2tnzg628xsxhsckakud3d76hufqq0tc732n3vcnaw2v7dy7z6mswf0x65tangdnp4myvp2qxdf7d79yzpczv4qfvaw"
         },
         {
-          "purpose": 0,
           "index": 2147483648,
-          "notePubkey": "be506db0cf6f73ed8a6eeac0b996611ee6321e25b837a5f97277c42941eb8d7c",
-          "cp1": "cp1hegxmvx0dae7mznwatqtn9nprmnry839hqm6t7tjwlzzjs0t347qpdel6t",
-          "noteSecretKey": "ff4ead7eccf3c51301756c9d0c4c411628f1e4b50ca4260046ebbbf2379c31f0",
-          "sighash": "a318274c29259a89fcaa7c4d65c1f8a40dff7078641fc53fa58521c7d7b9f0e0",
-          "keyPathSignature": "d6edbbc0dd3ad41acdb58e89ab957db62cfbc905ee2b529939bae652cf61b7969a4117ec261d8f254fd7b88bfb82c9c653a219f89024c253eaed822e5fa6e296",
-          "ck1": "ck1hegxmvx0dae7mznwatqtn9nprmnry839hqm6t7tjwlzzjs0t347ddmdmcrwn44q6ek6cazdtj47mvt8meyz7u26jnyum4ejjeasm0956gyt7cfsa3uj5l4ac30ac9jwx2w3pn7ysynp986hdsgh9lfhzjc7ksskt"
+          "notePubkey": "2490843a73417452a099f8c08d810816f607a04285180a6caae21484d2e001c0",
+          "cp1": "cp1yjgggwnng9699gyelrqgmqggzmmq0gzzs5vq5m92ug2gf5hqq8qqwytfm5",
+          "noteSecretKey": "03bf10f9b48616809c16bb198df399da5467b9151b02d9ea20325da32337dfb5",
+          "ownershipSignature": "8645dac3b8436d5fd157f3a0ab6e4de4ab18415361f1470ba6b3943224ad34196dabd5c1f86e73bab47dcc3e6237594905a9ef46d397b212aebecfde3a77065a",
+          "ck1": "ck1yjgggwnng9699gyelrqgmqggzmmq0gzzs5vq5m92ug2gf5hqq8qgv3w6cwuyxm2l69tl8g9tdex7f2ccg9fkru28pwnt89pjyjkngxtd402ur7rwwwatglwv8e3rwk2fqk5773knj7ep9t47el0r5acxtgrwfmpc"
         },
         {
-          "purpose": 0,
           "index": 4294967295,
-          "notePubkey": "b1dd9c3e040f3936c41f6a3deb983598978cd689d2321b37c8bf3059fede03d6",
-          "cp1": "cp1k8wec0sypuund3qldg77hxp4nztce45f6gepkd7ghuc9nlk7q0tqhc0w8u",
-          "noteSecretKey": "9f5126ed226ce48d2041f998a0f9dab21dd8cc3bd16935b074e0d70273a50ff6",
-          "sighash": "cbebfdd76033eff8a153e68b29c2397b1e9a6343bcffe2b06e4aa90c4e0a0af4",
-          "keyPathSignature": "1463ee2799d720a09de466089ae8a7f1e8c5279351db956406c5413d217d04ae4d8ac3f0917bd2b4d60a481dcb839dde1ee4007607f8e4e5bd0527f8efd51550",
-          "ck1": "ck1k8wec0sypuund3qldg77hxp4nztce45f6gepkd7ghuc9nlk7q0tpgclwy7vawg9qnhjxvzy6aznlr6x9y7f4rku4vsrv2sfay97sftjd3tplpytm626dvzjgrh9c88w7rmjqqas8lrjwt0g9yluwl4g42qd5fmep"
-        },
-        {
-          "purpose": 1,
-          "index": 0,
-          "notePubkey": "27d7d2be284e53a43cd459009194290008f28832e2285f741bc73ef26fcd931e",
-          "cp1": "cp1ylta903gfef6g0x5tyqfr9pfqqy09zpjug597aqmcul0ym7djv0q5uhnyl",
-          "noteSecretKey": "d2f2be4c67e2e2099ec5f83fe9bb41e6f91ed1c7a41d51b0debc7d2304914eef",
-          "sighash": "561e9683453259d3f437ba23a280be6f56fae7ea06f1dda9d12d72819bb6adca",
-          "keyPathSignature": "5a85070e4b4c56a3e5dedc694cf714ec6085613fd4d87ffc5910b072c5faa6bef23c36b38aa9fbb30e9995ed05596c86991657da5a6e376d15c69ae6d0403cf6",
-          "ck1": "ck1ylta903gfef6g0x5tyqfr9pfqqy09zpjug597aqmcul0ym7djv094pg8pe95c44ruh0dc62v7u2wccy9vylafkrll3v3pvrjcha2d0hj8smt8z4flwesaxv4a5z4jmyxnyt90kj6dcmk69wxntndqspu7ceh5l2r"
-        },
-        {
-          "purpose": 1,
-          "index": 1,
-          "notePubkey": "8b074d48701405af29696b680b4cbfa12331b840101a59f6f81cfec10b8da84b",
-          "cp1": "cp13vr56jrszsz672tfdd5qkn9l5y3nrwzqzqd9nahcrnlvzzud4p9sp7pfve",
-          "noteSecretKey": "ef8dc5b2df6279dcef77dbd837847775c675d9ef03f846b9bf0ccba9da00d041",
-          "sighash": "64ba53b216f7e73317bb048031218a30ad34b057d86e492595a954f075dc6b28",
-          "keyPathSignature": "4c17c94cd924081ef2f431d96806aca07c0726a9a851060908022c9b6d27bd92f688d9df3947dbf69d8549e28c0ef4d2e9fdae36eb4a11cce30d5e7c92439b15",
-          "ck1": "ck13vr56jrszsz672tfdd5qkn9l5y3nrwzqzqd9nahcrnlvzzud4p95c97ffnvjgzq77t6rrktgq6k2qlq8y656s5gxpyyqytymd5nmmyhk3rva7w28m0mfmp2fu2xqaaxja876udhtfggueccdte7fysumz5sn7wgt"
-        },
-        {
-          "purpose": 2,
-          "index": 0,
-          "notePubkey": "2f21db8e5ecb16141e8e548dd1022e29002b128505496bb4a801cef66da3c114",
-          "cp1": "cp19usahrj7evtpg85w2jxazq3w9yqzky59q4ykhd9gq880vmdrcy2qaf4ej2",
-          "noteSecretKey": "082832ac78b2986857cc61af43d3dd5fa61a2343d2650d4778bd7629f31e9415",
-          "sighash": "e6a6add10110a8c8460d3802451e4394643414f30bced64786d3599b0fd3d148",
-          "keyPathSignature": "7010903a38322998ef70b08fc8bcb9ecad4a1188d949ea2d6a4fc0dc2306469fae444f8ae9f3fea748e335e00841063199ec31a1ba45b33dbb7e904d789fb72d",
-          "ck1": "ck19usahrj7evtpg85w2jxazq3w9yqzky59q4ykhd9gq880vmdrcy28qyys8gury2vcaactpr7ghju7et22zxydjj02944ylsxuyvryd8awg38c460nl6n53ce4uqyyzp33n8krrgd6gkenmwm7jpxh38ah955e00p3"
-        },
-        {
-          "purpose": 2,
-          "index": 1,
-          "notePubkey": "b6b33a619b2dd5c1d738fecb5f5f2b82dc6b3b660d117f2838c38df172db63ca",
-          "cp1": "cp1k6en5cvm9h2ur4eclm947hetstwxkwmxp5gh72pccwxlzukmv09qydtczc",
-          "noteSecretKey": "9a9acf102e6c7cf3517c23fd520b59ba27704b4d39aa6fa732f83fdacf8080d4",
-          "sighash": "6c70c1dc681cf3dccffa743a635e9087d372e3eee0237d87c9ea311df950ca60",
-          "keyPathSignature": "ad2a65cc6e674ddaf1a1f78030cfef8ffca90191dd105de6427c01155946a6ef513c510e46744e3f6c90dc10a65f919f37d6a77cad345713b01988bf96415b07",
-          "ck1": "ck1k6en5cvm9h2ur4eclm947hetstwxkwmxp5gh72pccwxlzukmv09262n9e3hxwnw67xsl0qpselhcll9fqxga6yzauep8cqg4t9r2dm6383gsu3n5fclkeyxuzzn9lyvlxlt2wl9dx3t38vqe3zlevs2mqu2e0jwc"
+          "notePubkey": "6d19acfcb5d19593023357a8bcdc1c46ae429399ba045eef0849056ec3010a44",
+          "cp1": "cp1d5v6el946x2exq3n275tehqug6hy9yuehgz9amcgfyzkascppfzqgaxtrl",
+          "noteSecretKey": "b3657257c8d54f99bd4a0b0a3feb6e574fd4f50c0fbfe60b3e21ab692b5795a0",
+          "ownershipSignature": "153a538968808d535eef723c13a8116bcb710462e9f30e88396d853a6cf9013db529fbb057ea2774b278a887ddce63f21b84439d242e9db81440034b4b059cfe",
+          "ck1": "ck1d5v6el946x2exq3n275tehqug6hy9yuehgz9amcgfyzkascppfzp2wjn395gpr2ntmhhy0qn4qgkhjm3q33wnucw3qukmpf6dnusz0d498amq4l2ya6ty79gslwuucljrwzy88fy96wms9zqqd95kpvulc98au5c"
         }
       ]
     },
@@ -813,7 +476,6 @@
       "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
       "seedHex": "878386efb78845b3355bd15ea4d39ef97d179cb712b77d5c12b6be415fffeffe5f377ba02bf3f8544ab800b955e51fbff09828f682052a20faa6addbbddfb096",
       "host": "moneyer.dev",
-      "domain": "moneyer.dev",
       "cashRoot": "e58252908e0c10965d15d1e3894cbf206a2102c20eb9519e466e2e0e852075d430afaa22bb69ef2151cdffacc463e51068e854152b0b7c08fa2f93e6b8d16741",
       "domainIndices": [
         1382342847,
@@ -828,114 +490,60 @@
       "cx1": "cx13f3ykknh9gy4afu3d8r3rrzhd624ekc9w4ttxrsma9q9r3vka5gum73xp29gmduyggnu0w6m0fxxfcgxur03m773fqpcue3wrld58zsuhu8jz",
       "notes": [
         {
-          "purpose": 0,
           "index": 0,
-          "notePubkey": "c1d87c4b918c378deddaa877aaace0872c630e2a67b0986f25bededa788332a0",
-          "cp1": "cp1c8v8cju33smcmmw64pm64t8qsukxxr32v7cfsme9hm0d57yrx2sq6lwcl2",
-          "noteSecretKey": "d2744b8f6eee0ea3e797d00231a965707c45bb55e972df786fe7d8a346af05d6",
-          "sighash": "ced6de08d7c223e2a1e46602a8dca15f707451a19eca0b99afe5fd92a30347c9",
-          "keyPathSignature": "1098f526bee20f309b04617a8f7dcb2bf210632b7c41fc10bb0c7bfae59c4db90767154d4d45cbe90982a776b411d2a00d9e6271fe2c8ef183ed468697130cb1",
-          "ck1": "ck1c8v8cju33smcmmw64pm64t8qsukxxr32v7cfsme9hm0d57yrx2sppx84y6lwyresnvzxz7500h9jhussvv4hcs0uzzasc7l6ukwymwg8vu256n29e05snq48w66pr54qpk0xyu079j80rqldg6rfwycvkyxwuyf9"
+          "notePubkey": "d041f39cc3efeb815f29a9bdd4a323ff1a7a0fbf4bad7e922f42631d53e5023b",
+          "cp1": "cp16pql88xral4czhef4x7afgerlud85ralfwkhay30gf3365l9qgaslww5ln",
+          "noteSecretKey": "90ecbbf1d54a41f75ad13b3a72d2c7464629335867ecb5e0c7ec15106709ba24",
+          "ownershipSignature": "089ebb9d67efd0433301380f8b9370a44068a69bbcf561423a6c743cdded97e30fd16b07561d7f32ea9bd5632aacbde5e0e89b9d1b3180cafb99ab3262d167d7",
+          "ck1": "ck16pql88xral4czhef4x7afgerlud85ralfwkhay30gf3365l9qgas384mn4n7l5zrxvqnsrutjdc2gsrg56dmeatpggaxcapumhke0cc0694sw4sa0uew4x74vv42e009ur5fh8gmxxqv47ue4vex95t86up2dzj0"
         },
         {
-          "purpose": 0,
           "index": 1,
-          "notePubkey": "91768836536618e7d9db0ef538b923b946a392652b2e02091b06c9def7a06106",
-          "cp1": "cp1j9mgsdjnvcvw0kwmpm6n3wfrh9r28yn99vhqyzgmqmyaaaaqvyrqu0jrfl",
-          "noteSecretKey": "e0e39976d875b567ddea8c50773998135cdc19a94dc018049ee237e2813b7483",
-          "sighash": "87e2b624466ed3ebf8a7ac02c62649ebbeaa10277dbe870c0d22cc5c02cc8997",
-          "keyPathSignature": "e8c59d7d1b3235a43a367524923e75b396be5d4e396221cc617bf578baac4061fc3feaa5cf89efc88add2d9abeb1bb2dcf32215a7c70330eef5beeaa88c514ab",
-          "ck1": "ck1j9mgsdjnvcvw0kwmpm6n3wfrh9r28yn99vhqyzgmqmyaaaaqvyrw33va05dnyddy8gm82fyj8e6m8947t48rjc3pe3shhatch2kyqc0u8l42tnufalyg4hfdn2ltrwedeuezzknuwqesam6ma64g33g54vxg5u48"
+          "notePubkey": "1b5fcf1050dd830ae9af14dd3e937412f8ee00e61bf1463d16ca1801f69a5e21",
+          "cp1": "cp1rd0u7yzsmkps46d0znwnaym5ztuwuq8xr0c5v0gkegvqra56tcssxw228u",
+          "noteSecretKey": "f6bcb194b106b9ead25720f5ca0e641add49dcb94b509166f3fa2ae1cadad7ea",
+          "ownershipSignature": "e9f1febebe4035432b2f8edd7261c00a8e88216fd71e94eff7eeb64a50e4e307a40b299fe2384ab2c35281d0de6d758c891e655b74ed3fda8fc58dddca16399b",
+          "ck1": "ck1rd0u7yzsmkps46d0znwnaym5ztuwuq8xr0c5v0gkegvqra56tcs7nu07h6lyqd2r9vhcahtjv8qq4r5gy9haw855alm7adj22rjwxpaypv5elc3cf2evx55p6r0x6avv3y0x2km5a5la4r793hwu593envxfpt0v"
         },
         {
-          "purpose": 0,
           "index": 2,
-          "notePubkey": "ee53f947f4d182d93c60cf6b554150f4054c3b5a83eca6067e10efcf641bbe7e",
-          "cp1": "cp1aeflj3l56xpdj0rqea442s2s7sz5cw66s0k2vpn7zrhu7eqmhelq657y72",
-          "noteSecretKey": "766d2b25cc54758de02e96a0f93d408de8b845ce51b80c1f59296a1729c40397",
-          "sighash": "73be12e7376588bb510b8bbc4a5125336ade83082e30b4fdb36a7c71908ef6ff",
-          "keyPathSignature": "173d18ec2af7e921086d0cdb39550ed3ebd0d42c22c22b61a188a09ae8ff2e8860562405bb042fb693f245ca90722b7674e6c5382761de7200b85afc8fa49d53",
-          "ck1": "ck1aeflj3l56xpdj0rqea442s2s7sz5cw66s0k2vpn7zrhu7eqmhelpw0gcas4006fpppksekee258d867s6skz9s3tvxsc3gy6arljazrq2cjqtwcy97mf8uj9e2g8y2mkwnnv2wp8v808yq9ctt7glfya2vkmdjlz"
+          "notePubkey": "411c5bea3aa31f400a554192734a0bc37b76410567403379e4979c07e566c032",
+          "cp1": "cp1gyw9h6365v05qzj4gxf8xjstcdahvsg9vaqrx70yj7wq0etxcqeq75d4gm",
+          "noteSecretKey": "b85ea35e5ec928b98e4b1c3dbefb5601d705d12426bb93f230f91144f2afd779",
+          "ownershipSignature": "6a758cc811040e063cee12cfb179918831ceae11c939abf4670cf28bd6dfdf38e1d949dd3e1b6494a14b7e9d99d2ac398a80fb98aa0da9a9b9787480fd8997af",
+          "ck1": "ck1gyw9h6365v05qzj4gxf8xjstcdahvsg9vaqrx70yj7wq0etxcqex5avveqgsgrsx8nhp9na30xgcsvww4cgujwdt73nseu5t6m0a7w8pm9ya60smvj22zjm7nkva9tpe32q0hx92pk56nwtcwjq0mzvh4u20rkct"
         },
         {
-          "purpose": 0,
           "index": 1000,
-          "notePubkey": "950ee05228023cfff7eb4e3a30547a63a21822bcedeb6756f183884d24e8f1bc",
-          "cp1": "cp1j58wq53gqg70laltfcarq4r6vw3psg4uah4kw4h3swyy6f8g7x7q0e5mew",
-          "noteSecretKey": "9ea03a1c8b92a72693da28098157eecd09f3c9333d0b82a82470568519327d09",
-          "sighash": "4100964d0eae67d0b6730293b65723c50400642288a8e274a9d2db7563af879d",
-          "keyPathSignature": "c17ddf9fb5b5552c139fa0c73eedc890835975a8c177c2a82d16e99fdfe1bdaf269ff9d155fe43b5016c16d188a2eb6178262dc2445509e1bc48f247fd5dfeda",
-          "ck1": "ck1j58wq53gqg70laltfcarq4r6vw3psg4uah4kw4h3swyy6f8g7x7vzlwln76m24fvzw06p3e7ahyfpq6ewk5vza7z4qk3d6vlmlsmmtexnluaz407gw6szmqk6xy296mp0qnzmsjy25y7r0zg7frl6h07mg2u4cak"
+          "notePubkey": "d619eb8f296484959173d598900965c9343cb9d263c3915cc2ef859edcf093be",
+          "cp1": "cp16cv7hrefvjzftytn6kvfqzt9ey6rewwjv0pezhxza7zeah8sjwlquhzqa0",
+          "noteSecretKey": "9c7e2bb6832081dc0844ef673c79f7653f601c22ff3d410b35a518a74311524e",
+          "ownershipSignature": "a497999a24a85a6e0fc2334499fb39dbb807c833e8caa70c6c0c5c0684fee5071f1f6a878d80bd1e679ae2c79133643e401a2a5ef880a5ad96093bd483a23839",
+          "ck1": "ck16cv7hrefvjzftytn6kvfqzt9ey6rewwjv0pezhxza7zeah8sjwl2f9uengj2sknwplprx3yelvuahwq8eqe73j48p3kqchqxsnlw2pclra4g0rvqh50x0xhzc7gnxep7gqdz5hhcszj6m9sf802g8g3c8ymj4zdd"
         },
         {
-          "purpose": 0,
           "index": 2147483647,
-          "notePubkey": "a5f9d33918024901e895e975cd1b73b46d1f939bf7206d3fad53953a34db4120",
-          "cp1": "cp15huaxwgcqfysr6y4a96u6xmnk3k3lyum7usx60ad2w2n5dxmgysqcgapvd",
-          "noteSecretKey": "1b9371ddb5cdb3c49a77f2fdc1247f7181851a592e6864670b3298cdf3f441bf",
-          "sighash": "1ff215fb82949607725430e575f50351809f9590849232e44fa22bd788b71384",
-          "keyPathSignature": "5eaa825923e75171640171b093a538fc7a5f9d3956af88a3e0b7fa64a76b55d6994395509912a32c23f69f6bf0f1573c289317e675973848bfefc35c0bb84812",
-          "ck1": "ck15huaxwgcqfysr6y4a96u6xmnk3k3lyum7usx60ad2w2n5dxmgys9a25zty37w5t3vsqhrvyn55u0c7jln5u4dtug50st07ny5a44t45egw24pxgj5vkz8a5ld0c0z4eu9zf30en4juuy30l0cdwqhwzgzgrdhj7a"
+          "notePubkey": "c42d2070e6c875a85c327fef16ec02f0b1c5cc5dbcc3b8a12cf39bbb6ad91374",
+          "cp1": "cp1cskjqu8xep66shpj0lh3dmqz7zcutnzahnpm3gfv7wdmk6kezd6qmd444n",
+          "noteSecretKey": "db1661f46998d227351a2fed365074a12db8f4fdd5c166bad630523adefc4924",
+          "ownershipSignature": "e4dfa944e2ab2b55579557ff569bcfab06ca80e61ba2b09b6f11d1043f1c5d1cb1a21129980a14659d7051b493ac2b460900c222f2dfbeb341f64d4553d2cb24",
+          "ck1": "ck1cskjqu8xep66shpj0lh3dmqz7zcutnzahnpm3gfv7wdmk6kezd6wfhafgn32k26427240l6kn086kpk2srnphg4sndh3r5gy8uw968935ggjnxq2z3je6uz3kjf6c26xpyqvyghjm7ltxs0kf4z485ktysg0wunf"
         },
         {
-          "purpose": 0,
           "index": 2147483648,
-          "notePubkey": "c29288ff58a1f9f3dbe5efd4e9c1e62efcd001bdddc36cda0a2e69975b06608d",
-          "cp1": "cp1c2fg3l6c58ul8kl9al2wns0x9m7dqqdamhpkeks29e5ewkcxvzxsuy5sm2",
-          "noteSecretKey": "182af4f95642df5dcba7d0a4c1a324968ea26d07f12fe63ac922746102e4b5ca",
-          "sighash": "f112f4ef31331a55a6f9632c1b98176b3f50826c4d616dc4061b6ea03f192ebd",
-          "keyPathSignature": "72f1f04eab8f391d8e967a0059769229c8af6387ed660f0dae29e3793bed658bb607abb0f0a87f4ae2f039932d36c8715a38bbbb02c66ebe8ff38833d329cfbf",
-          "ck1": "ck1c2fg3l6c58ul8kl9al2wns0x9m7dqqdamhpkeks29e5ewkcxvzxh9u0sf64c7wga36t85qzew6fznj90vwr76es0pkhzncme80kktzakq74mpu9g0a9w9upejvkndjr3tguthwczcehtarln3qeax2w0huj50gw0"
+          "notePubkey": "fe4e4ee0d2ea1a5db51a76701bf9539a85808ccc217be029887ac8f4e4bc51c3",
+          "cp1": "cp1le8yacxjagd9mdg6wecph72nn2zcprxvy9a7q2vg0ty0fe9u28pssw0wc6",
+          "noteSecretKey": "10e1ca2fb044c04ef9be5f9393969700c40cb8f03bc0c9aed89be21b8d93f157",
+          "ownershipSignature": "68b3356c10855b709a1adef8f7fad7d8c09e44718c6422732bc70eace3a6631549dc9766740eb7c2a844e5d249b0f185254f9d01c435ef45acfe943e008b2537",
+          "ck1": "ck1le8yacxjagd9mdg6wecph72nn2zcprxvy9a7q2vg0ty0fe9u28pk3ve4dsgg2kmsngdda78hltta3sy7g3cccepzwv4uwr4vuwnxx92fmjtkvaqwklp2s3896fympuv9y48e6qwyxhh5tt87jslqpze9xu54q72z"
         },
         {
-          "purpose": 0,
           "index": 4294967295,
-          "notePubkey": "295bf3fb9717c5e1ec4cb1dd263b9d73a272c55fdd3db1500e6718c84261958e",
-          "cp1": "cp199dl87uhzlz7rmzvk8wjvwuaww38932lm57mz5qwvuvvssnpjk8qsc5trx",
-          "noteSecretKey": "1e0448da8ab0896738b2ed6d44ae1814eb7c39d126e14012e97547b097c22212",
-          "sighash": "1f6571de23ec0860d97e008cabaedc2e6f5497a4cb2b98268cecd1caf96ffaa7",
-          "keyPathSignature": "bb0cf4d585f03088b1229648ff161b2b2d8da3e0a2cd04c45a94c9b0741d6a90f8791b1edc89919163c3c9b5544c1053f95e3de5ee35cfa992ff8b67b7af17e4",
-          "ck1": "ck199dl87uhzlz7rmzvk8wjvwuaww38932lm57mz5qwvuvvssnpjk8tkr856kzlqvygky3fvj8lzcdjktvd50s29ngyc3dffjdswswk4y8c0yd3ahyfjxgk8s7fk42ycyznl90rme0wxh86nyhl3dnm0tchuswxl5te"
-        },
-        {
-          "purpose": 1,
-          "index": 0,
-          "notePubkey": "ecd4b2f4bdb1910cea41ef686032a6dc0ec181d243630ebe06da89d4c86f9976",
-          "cp1": "cp1an2t9a9akxgse6jpaa5xqv4xms8vrqwjgd3sa0sxm2yafjr0n9mqtvk08q",
-          "noteSecretKey": "017959823539f1dcf5176d7e3138b93e047126002e200c1eb8fe7bc0cff04727",
-          "sighash": "93a5b99f99d6af736e4bcf4fffbae9db3d15dfdc898b91484249f7c26de32086",
-          "keyPathSignature": "a6b56178c84822dc729d32a40632e86a3c2ce08a31fc8ea58cd25b5591b18e273792fedd214be1a436534e88de7a9b650b293ed318370c76fd8bc8fdd44a4ffe",
-          "ck1": "ck1an2t9a9akxgse6jpaa5xqv4xms8vrqwjgd3sa0sxm2yafjr0n9m2ddtp0ryysgkuw2wn9fqxxt5x50pvuz9rrlyw5kxdyk64jxccufehjtld6g2tuxjrv56w3r084xm9pv5na5ccxux8dlvter7agjj0lc3fwujm"
-        },
-        {
-          "purpose": 1,
-          "index": 1,
-          "notePubkey": "e51d1d818ddc4f37aeb52ba90993c9d84e617a07a347d3fc9a8780e0aab24846",
-          "cp1": "cp1u5w3mqvdm38n0t449w5sny7fmp8xz7s85dra8ly6s7qwp24jfprq8wp3kv",
-          "noteSecretKey": "8cf0ae0292c4fe6d10ca20a78b9046d79ad8271ac5634069eb6c3fae4bad582b",
-          "sighash": "2b9b591cd1584da2d3c9176d62cabca1fafd9a652f00f759ff7eec1a1dbe4ca9",
-          "keyPathSignature": "5ac22e283aa2d6b99ca3f99f7acdddbf5640bef3d8891949730314fc9aa4d034a9aeeb3e2c24d46566425850a931aa0878c531aa612ee0b8829c60e8e7a77b5a",
-          "ck1": "ck1u5w3mqvdm38n0t449w5sny7fmp8xz7s85dra8ly6s7qwp24jfpr94s3w9qa2944enj3ln8m6ehwm74jqhmea3zgef9esx98un2jdqd9f4m4nutpy63jkvsjc2z5nr2sg0rznr2np9mst3q5uvr5w0fmmtgjwg6dv"
-        },
-        {
-          "purpose": 2,
-          "index": 0,
-          "notePubkey": "d4ad22655ec8cb42f0174b45ea90d9999bd99552554961aa93dcda30e5360e64",
-          "cp1": "cp16jkjye27er959uqhfdz74yxenxdan92j24ykr25nmndrpefkpejq7244p3",
-          "noteSecretKey": "bdc8679691370f7f4b1890d33a1b37ee0820a441647fb8900ee514f7726f89e9",
-          "sighash": "dab20700d4e04841d5eb5c01cc6423b6d3dfaafdd4d388dbc33b12aa62d7dbf6",
-          "keyPathSignature": "741fa25bb00377dcdd0e81bca00ec06d088feb4657c27c67d1733dc9ee3b024d76606bab4580256a3ae1fd47ea27b9c9f50ac705ce94c166bbb6e7b3be1c7f07",
-          "ck1": "ck16jkjye27er959uqhfdz74yxenxdan92j24ykr25nmndrpefkpej8g8aztwcqxa7um58gr09qpmqx6zy0adr90snuvlghx0wfacasyntkvp46k3vqy44r4c0agl4z0wwf759vwpwwjnqkdwaku7emu8rlquqj69ky"
-        },
-        {
-          "purpose": 2,
-          "index": 1,
-          "notePubkey": "cf362162db0a350a81db261121e53a0ee47397df90fc15187c34f35f80a07398",
-          "cp1": "cp1eumzzckmpg6s4qwmycgjref6pmj8897ljr7p2xruxne4lq9qwwvqqtj2cz",
-          "noteSecretKey": "0eca18fcee529f8918cd320562ac249ffbf4aa9e88f5ce0354ae08f0777f5ffc",
-          "sighash": "91242970164e52c26d50dc8071b27bea59de77b9b9617a52e0af8a6885d30022",
-          "keyPathSignature": "92ffb913f1a31f8b3de2f07e98a9b015b747f5cc421e9bca9b2ca3670eb2b1e9e254b0a5ba6a1ee632a321ba1bf1a58c83ec55255916ad8b5dd19342fd428bc8",
-          "ck1": "ck1eumzzckmpg6s4qwmycgjref6pmj8897ljr7p2xruxne4lq9qwwvf9laez0c6x8ut8h30ql5c4xcptd687hxyy85me2djegm8p6etr60z2jc2twn2rmnr9gephgdlrfvvs0k92f2ez6kckhw3jdp06s5teqcvqlak"
+          "notePubkey": "64c6f66ad86d8d5fe8f8829426397fb04b826f0d9c8584a6bec8098f750efd87",
+          "cp1": "cp1vnr0v6kcdkx4l68cs22zvwtlkp9cymcdnjzcff47eqyc7agwlkrs2wtk2q",
+          "noteSecretKey": "122e1f369089ed800b58f61fffad7155ca3f360fef769a97260bb6e88c587de8",
+          "ownershipSignature": "3061b092f7bf5e8e456c8c875439b8cbfecb7915206620509bf6e6b152d623b868db00200482abda16b1308cd4d4bb7e3f018d8c59938331b00edf3c74165712",
+          "ck1": "ck1vnr0v6kcdkx4l68cs22zvwtlkp9cymcdnjzcff47eqyc7agwlkrnqcdsjtmm7h5wg4kgep658xuvhlkt0y2jqe3q2zdlde432ttz8wrgmvqzqpyz40dpdvfs3n2dfwm78uqcmrzejwpnrvqwmu78g9jhzgk5s2z8"
         }
       ]
     },
@@ -943,7 +551,6 @@
       "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
       "seedHex": "878386efb78845b3355bd15ea4d39ef97d179cb712b77d5c12b6be415fffeffe5f377ba02bf3f8544ab800b955e51fbff09828f682052a20faa6addbbddfb096",
       "host": "localhost:3338",
-      "domain": "localhost",
       "cashRoot": "e58252908e0c10965d15d1e3894cbf206a2102c20eb9519e466e2e0e852075d430afaa22bb69ef2151cdffacc463e51068e854152b0b7c08fa2f93e6b8d16741",
       "domainIndices": [
         1952797166,
@@ -958,279 +565,184 @@
       "cx1": "cx10h403qjzzkfez3st4dvr9trpsrep0gd4wtnwn0anjrq2eq7tfq8552trc0gk0gcmg2ydgth3rtuewa2jvj56k6g8p4q7u32vtx2a6ecdn7lrh",
       "notes": [
         {
-          "purpose": 0,
           "index": 0,
-          "notePubkey": "9c7bb4d891e472e9d60926dc66bcfcffe72f38d6c64b9fee99b71fe61d5f370f",
-          "cp1": "cp1n3amfky3u3ewn4sfymwxd08ullnj7wxkce9elm5eku07v82lxu8sgtw0vu",
-          "noteSecretKey": "53c651dfee01be4bc1b745c9e04fe91646ebe577831825a8626fdf04fbf378c4",
-          "sighash": "eb400302a1552ba3cf31e7e47a21dc37a18d104047fb989e7c4a746b7f9d7acf",
-          "keyPathSignature": "f74716741a7b6505549612c272a6cfe722ef5908960818e7089c0ee44b2805abf000a99d9c461964e13ff6e858de8dea07a6f920fff0f291d492050e63d3e98d",
-          "ck1": "ck1n3amfky3u3ewn4sfymwxd08ullnj7wxkce9elm5eku07v82lxu8lw3ckwsd8keg92jtp9snj5m87wgh0tyyfvzqcuuyfcrhyfv5qt2lsqz5em8zxr9jwz0lkapvdar02q7n0jg8l7refr4yjq58x85lf35puhnlt"
+          "notePubkey": "c336a87c7092e0d36a3a7b757c9f39fd861757abf3a966a9fd98af790310207e",
+          "cp1": "cp1cvm2slrsjtsdx6360d6he8eelkrpw4at7w5kd20anzhhjqcsyplq0l38f9",
+          "noteSecretKey": "372f877843cf715317101f97025db51b1d4df439b9ff5e2b4d9d001ff8f7d658",
+          "ownershipSignature": "36a7948f76b22e83e9025bca28c60fc1494c84905b6d53b0c24f6fec7648c7e34f28e0ad191dcf4d2bb14b86fc3725ad8c2314276571b73d421af2f49e93099e",
+          "ck1": "ck1cvm2slrsjtsdx6360d6he8eelkrpw4at7w5kd20anzhhjqcsyplrdfu53amtyt5rayp9hj3gcc8uzj2vsjg9km2nkrpy7mlvweyv0c609rs26xgaeaxjhv2tsm7rwfdd3s33gfm9wxmn6ss67t6faycfncsdaw4a"
         },
         {
-          "purpose": 0,
           "index": 1,
-          "notePubkey": "0c9505ba556c3608af909e6bf4c965e9f4e7cba930bf41d5be4849ca61cc8868",
-          "cp1": "cp1pj2stwj4dsmq3tusne4lfjt9a86w0jafxzl5r4d7fpyu5cwv3p5qq97qye",
-          "noteSecretKey": "a998a5cbd02419339e5989dd71b4da835b7569bd16c68b6da272f2bd22f3757c",
-          "sighash": "6d461a84bd679882af7912a24a9e9e9fd5062b74dda08e19feac2add119fd393",
-          "keyPathSignature": "cc641476b4903ae136761629e0dc990bb5d08fd5481c4f23cb18eb69d10ee5aaa4a8f288d811df9537c9275053820e8b6cde9f6b7eee5c4dd40217b55447c303",
-          "ck1": "ck1pj2stwj4dsmq3tusne4lfjt9a86w0jafxzl5r4d7fpyu5cwv3p5vceq5w66fqwhpxempv20qmjvshdws3l25s8z0y09336mf6y8wt24y4reg3kq3m72n0jf82pfcyr5tdn0f76m7aewym4qzz764g37rqvdx6qj4"
+          "notePubkey": "9e76cfbafef7fa159f77a65c49e480e369f3a4ea1384e4610e1dd607f55f6d42",
+          "cp1": "cp1nemvlwh77lapt8mh5ewyneyqud5l8f82zwzwgcgwrhtq0a2ld4pqxjjfg5",
+          "noteSecretKey": "11f54c28485413dcf65a682e8293cc7acb6de723eb770a4fae03bbfb2b5cea2c",
+          "ownershipSignature": "da02b2036dd783d939366d393c96d217c39fd5d36ecf23c4f4d8c27875f378e98450ec61ab94d28e270bcbf7abc0dc3d3bafe6680ba1a22d760bd529a8ebe4b8",
+          "ck1": "ck1nemvlwh77lapt8mh5ewyneyqud5l8f82zwzwgcgwrhtq0a2ld4pd5q4jqdka0q7e8ymx6wfujmfp0sul6hfkanercn6d3sncwheh36vy2rkxr2u5628zwz7t774uphpa8wh7v6qt5x3z6ast655636lyhqgw0dk6"
         },
         {
-          "purpose": 0,
           "index": 2,
-          "notePubkey": "c91fb943f73d612049bc8ed944c3a15ddbb6df31223dbe132c5dabab5d2f04c4",
-          "cp1": "cp1ey0mjslh84sjqjdu3mv5fsapthdmdhe3yg7muyevtk46khf0qnzqfjd59s",
-          "noteSecretKey": "456795f0c581c5e738ae715601b9012a574afd657b1a3c1210302fee269667a0",
-          "sighash": "40d5d0532ac58bec7c583a79390aae55608c7b62bfbb932d93e0ca2b4fb4acd9",
-          "keyPathSignature": "09a96dea2653d134e92d565a2a95d59348a9a7d1e96ae9f849ec2a20203ed35c214cdb0a3088dbb326c47d96a3890ec54f383a3234ea026d39f12122159d871f",
-          "ck1": "ck1ey0mjslh84sjqjdu3mv5fsapthdmdhe3yg7muyevtk46khf0qnzqn2tdagn985f5ayk4vk32jh2exj9f5lg7j6hflpy7c23qyqldxhppfnds5vygmwejd3raj63cjrk9fuur5v35agpx6w03yy3pt8v8ru8l0fq2"
+          "notePubkey": "f7d61ad106daaa5e0d52ec2c9d81f27b2336c22eb7a312feab8a2703b1217fc3",
+          "cp1": "cp17ltp45gxm249ur2jaskfmq0j0v3nds3wk7339l4t3gns8vfp0lps6xa45n",
+          "noteSecretKey": "962c2de12c546aad3e702be76e0342bc30a58be08318477c3ff13324a7291a01",
+          "ownershipSignature": "a260e56a9c2118272a9aa6897697df156f7aa8a6019134cfa1c517f887adfb2ba30efc267825d56b6a352a0d6c1bafcfd809694459010fe56e0da83677e9f2db",
+          "ck1": "ck17ltp45gxm249ur2jaskfmq0j0v3nds3wk7339l4t3gns8vfp0lp6yc89d2wzzxp892d2dztkjl032mm64znqryf5e7su29lcs7klk2arpm7zv7p9644k5df2p4kpht70mqykj3zeqy872msd4qm8060jmvuh3qjt"
         },
         {
-          "purpose": 0,
           "index": 1000,
-          "notePubkey": "62a75f009082d449b3c727c7c6406ccdfcb5f0667a66e83f238af5eb283f23d6",
-          "cp1": "cp1v2n47qysst2ynv78ylruvsrveh7tturx0fnws0er3t67k2ply0tqr05jr9",
-          "noteSecretKey": "354716ea5d36b8fcf81bbed2ccfb8d14a3744bf930925638831139af5f10f4b6",
-          "sighash": "5c9e6c1f5fdad163bab6424323b175ecd3e7a864d08041e5404142bcb7e2da80",
-          "keyPathSignature": "4809e9b9c46ffa66d82b132c220f00f5290beadf21d4a86a8416bf93b059748ec3b18be361c0b5c12c41a881dbfd7295fa8ee7f8714d400a7e45769716086913",
-          "ck1": "ck1v2n47qysst2ynv78ylruvsrveh7tturx0fnws0er3t67k2ply0tysz0fh8zxl7nxmq43xtpzpuq022gtat0jr49gd2zpd0unkpvhfrkrkx97xcwqkhqjcsdgs8dl6u54l28w07r3f4qq5lj9w6t3vzrfzvjtzkp2"
+          "notePubkey": "f1a0a5c55ef4e66af5da6c5b6f762ea978aa9e1782e3cc5ae753101ef7f5eba4",
+          "cp1": "cp17xs2t3277nnx4aw6d3dk7a3w49u248shst3uckh82vgpaal4awjqw8gpq2",
+          "noteSecretKey": "79a56bf2dcd3dfdbe5e2915c7c2ece3b0f92c84e85266a94b2922569788d35d2",
+          "ownershipSignature": "9cf47cc7a9eb97f87acfd82af4481b0d1f417db559a98d80b1f33403dd1fafc233558fdabc76b4661be7a858ee29c3119d38ab9bfc011584c92c1434f24cd421",
+          "ck1": "ck17xs2t3277nnx4aw6d3dk7a3w49u248shst3uckh82vgpaal4awjfearuc757h9lc0t8as2h5fqds686p0k64n2vdszclxdqrm506ls3n2k8a40rkk3npheagtrhznsc3n5u2hxluqy2cfjfvzs60ynx5yys4f8rv"
         },
         {
-          "purpose": 0,
           "index": 2147483647,
-          "notePubkey": "2ba9721f621927cff711ca8da5581b30fd33247a1402b911bdc40ee965c0f820",
-          "cp1": "cp19w5hy8mzrynulac3e2x62kqmxr7nxfr6zsptjydacs8wjewqlqsq30evc3",
-          "noteSecretKey": "368c01f106d50466161c519922466480d57b8e45d4ae61456d44decd995b84ba",
-          "sighash": "6c71b7007fadc6321fa64f45911ad0ceba7e6549fa0f02fac2ca99a0eec3853d",
-          "keyPathSignature": "b11f6fa59e960b5b98e99520b2ff20a4a042a62a486a906c21f66a256e93c798ea6ffda0bfdcf068d77ebd65f1fdc378e29b1b542ed1623e8e378e22a82740a4",
-          "ck1": "ck19w5hy8mzrynulac3e2x62kqmxr7nxfr6zsptjydacs8wjewqlqstz8m05k0fvz6mnr5e2g9jlus2fgzz5c4ys65sdsslv639d6fu0x82dl76p07u7p5dwl4avhclmsmcu2d3k4pw693rar3h3c32sf6q5snr9u2v"
+          "notePubkey": "900dd854839b29f655347c79f3831facd7226e198a5135d4fb655fdfc43c1dfa",
+          "cp1": "cp1jqxas4yrnv5lv4f503ul8qcl4ntjymse3fgnt48mv40al3purhaq64e7ah",
+          "noteSecretKey": "7ec17331865f084b6034537688491d7038340f29d676e7b61392d4b99fa97fcd",
+          "ownershipSignature": "53813633e978909950f2d14058abab6f0f49c34fe304b705e227f40bc065b8633d3a20a3a1772c2f59ce9f300763d2ab0de283626d4dfcea65bd454bd7e01c2a",
+          "ck1": "ck1jqxas4yrnv5lv4f503ul8qcl4ntjymse3fgnt48mv40al3purha98qfkx05h3yye2redzszc4w4k7r6fcd87xp9hqh3z0aqtcpjmscea8gs28gth9sh4nn5lxqrk854tph3gxcndfh7w5edag49a0cqu9g9d3ujp"
         },
         {
-          "purpose": 0,
           "index": 2147483648,
-          "notePubkey": "4b03b6feb1dae650d338e99e0f66818dbbd1135b078d8ccb6ca0b9c9fe2c7177",
-          "cp1": "cp1fvpmdl43mtn9p5ecax0q7e5p3kaazy6mq7xcejmv5zuunl3vw9mskr29rv",
-          "noteSecretKey": "ee2e99aa6d4707766460a8faa3d7a75e2e2c7b08f641f4af8ae7ce7f635a6d99",
-          "sighash": "b04994b5a9252566d3c7abd1ea99bca36dc515d3dc9e32fec2c97e3ce8ac2f2b",
-          "keyPathSignature": "369ba83f71a15a64992254c169bba7dcfb8fafa37174181fc00a538870394235ee89aeee764a8d91d4c912d638e14132bc24c3b4d9ce026d37a62b6e27fa2888",
-          "ck1": "ck1fvpmdl43mtn9p5ecax0q7e5p3kaazy6mq7xcejmv5zuunl3vw9mndxag8ac6zknyny39fstfhwnae7u0473hzaqcrlqq55ugwqu5yd0w3xhwuaj23kgafjgj6cuwzsfjhsjv8dxeecpx6dax9dhz073g3q5p8ncl"
+          "notePubkey": "3f4fac14aea67734e61d3fd88fc1d8b5f505d91129ba96be87926102257e7dc4",
+          "cp1": "cp18a86c99w5emnfesa8lvglswckh6stkg39xafd058jfssyft70hzq2upqkj",
+          "noteSecretKey": "a0e3e0f0ce7801a95c91e6f6f8d83988830e5acfccdd7526680a2d6879d736c2",
+          "ownershipSignature": "8643134728982b552232c95f91e4bf2f16d20de4331fa734759e653dc92bbceb7b56ff660adebf595bf01004d8fd28a249096d29e83a46a1536d99090d50ffe9",
+          "ck1": "ck18a86c99w5emnfesa8lvglswckh6stkg39xafd058jfssyft70hzgvscngu5fs264ygevjhu3ujlj79kjphjrx8a8x36euefaey4me6mm2mlkvzk7hav4huqsqnv0629zfyyk620g8fr2z5mdnyys658lay3d7zu2"
         },
         {
-          "purpose": 0,
           "index": 4294967295,
-          "notePubkey": "28e47434a8478ae53c4be6d3555ffbd11354250f582862cecde949a962b460f4",
-          "cp1": "cp19rj8gd9gg79w20ztumf42hlm6yf4gfg0tq5x9nkda9y6jc45vr6qwzw2l9",
-          "noteSecretKey": "72d66defb1d4cfdc4a89e1fe3ad104b1b26204e5a81faadf4428957fc3fb5bc8",
-          "sighash": "17b0198f018a14f87885ad8aad4dbd6678e833a0f9f0cb92037a58dc288f6dab",
-          "keyPathSignature": "436eada505a58aeb9f7ac0dd59922a6985973d1de9b2135abf5e2864d89e6c5a446496887498c6a38692ed108c195700166b32d3af9e189739b8df74113e077c",
-          "ck1": "ck19rj8gd9gg79w20ztumf42hlm6yf4gfg0tq5x9nkda9y6jc45vr6yxm4d55z6tzhtnaavph2ejg4xnpvh85w7nvsnt2l4u2rymz0xckjyvjtgsaycc63cdyhdzzxpj4cqze4n95a0ncvfwwdcma6pz0s80sj8rfl5"
-        },
-        {
-          "purpose": 1,
-          "index": 0,
-          "notePubkey": "aea5050e6c33b93d06317fcc6ab8946190aca3830e604463fc1f5a4e448709b8",
-          "cp1": "cp146js2rnvxwun6p330lxx4wy5vxg2egurpesygcluradyu3y8pxuqwdm98e",
-          "noteSecretKey": "4aa38db0563c5521d1caa35e28d7e997fd37d8af23da1e55d4dc766ae1955a5e",
-          "sighash": "520e8e2cddba77360bca53716ca61c94f5394c51769750d593ae0c2dc78b61f6",
-          "keyPathSignature": "87a223c6fb8eea3a9a9bb3f2de6e2173b8f50be0c763ed5290ed48381a022cfc99e729fee459c07b0272f7394708c47d11c0b7398ff37428c19452067d1571f1",
-          "ck1": "ck146js2rnvxwun6p330lxx4wy5vxg2egurpesygcluradyu3y8pxug0g3rcmaca636n2dm8uk7dcsh8w84p0svwcld22gw6jpcrgpzelyeuu5laezecpasyuhh89rs33raz8qtwwv07d6z3sv52gr869t37ys3xfy4"
-        },
-        {
-          "purpose": 1,
-          "index": 1,
-          "notePubkey": "00bf84267749f3d3ddc18b85bfdee9a2bca653f9d450d435fb90518139646d98",
-          "cp1": "cp1qzlcgfnhf8ea8hwp3wzmlhhf5272v5le63gdgd0mjpgczwtydkvqxjquga",
-          "noteSecretKey": "f7e871872036f87403c53fdd1e47fba2df793bbbfbdcdcb901467ab8edcc3e37",
-          "sighash": "1738ce3a244775be00be8ae27cb000c69d6805c9aba249f80a38bc4de6ee335f",
-          "keyPathSignature": "32f01285e36bd0c71e921764dd7b56aca9462498f1bdea504f947cedda9a46db6b750d3d2ff5ca56c81c4da403d372b466f2f18ba395f9fde6d7c94511e38ca1",
-          "ck1": "ck1qzlcgfnhf8ea8hwp3wzmlhhf5272v5le63gdgd0mjpgczwtydkvr9uqjsh3kh5x8r6fpwexa0dt2e22xyjv0r0022p8egl8dm2dydkmtw5xn6tl4eftvs8zd5spaxu45vme0rzarjhulmekhe9z3rcuv5ymtjgve"
-        },
-        {
-          "purpose": 2,
-          "index": 0,
-          "notePubkey": "3c25f8feb66b6600402ac60610fb80e9c935e59ca6bb81b09a1a889e06d7e92c",
-          "cp1": "cp18sjl3l4kddnqqsp2ccrpp7uqa8yntevu56acrvy6r2yfupkhaykq87vg3p",
-          "noteSecretKey": "b5d7b5691c02095b9228ab6b707dd3d194f343bf74a30abd8fc0e6410e2a65e7",
-          "sighash": "e76d1e343a2ed4c2d1ce2284253db754468a5da1ff1fa1a335b626aaf96cb489",
-          "keyPathSignature": "d0d54bb3d0e34901c2e418f8b1858983a0fe2998e5bb011750a5a0bd0f5edfacdc7141bb3b76c3afb64b6bd8693582104a76f9e9dd45c8dcbbd6b4486f96412b",
-          "ck1": "ck18sjl3l4kddnqqsp2ccrpp7uqa8yntevu56acrvy6r2yfupkhaykdp42tk0gwxjgpctjp3793skyc8g879xvwtwcpzag2tg9apa0dltxuw9qmkwmkcwhmvjmtmp5ntqssffm0n6waghydew7kk3yxl9jp9vg33lck"
-        },
-        {
-          "purpose": 2,
-          "index": 1,
-          "notePubkey": "3809d28f74aefeb038daf5dd08942835ec6e0d0b1c0e8655c6ef4aaa5c0ab3ef",
-          "cp1": "cp18qya9rm54mltqwx67hws39pgxhkxurgtrs8gv4wxaa925hq2k0hs6vp3yw",
-          "noteSecretKey": "8d32c7cb3a5786a75e8c860b097a813af9b6e1cc791d26000bd0de28c57e7659",
-          "sighash": "7b0e6d268c62f78bc5eba318a5bd21d09e9ff1b0b10b7c53f80617b22400d924",
-          "keyPathSignature": "22b0972e5763c06aeb7536a0864cf1c9a6c775b5e16deefb1bcf84303029e8b03b352ec3d9c51bb5475e5fc0e97ffa101c8f526887a0d4727271a25e5f8e0d6e",
-          "ck1": "ck18qya9rm54mltqwx67hws39pgxhkxurgtrs8gv4wxaa925hq2k0hj9vyh9etk8sr2ad6ndgyxfncunfk8wk67zm0wlvdulppsxq573vpmx5hv8kw9rw65whjlcr5hl7ssrj84y6y85r28yun35f09lrsddc3hly93"
+          "notePubkey": "293252bbe555d164cf43d7994016c970a8d3ff1853b7442dc2af12d4ccd86e94",
+          "cp1": "cp19ye99wl92hgkfn6r67v5q9kfwz5d8lcc2wm5gtwz4ufdfnxcd62q24qdra",
+          "noteSecretKey": "8070c2712023da7a50f6c25462bbe130e06a75b1298bb4ee7069be74987fba7b",
+          "ownershipSignature": "6974ac039b22fc9c9da31a6f478f018154c4d9156beddb97e86c8e27f38083369504b42a2e0d005710ba740a301de8422dce90b469b703a6a46250a298174dbd",
+          "ck1": "ck19ye99wl92hgkfn6r67v5q9kfwz5d8lcc2wm5gtwz4ufdfnxcd62xja9vqwdj9lyunk335m683uqcz4xymy2khmwmjl5xer387wqgxd54qj6z5tsdqpt3pwn5pgcpm6zz9h8fpdrfkup6dfrz2z3fs96dh54utzgc"
         }
       ]
     }
   ],
-  "prePurpose": {
-    "superseded": true,
-    "spec": "lnurl/luds 6e865b1, before derivation purposes (50d740a)",
-    "noteTweak": "tagged_hash(\"LNURLcash/derive\", P || chainCode || ser32_be(i)) mod n",
-    "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-    "host": "mint.example",
-    "cx1": "cx1jdcdmewar4hqgfnysxntnl2a2avtlz60c7fa5fq04udrgz58d0zd6h54qnwmdmhm47j26wcq44ppsk86ls8dn6j2hkwtdpunlpzulsgnm784k",
-    "notes": [
-      {
-        "index": 0,
-        "notePubkey": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
-        "cp1": "cp12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qesd2rcha",
-        "noteSecretKey": "e63e4e8109b3f54d1322942723fd786de2d56e2885f8098e2e9bd5067b2b6de0"
-      },
-      {
-        "index": 1,
-        "notePubkey": "2a1f9b556ca944e20f4281613c286f68f257f7d8b9dec18be5c79e2eae9dc3c6",
-        "cp1": "cp19g0ek4tv49zwyr6zs9snc2r0dre90a7ch80vrzl9c70zat5ac0rqmuurur",
-        "noteSecretKey": "cba6d9bf45839f3a409e9a3b8d2260a9489e4a5cea121eb2b65e31b8fe69288c"
-      },
-      {
-        "index": 2,
-        "notePubkey": "921e17ce875fe9eeb0ade22d99d2e3d830e58d05fbff61a65ddb279db461099a",
-        "cp1": "cp1jg0p0n58tl57av9dugken5hrmqcwtrg9l0lkrfjamvnemdrppxdqkcf7yv",
-        "noteSecretKey": "4161e80150c8019d51e97c13c8c288ae5fbdfddfab4444ef0df221d8b1561e02"
-      }
-    ]
-  },
   "certificates": [
     {
-      "notePubkey": "25fc2fa155ee8161a63f60c7a3ce33b7d75be9e2c36386bfe177836a928509cd",
+      "notePubkey": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
       "amountMsat": 1000,
-      "message": "LNURLcash:1000:25fc2fa155ee8161a63f60c7a3ce33b7d75be9e2c36386bfe177836a928509cd",
-      "digest": "13c1a8b5b4b3efca9d982ce7f818a61557e4f025fc1f033cb08e3275b3cc114e",
-      "signature": "d72e469e3a5e3b53f92f1391fb16daa086c2a20e35c496426b99f4dabf8d245202beb413720c9e5a76d5367e0be05b5aa862e837d8d65b800df501d1fdb35e6501",
-      "cs1": "cs10n16uhyd836tca487f0zwglk9k65zrv9gswxhzfvsntn86d40udy3fq9045zdeqe8j6wm2nvlstupd442rzaqma34jmsqxl2qw3lke4uegpzzy8e2"
+      "message": "LNURLcash:1000:567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
+      "digest": "5dcf073c898ff84a5572e2cca1802c3f2af99056ff91b4fe665988de858f421d",
+      "signature": "aa6a9d8b66899a8648d09926e656a63121083e17d1dc1ffea4cb851a6d6a7ea72e2c5de90753dff5e5a69daa108b0e1accd66b7f2a3ca4c29c07bb79759b906100",
+      "cs1": "cs10n14f4fmzmx3xdgvjxsnynwv44xxysss0sh68wpll4yewz35mt206njutzaayr48hl4uknfm2ss3v8p4nxkddlj509yc2wq0wmewkdeqcgqqr4nqu"
     },
     {
-      "notePubkey": "1bc2acef7373cc39e2494dd614fb957ec04faed0d1648a5b710bed0c0d873b6c",
+      "notePubkey": "2a1f9b556ca944e20f4281613c286f68f257f7d8b9dec18be5c79e2eae9dc3c6",
       "amountMsat": 21000,
-      "message": "LNURLcash:21000:1bc2acef7373cc39e2494dd614fb957ec04faed0d1648a5b710bed0c0d873b6c",
-      "digest": "24a3bcf2f321e355503922cc9b26d168174cbd5dcc844588230ff9e8102fa41f",
-      "signature": "4d166b8e3d244f8590e2474b482edd52e203e4c2d485caa7d9748a320b4a90a23c39c55236e8007e3c30c7c191f413ed2bcbb23f137cae62e7a432fbc220420400",
-      "cs1": "cs210n1f5txhr3ay38cty8zga95stka2t3q8exz6jzu4f7ewj9ryz62jz3rcww92gmwsqr78scv0sv37sf7627tkgl3xl9wvtn6gvhmcgsyypqqjyw5r9"
+      "message": "LNURLcash:21000:2a1f9b556ca944e20f4281613c286f68f257f7d8b9dec18be5c79e2eae9dc3c6",
+      "digest": "5c179ebc83a43040bf44b2311ced7b2352df40389efd8998604dbc2011e16921",
+      "signature": "ab589fa75c395c61dc345091c529b07e1a8ca0d7ab63a0d142d60c46ee8353df7078911a4723b62a9065c4702b15c1e110bf2ee42756c272765ededc3a8743ef01",
+      "cs1": "cs210n14dvflf6u89wxrhp52zgu22ds0cdgegxh4d36p52z6cxydm5r200hq7y3rfrj8d32jpjuguptzhq7zy9l9mjzw4kzwfm9ahku82r58mcpr3lz8j"
     },
     {
-      "notePubkey": "d793f800fa9a3a8ce8ea7ac0bb8c585681d74522ee0e93c0a5e380b54762939f",
+      "notePubkey": "921e17ce875fe9eeb0ade22d99d2e3d830e58d05fbff61a65ddb279db461099a",
       "amountMsat": 99999,
-      "message": "LNURLcash:99999:d793f800fa9a3a8ce8ea7ac0bb8c585681d74522ee0e93c0a5e380b54762939f",
-      "digest": "e62fed46c50ab5fb4e189372459936e20ba711e147e09f236fa4c9b4ce3ad196",
-      "signature": "41b455b6f1cbaa3ddd189d3147f716a413c9b650b7f4e4686e26af1250fe7c887261f42de6a64cf19cff41fc7612781d05a0f4417e1bc2f1ae2daf3128f1b38000",
-      "cs1": "cs999990p1gx69tdh3ew4rmhgcn5c50ack5sfundjskl6wg6rwy6h3y5870jy8yc059hn2vn83nnl5rlrkzfup6pdq73qhux7z7xhzmte39rcm8qqq5ytkw0"
+      "message": "LNURLcash:99999:921e17ce875fe9eeb0ade22d99d2e3d830e58d05fbff61a65ddb279db461099a",
+      "digest": "d4faada6d87aca3d47f8674f54e2be80e4168cf7a3d23d4b459272fdd312b635",
+      "signature": "81f6cbf23b34a0d39d2fe6c064eb3b3f200596f8c0a53ce78d6cf954f1c1b36317e0ae0decb6c94a2ecd6947963067af0801ea6dfad45baf65ede918866eb33301",
+      "cs1": "cs999990p1s8mvhu3mxjsd88f0umqxf6em8usqt9hcczjneeuddnu4fuwpkd330c9wphktdj229mxkj3ukxpn67zqpafkl44zm4aj7m6gcsehtxvcp3grla4"
     },
     {
-      "notePubkey": "5a33d82d54ab2d9d1167b049a183d782c88dadd9341c2ebc4f1bdbf26d4b35f7",
+      "notePubkey": "2c769a88d11f866116384757ef90be35c7736d9be171400b3d51847d9c40afa7",
       "amountMsat": 100000000,
-      "message": "LNURLcash:100000000:5a33d82d54ab2d9d1167b049a183d782c88dadd9341c2ebc4f1bdbf26d4b35f7",
-      "digest": "be65786ac628ae5e767ea1828f1c1eee245802316e06b7ca91c0894797bc11cc",
-      "signature": "c6b34a98e7349e298111392c0f7d80347b457c50a8a3c1154510ae01fe994d4b475b3e733b74356eb5e103664c5d8928765589cf33e550f31f33b58ae5ac887b01",
-      "cs1": "cs1m1c6e54x88xj0znqg38ykq7lvqx3a52lzs4z3uz929zzhqrl5ef495wke7wvahgdtwkhssxejvtkyjsaj4388n8e2s7v0n8dv2ukkgs7cps3zjn7"
+      "message": "LNURLcash:100000000:2c769a88d11f866116384757ef90be35c7736d9be171400b3d51847d9c40afa7",
+      "digest": "ad1f446013fc599a8280e0186842650f0775817d112c31f540ab3911b0ad043f",
+      "signature": "31dfe2d77d565b078166bce3167ab51635fbb0f533b08570f70ed5ef55259bef20991fe6680c853f300ccc81ecd1e18532677f8269dc05be6fd2a7b10d710b8200",
+      "cs1": "cs1m1x80794ma2eds0qtxhn33v744zc6lhv84xwcg2u8hpm2774f9n0hjpxglue5qepflxqxveq0v68sc2vn807pxnhq9heha9fa3p4cshqsqgct004"
     }
   ],
   "addressProofs": [
     {
       "action": "register",
-      "domain": "mint.example",
       "username": "alice",
-      "message": "LNURLcash:register:mint.example:alice",
-      "digest": "f75cbb88d2a03d9401f3f06c8ae061e08918c7b937e7a0dadb9741a0817d4953",
-      "indexZeroSecretKey": "7c20d8b15ced3c7dd52aa7c852582338f68dfeae5b9b4c6f0807463eebad7f0b",
-      "indexZeroPubkey": "25fc2fa155ee8161a63f60c7a3ce33b7d75be9e2c36386bfe177836a928509cd",
-      "signature": "a3cd2d26cf4b05b645aa5dfb256f3f4493cd5863ac63baedf9f6c1ba211ff0294024ce69017feb07714eab07294b4f5128716388307c6b139bf0735742fbfe9a"
+      "message": "LNURLcash:register:alice",
+      "digest": "07511b102748f3a3614676386cf9ece7a5fcf11576df21d154bafbaeed77e7ae",
+      "indexZeroSecretKey": "e63e4e8109b3f54d1322942723fd786de2d56e2885f8098e2e9bd5067b2b6de0",
+      "indexZeroPubkey": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
+      "signature": "30667dadcea5310194c1eeac09a00ae3ebcff0cd14c78792ec5674d564a178cf25b4b552149672321076919d05d88cf07ab5e3ddbd3c98782c8761ef4de34622"
     },
     {
       "action": "unregister",
-      "domain": "mint.example",
       "username": "alice",
-      "message": "LNURLcash:unregister:mint.example:alice",
-      "digest": "40f483af32e4128bfa0c77d11a2e82fbca5bab00046b40c3f718257055ca5840",
-      "indexZeroSecretKey": "7c20d8b15ced3c7dd52aa7c852582338f68dfeae5b9b4c6f0807463eebad7f0b",
-      "indexZeroPubkey": "25fc2fa155ee8161a63f60c7a3ce33b7d75be9e2c36386bfe177836a928509cd",
-      "signature": "aac275bdabd2ad22b9f39211f008bf95752185004528911c4e2d9fdc04bc3e466eede0f4bde28acfb61a6b2164a84b5a6f4364dc2dfb26ca0fd5d7a397ee54ec"
+      "message": "LNURLcash:unregister:alice",
+      "digest": "a420c6e3107fb17638baf3b73d4f74f04312f331a4726f6e563a7d6aa3a5bba0",
+      "indexZeroSecretKey": "e63e4e8109b3f54d1322942723fd786de2d56e2885f8098e2e9bd5067b2b6de0",
+      "indexZeroPubkey": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
+      "signature": "2a82508acfb5ce1130e287e3c1ce53e16caa04a6b661d8ea81b1bdea95b8b08aec4188136e5c160628d34b4f5e98b7f98b0c53dc8cf19cab89c89270ab4b5bf1"
     },
     {
       "action": "register",
-      "domain": "mint.example",
       "username": "bob",
-      "message": "LNURLcash:register:mint.example:bob",
-      "digest": "6f1fcade95e7748f82989a20dc3a7f60322f3a6e0c841c4468bad6f00aafc08f",
-      "indexZeroSecretKey": "7c20d8b15ced3c7dd52aa7c852582338f68dfeae5b9b4c6f0807463eebad7f0b",
-      "indexZeroPubkey": "25fc2fa155ee8161a63f60c7a3ce33b7d75be9e2c36386bfe177836a928509cd",
-      "signature": "9ee0aa49a8af2bbed70ac7290eb4f0bb46f6c205774633e5171877e1c747cd2c40b47a632687265ed99cf335117567d504efe245bfdcaaade56cc66828e58865"
-    },
-    {
-      "action": "register",
-      "domain": "moneyer.dev",
-      "username": "alice",
-      "message": "LNURLcash:register:moneyer.dev:alice",
-      "digest": "3d4ee1a02222094d7be066c0c447e477ad77a497405db85f4ab33105bd676de1",
-      "indexZeroSecretKey": "7c20d8b15ced3c7dd52aa7c852582338f68dfeae5b9b4c6f0807463eebad7f0b",
-      "indexZeroPubkey": "25fc2fa155ee8161a63f60c7a3ce33b7d75be9e2c36386bfe177836a928509cd",
-      "signature": "96ac8262fcf0546a78bdbfb92be5fe3acd49750dda7bfe3b94caf3fcb050e392bc7480271051417b8624c55c9c609299d697f86f368480e0d40b48abe18a5157"
+      "message": "LNURLcash:register:bob",
+      "digest": "780902cb3e14e7fb81fc0a459939d7b9fee97398c1a1df9a5a075d005b6f10b9",
+      "indexZeroSecretKey": "e63e4e8109b3f54d1322942723fd786de2d56e2885f8098e2e9bd5067b2b6de0",
+      "indexZeroPubkey": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
+      "signature": "7a7bd40f123eb3878ce4df39d1324c51367c210ffe75c9a9c6ac468cb9b844f5476b152caea5007dbe2fa85ad7177137d7fe0dd2057e16a09163a280950c9e05"
     }
   ],
   "valid": [
     {
       "type": "cp1",
-      "value": "CP1YH7ZLG24A6QKRF3LVRR68N3NKLT4H60ZCD3CD0LPW7PK4Y59P8XSHFMY26",
-      "bytes": "25fc2fa155ee8161a63f60c7a3ce33b7d75be9e2c36386bfe177836a928509cd",
+      "value": "CP12E7XV2CA3NJKJWUUN6ZM4U4V3VEN69HFC33NMAXCEMNS7G9Y7QESD2RCHA",
+      "bytes": "567c662b1d8ce5693b9c9e85baf2ac8b333d16e9c4633df4d8cee70f20a4f033",
       "why": "all uppercase is the same string (BIP-350)"
     }
   ],
   "invalid": [
     {
       "type": "cp1",
-      "value": "ck1yh7zlg24a6qkrf3lvrr68n3nklt4h60zcd3cd0lpw7pk4y59p8xsd24g0m",
+      "value": "ck12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qeshfd5ju",
       "why": "the ck human-readable part on a cp1 payload"
     },
     {
       "type": "cp1",
-      "value": "cp1yh7zlg24a6qkrf3lvrr68n3nklt4h60zcd3cd0lpw7pk4y59p8xsqnjeq0w",
+      "value": "cp12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qesqg6g2sd",
       "why": "33 bytes, not 32"
     },
     {
       "type": "cp1",
-      "value": "cp1yh7zlg24a6qkrf3lvrr68n3nklt4h60zcd3cd0lpw7pk4y59p8xsz4tg0c",
+      "value": "cp12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qesckn5jl",
       "why": "a bech32 checksum, not bech32m"
     },
     {
       "type": "cp1",
-      "value": "cp1yh7zlg24a6qkrf3lvrr68n3nklt4h60zcd3cd0lpw7pk4y59p8xshfmy2q",
+      "value": "cp12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qesd2rchq",
       "why": "the checksum does not verify"
     },
     {
       "type": "cp1",
-      "value": "cp1yh7zlG24A6QKRF3LVrr68n3nklt4h60zcd3cd0lpw7pk4y59p8xshfmy26",
+      "value": "cp12e7xv2CA3NJKJWUUN6zm4u4v3ven69hfc33nmaxcemns7g9y7qesd2rcha",
       "why": "mixed case (BIP-350)"
     },
     {
       "type": "ck1",
-      "value": "cp1yh7zlg24a6qkrf3lvrr68n3nklt4h60zcd3cd0lpw7pk4y59p8xshfmy26",
+      "value": "cp12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qesd2rcha",
       "why": "a cp1 is not a ck1"
     },
     {
       "type": "ck1",
-      "value": "ck1syzuyfq69k9lps22zlj0rkvfalaxvsk8a5ukvnwp0c76mmhx4cruvxcfyzut06g35wn60j9vkxfht3q8jnuh6creynq4jg4gk9ec8vgc98u9q",
+      "value": "ck1shqsgqhwv7vamm62gvctugrjs70mchlakga5g69e03l22qtz4npc6elsh5vvdev7h6y9fulypat6zky0kmherx5kaaawsru80t3ulzshztwwv",
       "why": "64-byte signature without the 32-byte public key"
     },
     {
       "type": "cs1",
-      "value": "ck1yh7zlg24a6qkrf3lvrr68n3nklt4h60zcd3cd0lpw7pk4y59p8xczpwzysdzmzlsc99p0e83mxy7l7nxgtr76wtxfhqhu0ddamn2up7xrvyjpw9hayg68fa8ezktrym4csref7tavpujfs2ey25tzuurky6v82c7",
+      "value": "ck12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qectsgyqthx0xwaaa9yxv97ypeg08autl7myw6ydzuhcl49q932esudvlct6xxxuk0tazz570jq74aptz8mdmu3n2tw77hgp7rh4c703ghav8wl",
       "why": "a ck1 is not a cs1"
     },
     {
       "type": "cs1",
-      "value": "cs16uhyd836tca487f0zwglk9k65zrv9gswxhzfvsntn86d40udy3fq9045zdeqe8j6wm2nvlstupd442rzaqma34jmsqxl2qw3lke4uegp5mcp9s",
+      "value": "cs14f4fmzmx3xdgvjxsnynwv44xxysss0sh68wpll4yewz35mt206njutzaayr48hl4uknfm2ss3v8p4nxkddlj509yc2wq0wmewkdeqcgqk6f4ux",
       "why": "legacy fixed cs HRP carries no amount"
     },
     {
       "type": "cx1",
-      "value": "cx1yh7zlg24a6qkrf3lvrr68n3nklt4h60zcd3cd0lpw7pk4y59p8xserk95u",
+      "value": "cx12e7xv2ca3njkjwuun6zm4u4v3ven69hfc33nmaxcemns7g9y7qesrqwefm",
       "why": "32 bytes, not 64"
     }
   ]

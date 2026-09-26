@@ -13,12 +13,9 @@ vectors/index.json:
 signature.json       offline verification, both recovery-id orderings
 derivation.json      deterministic note secrets from a BIP39 seed
 cash-derivation.json LUD-25 m/139' note secrets, plus BIP-32 vector 1
-spec-vectors.json    25.md's own test vectors 1-5, every value checked against the spec text
-spends.json          the taproot model: bearer notes, ck1 per domain, a 3-leaf tree and its
-                     verdicts, a CHECKSIG leaf's sighash, time claims, leaf policy, bad cw1s
-part2.json           key-path notes: cp1, ck1=Q||BIP340 sig over the domain-bound sighash,
-                     cs1 over hex(Q), cx1, the note-key tweak per purpose, address proofs;
-                     m/139'/d1..d4; prePurpose = the superseded tweak, for sweeping only
+part2.json           Part 2: cp1, ck1=pubkey||BIP340 Schnorr sig, cs1=recoverable ECDSA certificate,
+                     cx1, the note-key tweak, ownership proofs and certificates;
+                     address path is the reference wallet's m/139'/1'/d1..d4 (not the text's)
 bech32.json          LUD-01 encoding
 url-admission.json   which URLs may be fetched (https, or http to loopback/.onion)
 input-resolution.json bech32, LUD-17, Lightning Address, bare domain
@@ -33,7 +30,7 @@ payment-request.json lnurlcashreq1: asking another holder for value
 settle-for-value.json the decision table for taking a note as payment
 retried-mutation.json what makes a repeat a retry, not a double-spend
 mint-to-hash.json    naming the note you are buying: h on the pay callback
-nostr-seed.json      EXTENSION: key-path branch from a Nostr key, HMAC-SHA256(key, "LNURLcash/nostr-seed")
+nostr-seed.json      EXTENSION: Part 2 branch from a Nostr key, HMAC-SHA256(key, "LNURLcash/nostr-seed")
 lifecycle.json       behavioural scenarios
 threat-suite.json    transport/exposure scorecard, options vs attacks (non-normative)
 
@@ -41,29 +38,18 @@ threat-suite.json    transport/exposure scorecard, options vs attacks (non-norma
 
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
 const mint = await createMockMint({dropAfterMutation: true})
-mint.state.creditNote(k1, 21000)   // k1: 64-hex preimage, ck1 or cw1
-mint.state.creditOutput(cp1, 21000) // or name it: a cp1 or a bearer note's hex h
+mint.state.creditNote(k1, 21000)   // then drive your client at mint.url
 await mint.close()
-
-Notes are keyed by hex(Q), every spend is verified in full (a ck1 against the
-hostname the mock was reached at, or domains=a,b), and every note gets a cs1
-over hex(Q). The mock evaluates only a bearer hashlock leaf, under any
-internal key and depth; any other script is refused as unverifiable.
 
 Misbehaviour flags: dropAfterMutation, unconfirmedMutation, malformedJson,
 echoWrongK1, lieAboutValue, signatureLayout=leading, signatures=false,
-certificateOverH, serverGeneratedSecrets, meltNeverSettles, meltAlwaysFails,
-slowMs, sunset, baseFeeMsat, feePpm, verify=false, withdrawLinkForm=lnurlw
-(the lnurlw:// spelling of withdrawLink; default is the plain https://, as
-lnurl-mint). The taproot rules: leafVersionUnchecked, opSuccessUnchecked,
-ignoresTimeClaims (true, or blockHeight/future/blockCount/relative),
-refusesLocktimes, unverifiedCk1, infoSkipsVerification, replayMatchesStrings,
-alreadyInUseReason=<text>, refusesCp1Outputs, acceptsOffCurveCp1,
-acceptsMissingP2.
+serverGeneratedSecrets, meltNeverSettles, meltAlwaysFails, slowMs, sunset,
+baseFeeMsat, feePpm, verify=false, withdrawLinkForm=lnurlw (the lnurlw://
+spelling of withdrawLink; default is the plain https://, as lnurl-mint).
 
-retriedMutation=replay is the default (a repeat of a mutation, matched on the
-notes it names, gets the original success back instead of "already spent");
-'refuse' is the non-compliant fixture.
+retriedMutation=replay (a byte-identical repeat of a mutation gets the
+original success back instead of "already spent"; the default 'refuse' is
+what the mock has always done).
 
 mintToHash=true (the pay callback takes an optional h - 64 lowercase hex,
 sha256 of a WALLET-chosen secret, the same thing h means on the withdraw
@@ -101,63 +87,13 @@ softly: a mint publishing none of them loses nothing, a published field of
 the wrong shape warns, and a signature under a key the mint publishes in
 previousPubkeys is accepted as its own.
 
---spend grades LUD-25 as of luds 50d740a. Besides the rotate, split, merge,
-retry and refusal checks it moves the value through a three-leaf script tree
-(a hashlock at leaf version 0xc0, the same at 0xc2, a hashlock with
-OP_SUCCESS80) and a key-path note, and requires: the 0xc2 and OP_SUCCESS
-leaves refused; block-height, future, block-count and unelapsed relative time
-claims refused and a past locktime accepted; a ck1 for another domain refused
-at the callback and the informational GET; the right-domain ck1 accepted; a
-p1 naming a burned note refused as exactly "already in use"; a retry respelt
-(preimage vs full cw1, h vs cp1) replayed. A missing cs1 warns (SHOULD); a
-cs1 not over hex(Q) fails. Certificates are read from c and c2 only; a mint
-sending only the pre-50d740a sig/sig2 is graded uncertified (warns), and one
-sending both names passes. --address reads the internal-transfer hint from
-text/cpub (text/xpub before 50d740a is not read). Value always comes home.
+## The signature scheme, canonically
 
-## Notes and spends, canonically (luds 6e865b1, keys per 50d740a)
-
-Q        32-byte x-only taproot output key; cp1<Q> (bech32m, hrp "cp"), and
-         a mint MUST refuse a Q that is not on the curve
-ck1      Q || BIP-340 sig (96 bytes), zero aux_rand, over the key-path sighash
-cw1      u32 locktime || u32 sequence || (u16 len || item)* over the leaf
-         script, the control block, then witness items bottom first; all
-         big-endian
-bearer   leaf a8 20 <h> 87 (OP_SHA256 <h> OP_EQUAL), version 0xc0, internal key
-         BIP-341's NUMS point
-         H = 50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0;
-         64 hex in a k1 slot = the preimage, in a cp1 slot (comment, p1, p2,
-         ?p=) = h
-sighash  tagged_hash("TapSighash", 0x00 || SigMsg), SIGHASH_DEFAULT, input 0 of:
-         nVersion 2; prevout (tagged_hash("LNURLcash/mint", domain), 0); empty
-         scriptSig; nSequence as claimed (0xffffffff for a key path); one
-         output, value 0, empty script; nLockTime as claimed (0 for a key
-         path); spent output (OP_1 <Q>, 0)
-domain   the mint's lowercase hostname: no scheme, no port
-leaves   refuse leaf version != 0xc0 and any OP_SUCCESSx outside pushed data
-derive   t = tagged_hash("LNURLcash/derive", P || chaincode || ser32(purpose) ||
-         ser32(i)) mod n; pk_i = x(lift_x(P) + t·G). purpose 0 = the wallet's
-         own notes (mint, rotate, merge, a split's p1), 1 = a split's change p2,
-         2 = Lightning Address auto-mint and internal transfer. One counter and
-         one recovery gap limit per purpose; one cx1 covers all three. The
-         register/unregister proof signs with purpose 0, index 0
-time     nLockTime 0, or a Unix time (>= 500000000) not in the future;
-         nSequence with bit 31 set, or bit 22 set and (low 16 bits * 512 s)
-         elapsed since the mint credited the note; heights and block counts
-         refused
-
-## Certificates, canonically
-
-message = "LNURLcash:" + amount_msat + ":" + hex(Q)      // every note, bearer too
+note_id = hex(sha256(k1))
+message = "LNURLcash:" + amount_msat + ":" + note_id
 digest  = sha256(sha256("Lightning Signed Message:" + message))
 sig     = 65 bytes, r || s || recovery_id (wire format)
-cs1     bech32m, hrp "cs" + BOLT-11 amount (cs10n = 1000 msat), over sig
-pubkey  = mintPubkey, 33-byte compressed, hex
-wire    JSON "c" (and "c2" for a split's change) on the informational GET and
-        every rotate, split or merge; note URL ...?k1=<spend>&c=<cs1>. These
-        were sig, sig2 and &sig= before luds 50d740a
-hint    payRequest metadata ["text/cpub", "cx1...:<i>"], i the purpose-2
-        counter (text/xpub before luds 50d740a)
+pubkey  = 33-byte compressed, hex
 
 Recover from digest with NO further hashing (prehash off). Verifiers MUST
 also accept recovery_id || r || s. Library layouts differ:
@@ -184,11 +120,12 @@ the request. Full table in settle-for-value.json.
 
 ## Naming the note you are buying
 
-LUD-25 names the note a payment mints in the mandatory LUD-12 comment:
-cp1<Q>, or a bearer note's hex h. The payment preimage is settlement proof,
-never the money. As an older, additive spelling a WALLET MAY also send
-h=<64 lowercase hex> on the LUD-06 pay callback, repeating the comment's h;
-the SERVICE credits the note there and the preimage opens nothing. Support is
+In LUD-25 a minted note's k1 is the payment preimage, so the preimage IS
+the money, and two sets of untrusted people learn it: every routing node
+on the payment path, and anyone who saw the invoice and polled LUD-21
+verify with its payment hash. A WALLET MAY instead send h=<64 lowercase
+hex> on the LUD-06 pay callback, the sha256 of a secret it chose; the
+SERVICE credits the note there and the preimage opens nothing. Support is
 advertised as mintToHash: true in three places - the payRequest (every
 mint has one, so decide from this), the mint address document (the same
 fact, corroboration), and the pay callback's own response (this quote was
@@ -214,16 +151,15 @@ docs/BOUND-MINT-RECEIPTS.md.
 ## The retried mutation
 
 Every mutation is a GET, and HTTP stacks retry a GET on a dropped
-connection, so a SERVICE sees the same request twice with its inputs
+connection, so a SERVICE sees the identical request twice with its inputs
 burned the second time. Answering "already spent" makes the holder discard
-the only copy of a spend the SERVICE really did mint against. The same
-request = the same SET of notes burned + same p1 + same p2 + same amount,
-compared as the Qs they decode to, never the strings (one note has several
-spellings: preimage or full cw1, h or cp1). Anything else naming a burned
-input is a double-spend and keeps today's refusal, so no oracle appears.
-Provenance is recorded, not inferred. The replay is a READ: nothing burns,
-nothing mints, the same certificates come back. A MUST: the grader fails a
-mint that refuses it. Table in retried-mutation.json.
+the only copy of a secret the SERVICE really did mint against. Identical =
+same input k1 SET + same h + same h2 + same amount, present or absent
+alike. Anything else naming a burned input is a double-spend and keeps
+today's refusal, so no oracle appears. Provenance is recorded, not
+inferred. The replay is a READ: nothing burns, nothing mints, the sig is
+recomputed from (output id, amount). SHOULD, not MUST: the grader reports
+it as unimplemented rather than failing. Table in retried-mutation.json.
 
 ## Fee arithmetic
 

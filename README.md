@@ -48,9 +48,7 @@ for (const c of cases) {
 | `signature.json` | offline verification, both recovery-id orderings, malformed input |
 | `derivation.json` | deterministic note secrets from a BIP39 seed |
 | `cash-derivation.json` | LUD-25's seed-recoverable note secrets under `m/139'`, with BIP-32's own vector 1 |
-| `spec-vectors.json` | LUD-25's own published test vectors 1-5, transcribed: derivation, the domain-bound address proof, a key-path `ck1` with every `SigMsg` field, a mint certificate, and a bearer note from `h` to `cw1` |
-| `spends.json` | the unified taproot model: bearer notes, `ck1`s across domains, a three-leaf script tree with its control blocks and verdicts, a `CHECKSIG` leaf's script-path sighash, time claims, leaf policy, malformed `cw1`s and the short forms |
-| `part2.json` | key-path notes: `cp1`, the domain-bound `ck1`, amount-bearing `cs1` certificates over `hex(Q)`, `cx1`, the per-note key tweak and address proofs, on the `m/139'/d1..d4` address path |
+| `part2.json` | Part 2: `cp1`, 96-byte-payload Schnorr `ck1`, amount-bearing recoverable-ECDSA `cs1`, `cx1`, the per-note key tweak, ownership proofs and mint certificates, on the reference wallet's `m/139'/1'` address path |
 | `bech32.json` | LUD-01 encoding, round trips, corrupted checksums |
 | `url-admission.json` | which URLs may be fetched, and why `data:` must never be |
 | `input-resolution.json` | bech32, LUD-17, Lightning Addresses, bare domains |
@@ -65,14 +63,13 @@ for (const c of cases) {
 | `settle-for-value.json` | the decision table a server works through to take a note as payment |
 | `retried-mutation.json` | what makes a repeated mutation a retry rather than a double-spend |
 | `mint-to-hash.json` | additive `mintToHash` compatibility and optional bound LUD-21 receipts; not baseline LUD-25 |
-| `nostr-seed.json` | a key-path address branch rooted in a Nostr identity key, for a holder with no BIP39 words (heartwood-esp32, lnurlcash-kit), with domain-bound `ck1`s; an extension, not LUD-25 |
+| `nostr-seed.json` | a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words (heartwood-esp32, lnurlcash-kit); an extension, not LUD-25 |
 | `lifecycle.json` | behavioural requirements, as scenarios to drive |
 | `threat-suite.json` | the transport/exposure scorecard — candidate spec options against fixed attacks (non-normative) |
 
 Regenerate with `npm run generate`; check them with `npm test`, which
 verifies every digest recomputes, every declared signature really does
-verify, every fee expectation follows from the formula, and every value in
-`spec-vectors.json` is the hex 25.md itself publishes.
+verify, and every fee expectation follows from the formula.
 
 The upstreamable wire text and compatibility matrix for the optional receipt
 are in [`docs/BOUND-MINT-RECEIPTS.md`](docs/BOUND-MINT-RECEIPTS.md).
@@ -98,9 +95,8 @@ must survive:
 | `--echoWrongK1` | answers the informational GET with a different `k1` |
 | `--lieAboutValue=N` | reports a `maxWithdrawable` it never signed |
 | `--signatureLayout=leading` | emits the recovery id at the other end |
-| `--signatures=false` | certifies nothing. LUD-25 has a mint certify every note with a `cs1` over `hex(Q)` as a SHOULD, so the grader warns |
-| `--certificateOverH` | certifies a bearer note over its `h`, the pre-taproot message, instead of `hex(Q)` |
-| `--serverGeneratedSecrets` | hands back a secret it generated: the exposure `p1`/`p2` exist to close |
+| `--signatures=false` | issues no optional Part 1 signatures. Unsigned plain-hash outputs are conforming; Part 2 `cp1` outputs still require certificates |
+| `--serverGeneratedSecrets` | hands back a secret it generated — the exposure `h` exists to close |
 | `--meltNeverSettles` | holds every melt in flight, so notes stay `pending` |
 | `--meltAlwaysFails` | fails every payment, restoring the note |
 | `--slowMs=N` | delays every response |
@@ -109,20 +105,10 @@ must survive:
 | `--roundFeeToSat` | rounds the withheld fee up to a whole sat — the note mints short of the formula |
 | `--verifyLeaksEarly` | serves a preimage before settlement, falsely claiming payment proof before payment happened |
 | `--retriedMutation=refuse` | deliberately answers an identical mutation retry as already spent instead of replaying its original success |
-| `--replayMatchesStrings` | matches a retry on the raw `k1`/`p1`/`p2` strings, so the same spend spelt another way is refused as already spent |
-| `--alreadyInUseReason=<text>` | refuses a `p1`/`p2` naming a note already in use with some reason other than LUD-25's exact `already in use` |
-| `--leafVersionUnchecked` | accepts a leaf version other than `0xc0`, as consensus alone would |
-| `--opSuccessUnchecked` | accepts a leaf carrying an `OP_SUCCESSx` opcode |
-| `--ignoresTimeClaims[=rule,...]` | ignores a script path's time claim: every rule, or `blockHeight`, `future`, `blockCount`, `relative` |
-| `--refusesLocktimes` | over-strict: refuses every non-zero locktime, a past Unix time included |
-| `--unverifiedCk1` | accepts any `ck1` whose `Q` is outstanding without checking its signature, so one bound to another domain opens the note |
-| `--infoSkipsVerification` | answers the informational GET for a `k1` from its `Q` alone, never verifying the spend |
-| `--refusesCp1Outputs` | refuses a `cp1` wherever one may go, as a mint without key-path notes does |
-| `--acceptsOffCurveCp1` | accepts a `cp1` whose key is not a curve point |
-| `--hashLookup=echoesK1` | answers a lookup by `p` but puts a `k1` back in the response |
-| `--hashLookup=answersUnknown` | answers a lookup by `p` for a note it never registered |
-| `--hashLookup=hidesSpent` | incorrectly reports a retained spent note as unknown |
-| `--hashLookup=acceptsBoth` | accepts `k1` and `p` together |
+| `--hashLookup=echoesK1` | offers hash lookup but puts a `k1` back in the response |
+| `--hashLookup=answersUnknown` | offers hash lookup but invents a note for an unknown hash |
+| `--hashLookup=hidesSpent` | incorrectly reports a retained spent hash as unknown |
+| `--hashLookup=acceptsBoth` | offers hash lookup but accepts `k1` and `h` together |
 | `--mintToHashAcceptsMalformedH` | claims `mintToHash` and invoices an `h` that is not 64 lowercase hex, so a wallet pays for a quote the mint will refuse |
 | `--mintToHashAcceptsUsedH` | claims it and invoices an `h` that already names a note, an invoice or another quote's output |
 | `--mintToHashIgnoresH` | claims it but accepts `h` and mandatory `comment` naming different outputs |
@@ -131,18 +117,9 @@ The three `mintToHash*` misbehaviours need `--mintToHash` alongside them;
 on their own they do nothing, because a mint that never offered the
 capability cannot misuse it.
 
-The lookup by `p` (a `cp1`, or a bearer note's hex `h`; `?h=` is still read as
-its older name) keeps the spend off the wire but reports spent state:
-`--hashLookup=true` distinguishes a burned note from an unknown one. The older
+Hash lookup keeps the spending secret off the wire but reports spent state:
+`--hashLookup=true` distinguishes a burned hash from an unknown hash. The older
 `--hashLookup=revealsSpent` spelling remains an alias for this compliant behaviour.
-
-The mock keys every note by its taproot output key `Q` and verifies every
-spend it is handed: a `ck1` against the key-path sighash for the hostname it
-was reached at (or `--domains=a,b`), and a `cw1` by the leaf rules, the time
-rules against its own clock, and then the script. It has no script
-interpreter, so of the scripts themselves it judges only a bearer hashlock
-(under any internal key, at any depth) and refuses any other as one it
-cannot verify.
 
 The remaining flags enable optional features, legal wire variants, or make a
 conforming default explicit. Optional fields stay absent unless requested:
@@ -159,7 +136,7 @@ conforming default explicit. Optional fields stay absent unless requested:
 | `--previousPrivateKey=<hex>` | an old signing key the mock still holds. Its public half joins `previousPubkeys` on its own |
 | `--signWithPreviousKey` | issues every note under that old key while still advertising the new one: the mid-rotation state a mint passes through when the advertisement moves before the signer |
 | `--retriedMutation=replay` | answers a byte-identical repeat of a mutation with the original success. This is the conforming default; use `refuse` only as an adversarial fixture |
-| `--hashLookup=false` | models an older SERVICE with no lookup by `p`, which LUD-25 now makes a MUST |
+| `--hashLookup=false` | models an older SERVICE with no secret-free informational lookup. The current reference mock accepts `h=sha256(k1)` by default |
 | `--mintToHash` | accepts `h` alongside the mandatory identical comment and enables the additive quote/receipt fields. Off by default; baseline comment-bound minting remains on |
 | `--mintReceipt` | with `--mintToHash`, adds the optional quote commitment and signed LUD-21 settlement receipt |
 | `--mintToHashAdvertisedOn=quote` | narrows which of the three places claim it (`payRequest`, `mintAddress`, `quote`); all three by default. Changes only what is claimed, never what the mint does |
@@ -175,14 +152,11 @@ mint.state.creditNote(k1, 21000)
 await mint.close()
 ```
 
-`mint.state` exposes `creditNote`, `creditOutput`, `noteState`, `settleMelt`,
-`failMelt` and the raw note and invoice maps (notes keyed by `hex(Q)`), so a
-test can assert what the SERVICE actually did rather than what it said.
-`creditNote` takes any spend of the note (a 64-hex preimage, a `ck1` or a
-`cw1`); `creditOutput` takes what names it (a `cp1` or a bearer note's hex
-`h`). `creditNote(k1, amount, {previousKey: true})` certifies that one note
-under `previousPrivateKey`, which is how a case puts one note under the old
-signing key and the rest under the new.
+`mint.state` exposes `creditNote`, `noteState`, `settleMelt`, `failMelt` and
+the raw note and invoice maps, so a test can assert what the SERVICE
+actually did rather than what it said. `creditNote(k1, amount, {previousKey:
+true})` signs that one note under `previousPrivateKey`, which is how a case
+puts one note under the old signing key and the rest under the new.
 
 ## The grader
 
@@ -193,14 +167,14 @@ npx lnurlcash-conform mint@example.com
 Read-only by default: resolves the payRequest, checks the `withdrawLink`
 (either legal spelling, and the report says which one the mint uses),
 the fee advertisement, invoice amounts, mandatory `commentAllowed: 64`,
-pre-invoice rejection of missing or malformed mint comments (a `cp1` whose
-key is not on the curve among them), whether an unknown note is reported
-distinguishably from a spent one, and the experimental mint address.
+pre-invoice rejection of missing or malformed mint comments, whether an
+unknown note is reported distinguishably from a spent one, and the
+experimental mint address.
 
-Current LUD-25 minting is always comment-bound. The wallet names the note it
-is buying as `comment=cp1<Q>`, or as a bearer note's hex `h`, and the payment
-preimage remains ordinary settlement proof. A mint that cannot accept either
-spelling, or that silently creates a preimage-backed note, fails grading.
+Current LUD-25 minting is always comment-bound. The wallet persists a secret,
+sends `comment=hex(sha256(secret))`, and the payment preimage remains ordinary
+settlement proof. A mint that cannot accept the 64-character commitment, or
+that silently creates a preimage-backed note, fails grading.
 
 `mintToHash` is retained as an additive compatibility field. When advertised,
 the runner sends `h` alongside the mandatory comment and requires both to name
@@ -252,52 +226,27 @@ Both are still read-only. The full run spends:
 npx lnurlcash-conform mint@example.com --note='lnurlw://...?k1=...' --spend
 ```
 
-It burns the note it is given and prints where the value ended up. The
-note's `k1` may be any spend of it: a bearer note's 64-hex preimage, a `ck1`
-or a `cw1`. It grades LUD-25 as of the unified taproot model (luds
-`6e865b1`), where every note is a taproot output key `Q`, with the
-derivation purposes and certificate names of luds `50d740a`: certificates
-are read from `c` and `c2`, and a mint that also sends the older `sig` and
-`sig2` is not faulted for it.
-
-On the note as given it checks that the informational GET is idempotent,
-echoes the queried `k1` and ignores the URL's own `amount`; that a lookup by
-`p` answers by the note's `cp1` and by its hex `h`, with no `k1` in the reply,
-and tells a spent note from an unknown one; that a rotate with no `p1` and a
-split with no `p2` are refused; that a rotate returns no secret; that split
-and merge conserve value, exactly under LUD-25's fee algebra when the fee is
-known; and that a retried mutation is answered with the original success,
-byte for byte and when the retry spells the same spend (preimage or full
-`cw1`) or the same output (`h` or `cp1`) another way, while a burned note
-cannot be spent again. It probes the shapes a mint must refuse atomically:
-one note named twice in a merge, in the same or two spellings (a careless mint
-counts it twice, minting money from nothing); a `p1` naming the burned note
-it was given, which must be refused as exactly `already in use`; a split
-whose `p1` and `p2` name one note; a split leaving change short of the base
-fee (`insufficient value`); and the callback replayed as a POST and as an
-OPTIONS preflight, since the mutating endpoint must answer GET only.
-
-Then it moves the value through two notes of its own. The first is a
-three-leaf script tree under an internal key it holds: a bearer hashlock at
-leaf version `0xc0`, the same shape at `0xc2`, and a hashlock followed by
-`OP_SUCCESS80`. It is funded by the full `cw1` of a bearer note, which must be
-the same spend as its preimage. On it the grader shows that a leaf version
-other than `0xc0` and an `OP_SUCCESS` leaf are refused, and that time claims
-are judged by the mint's own clock: a block-height locktime, a locktime in the
-future, a block-count relative lock and an unelapsed relative time lock are
-refused, and a locktime already past is accepted. The second is a key-path
-note, `cp1<Q>` with `Q` untweaked as a seeded wallet makes them: a `ck1`
-signed for another domain is refused at the callback, the informational GET
-refuses it and a `ck1` signed by another key, and the `ck1` bound to the note
-URL's own hostname spends it.
-
-Every refusal is confirmed to have left the value where it was, and every
-path has a way home (the tree's hashlock leaf, then its key path), so a
-compliant run ends holding a bearer note worth what it started with.
-Certificates are a SHOULD: a missing `cs1` warns, but every `cs1` returned,
-on a mutation or on the informational GET, must verify over `hex(Q)` and the
-note's value, and one over a bearer note's `h` (the pre-taproot message)
-fails. Use a small note. Exit code is non-zero if anything failed.
+It burns the note it is given and prints where the value ended up. It
+checks that the informational GET is idempotent and echoes the queried
+`k1`, that the URL's own `amount` is ignored, that a rotate with no `h` is
+refused, that a rotate returns no secret, that signatures verify against the
+advertised `mintPubkey` or any key the mint still publishes as a previous
+one, that split and merge conserve value - exactly,
+under LUD-25's fee algebra, when the mint's fee advertisement is known -
+that a byte-identical repeat of a mutation is answered with the original
+success rather than as an already-spent input, and that a
+burned secret cannot be replayed. It also probes three adversarial shapes a
+mint must refuse atomically: a duplicated `k1` (which a careless mint counts
+twice, minting money from nothing), an output hash that collides with an
+existing note id (minting over it hands the output to whoever already knows
+that id's preimage), a split whose `h` equals `h2` (one id cannot carry
+two notes), a split naming only one output hash (a mint that accepts it is
+generating the change secret itself), and a split leaving change one msat
+short of the advertised base fee (which LUD-25 says to refuse with
+`insufficient value`, not to serve at a loss). And it replays the callback as a POST and as an OPTIONS
+preflight - real HTTP stacks send both on their own initiative, so the
+mutating endpoint must answer GET only. After every refusal it confirms the refused note is still
+spendable. Use a small note. Exit code is non-zero if anything failed.
 
 **What the grader cannot reach.** It never melts. Melting spends real sats
 against a real mint, which is not something a grading tool may decide to do,

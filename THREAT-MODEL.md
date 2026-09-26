@@ -41,19 +41,10 @@ loopback by default. Treat it as a fixture, because that is all it is.
 ## The grader
 
 **Its full mode spends.** `--note=... --spend` burns the note it is given: it
-rotates it, splits it, merges the halves back, moves the value through a
-script-tree note and a key-path note of its own, and prints where the value
-ended up. If the run dies partway, the value is in a spend only that process
+rotates it, splits it, merges the halves back, and prints where the value
+ended up. If the run dies partway, the value is in a secret only that process
 knew, and it is gone. Use a small note. The `--spend` flag exists so this
 cannot happen by accident.
-
-**It never probes a way to lose the value.** Every note it moves the value
-into is one it holds a spend of, the script tree has two ways home (a
-hashlock leaf, then its key path), and a mint that wrongly accepts a probe
-lands the value in a note the grader can still spend. The one rule it will
-not probe with the note is a `cp1` whose key is off the curve: a mint that
-credited that would destroy the value outright, so it is graded on a mint
-comment, before any invoice exists, instead.
 
 **Its read-only mode still makes real requests** to whatever service you name,
 including asking for an invoice. That is a request a mint may log or rate-limit.
@@ -62,21 +53,13 @@ including asking for an invoice. That is a request a mint may log or rate-limit.
 anywhere, http only for loopback and `.onion` — applies here, so a grader run
 cannot be redirected onto a plaintext connection carrying a note secret.
 
-**Its spend mode probes adversarial shapes on purpose.** A duplicated `k1`
-(also as one note's preimage and its full `cw1`), a `p1` naming a burned note,
-a split whose `p1` and `p2` name one note, leaves that use tapscript's upgrade
-hooks, time claims no mint clock should honour, and a `ck1` signed for another
-domain are all sent to the service under grade, expecting atomic refusals. A
-compliant mint refuses and the note is untouched (the grader confirms this
-after every refusal); a non-compliant one has just demonstrated a
-fund-inflation, note-planting or theft defect on the note the operator chose
-to spend, which is exactly what the flag consented to.
-
-**Its key-path spends are bound to the mint graded.** Every `ck1` it signs
-commits to the note URL's own hostname, so a signature a mint under grade
-logs cannot be replayed at any other mint. It signs nothing over the
-deprecated fixed message except, as a last resort, to bring the value home
-from a mint that reads nothing else.
+**Its spend mode probes adversarial shapes on purpose.** A duplicated `k1`, an
+output hash that collides with an existing note id, and a split whose `h`
+equals `h2` are all sent to the service under grade, expecting atomic
+refusals. A compliant mint refuses and the note is untouched (the grader
+confirms this after every refusal); a non-compliant one has just demonstrated
+a fund-inflation or note-planting defect on the note the operator chose to
+spend — which is exactly what the flag consented to.
 
 ## What these vectors do not cover
 
