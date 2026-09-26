@@ -4,7 +4,7 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
-## 0.14.0 - 2026-09-26
+## 0.15.0 - unreleased
 
 **LUD-25's unified taproot model** (luds `6e865b1`, "unified taproot
 verification"). Every note is now a BIP-341 output key `Q`, named `cp1<Q>`,
