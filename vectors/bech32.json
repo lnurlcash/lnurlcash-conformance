@@ -1,7 +1,7 @@
 {
   "version": 1,
   "spec": "LUD-01",
-  "description": "bech32 encoding of LNURLs. The hrp is \"lnurl\"; the limit is raised well above bech32 default because a note URL carrying k1, amount and c is long.",
+  "description": "bech32 encoding of LNURLs. The hrp is \"lnurl\"; the limit is raised well above bech32 default because a note URL carrying k1, amount and sig is long.",
   "encode": [
     {
       "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

@@ -10,24 +10,10 @@ import {sha256} from '@noble/hashes/sha2.js'
 import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {randomBytes} from 'node:crypto'
-import {
-  bearerLeaf,
-  bearerNote,
-  bearerSpend,
-  decodeSpend,
-  encodeCk1,
-  encodeCp1,
-  isXOnlyPoint,
-  keyPathSpend,
-  scriptTree,
-  tweakSecretKey
-} from './spend.mjs'
-
-export {keyPathSpend}
 
 const noteId = k1 => bytesToHex(sha256(hexToBytes(k1)))
 
-// The "Lightning Signed Message" digest every LUD-25 certificate is over.
+// The "Lightning Signed Message" digest every LUD-25 signature is over.
 const signedMessageDigest = message =>
   sha256(sha256(new Uint8Array([...utf8ToBytes('Lightning Signed Message:'), ...utf8ToBytes(message)])))
 
@@ -51,17 +37,28 @@ const recoversTo = (digest, sig, pubkeyHex) => {
   return false
 }
 
-// A certificate: cs1 over "LNURLcash:<amount_msat>:<hex(Q)>". Every note
-// has a public Q, a bearer note included, so this is the one message a
-// certificate signs (luds 6e865b1). `subjectHex` is hex(Q), or a bearer
-// note's h when the grader is naming the pre-taproot mistake.
-const verifyCertificate = (subjectHex, amountMsat, sig, mintPubkeyHex) =>
-  recoversTo(signedMessageDigest(`LNURLcash:${amountMsat}:${subjectHex}`), sig, mintPubkeyHex)
+// The legacy raw Part 1 signature over a note's hash. Current reference mints
+// issue one when a signer is available, and every one received must be true.
+const verifySignature = (k1, amountMsat, signatureHex, pubkeyHex) => {
+  let sig
+  try {
+    sig = hexToBytes(signatureHex)
+  } catch {
+    return false
+  }
+  return recoversTo(signedMessageDigest(`LNURLcash:${amountMsat}:${noteId(k1)}`), sig, pubkeyHex)
+}
 
-// cs1 and cx1 are bech32m. cs1 has a variable HRP: "cs" plus the amount
-// under BOLT-11's amount rules. Longer than BIP-173's 90 characters by
-// design.
+// A Part 2 certificate: cs1 over the note's raw x-only public key.
+const verifyCertificate = (pubkeyHex32, amountMsat, sig, mintPubkeyHex) =>
+  recoversTo(signedMessageDigest(`LNURLcash:${amountMsat}:${pubkeyHex32}`), sig, mintPubkeyHex)
+
+// Part 2's bech32m strings: cp1 (32-byte key), ck1 (32-byte key plus 64-byte
+// Schnorr signature), and cs1 (65-byte recoverable ECDSA signature). cs1 has
+// a variable HRP: "cs" plus the amount under BOLT-11's amount rules. Longer
+// than BIP-173's 90 characters by design.
 const BECH32M_LIMIT = 200
+const encodeCash = (hrp, bytes) => bech32m.encode(hrp, bech32m.toWords(bytes), BECH32M_LIMIT)
 const decodeCash = (hrp, value, length) => {
   if (typeof value !== 'string') return null
   try {
@@ -93,17 +90,15 @@ const decodeCertificate = value => {
   return signature ? {amountMsat, signature} : null
 }
 
-// An x that is on no curve point: the cp1 of it names a note nobody could
-// ever spend, which LUD-25 has a SERVICE refuse wherever a cp1 goes. Probed
-// only as a mint comment, before any invoice exists: as a p1 it would
-// destroy the note under grade on a mint that got it wrong.
-const OFF_CURVE_CP1 = (() => {
-  for (let i = 1; ; i++) {
-    const x = new Uint8Array(32)
-    x[31] = i
-    if (!isXOnlyPoint(x)) return encodeCp1(x)
-  }
-})()
+// The bearer secret of a cp1 note: its x-only key followed by a BIP-340
+// Schnorr signature over sha256("LNURLcash"), the 32-byte digest part2.json
+// signs (luds#6de59b2). A mint may still read the raw-message form, but a
+// grader that only ever sends that form cannot tell whether it reads this one.
+export const ownershipProof = secretKey => {
+  const pubkey = schnorr.getPublicKey(secretKey)
+  const signature = schnorr.sign(sha256(utf8ToBytes('LNURLcash')), secretKey)
+  return encodeCash('ck', new Uint8Array([...pubkey, ...signature]))
+}
 
 // LUD-17: lnurlw://host/path is https://host/path, or http:// when the host
 // is an onion service (the spec) or loopback (development). A plain
@@ -265,8 +260,7 @@ export const parseAdvertisedMintFee = metadata => {
 }
 
 // A registered Part 2 address advertises the safe-to-share branch and its
-// best-known next purpose-2 index as ["text/cpub", "cx1...:<i>"] (named
-// text/xpub before luds 50d740a, which is no longer read). Parsing it here
+// best-known next index as ["text/xpub", "cx1...:<i>"]. Parsing it here
 // makes --address assert the actual discovery signal rather than merely
 // trusting the operator's flag.
 export const parseInternalTransferHint = metadata => {
@@ -278,7 +272,7 @@ export const parseInternalTransferHint = metadata => {
   }
   if (!Array.isArray(entries)) return null
   for (const entry of entries) {
-    if (!Array.isArray(entry) || entry[0] !== 'text/cpub' || typeof entry[1] !== 'string') continue
+    if (!Array.isArray(entry) || entry[0] !== 'text/xpub' || typeof entry[1] !== 'string') continue
     const sep = entry[1].lastIndexOf(':')
     if (sep < 0) continue
     const cx1 = entry[1].slice(0, sep)
@@ -390,8 +384,8 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
   if (registeredAddress) {
     await report.check('advertises its cx1 and next index for internal transfers', async () => {
       const hint = parseInternalTransferHint(pay.metadata)
-      assert(hint, 'no valid ["text/cpub", "cx1...:<i>"] metadata entry (text/xpub is its name before luds 50d740a)')
-      return `purpose-2 index ${hint.index}`
+      assert(hint, 'no valid ["text/xpub", "cx1...:<i>"] metadata entry')
+      return `index ${hint.index}`
     })
   }
 
@@ -751,10 +745,7 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
       ['not hex', 'z'.repeat(64)],
       ['a character short', '0'.repeat(63)],
       ['a character long', '0'.repeat(65)],
-      ['empty', ''],
-      // LUD-25: a cp1 whose Q is not the x coordinate of a curve point
-      // names a note no spend could ever open, and MUST be refused.
-      ['a cp1 whose key is not on the curve', OFF_CURVE_CP1]
+      ['empty', '']
     ]
 
     for (const spelling of probed) {
@@ -782,19 +773,6 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
           `issued an invoice for a comment that is ${what} - current LUD-25 requires a well-formed wallet commitment before invoice creation`
         )
       }
-    }
-
-    // The canonical spelling of the comment is cp1<Q>; the 64-hex h probed
-    // above is only a bearer note's short form. A note keyed from a seed
-    // has nothing but its cp1, so a mint taking only hex cannot mint one.
-    // An address is left out, as for the malformed values: what it does
-    // with a comment naming an output is its own branch's business.
-    if (!registeredAddress) {
-      const keyed = await quoteAt('comment', encodeCp1(schnorr.getPublicKey(secp256k1.utils.randomSecretKey())))
-      assert(
-        keyed.status !== 'ERROR' && typeof keyed.pr === 'string',
-        `refused a comment naming its note as cp1<Q>: ${keyed.reason} - LUD-25 mints to a cp1 or a bearer note's hex h, and a note keyed from a seed has only the first`
-      )
     }
 
     // The malformed loop can only probe values; explicitly cover absence.
@@ -874,7 +852,7 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
     if (registeredAddress) {
       return `registered Lightning Address, minting on its own branch: named by ${probed.join(' and ')}; claimed by ${claimedBy.join(', ')}; bound a quote to a hash of the runner's own secret, and honoured one carrying free text and one carrying no comment at all`
     }
-    return `named by ${probed.join(' and ')}; claimed by ${claimedBy.join(', ')}; bound a quote to a hash of the runner's own secret and to a cp1, and refused five malformed ones as the draft requires`
+    return `named by ${probed.join(' and ')}; claimed by ${claimedBy.join(', ')}; bound a quote to a hash of the runner's own secret and handled four malformed ones as the draft requires`
   })
 
   // The payRequest, with the mint address the checks above fetched hung
@@ -1000,13 +978,6 @@ export const gradeBoundMint = async (noteUrl, report, {preimage, payCallback = n
 //
 // These SPEND. They burn the note they are given and leave the value in a
 // fresh note the runner prints at the end.
-//
-// Every note is a taproot output key Q (luds 6e865b1). The note given may
-// be named by any spend of it - a bearer note's 64-hex preimage, a ck1 or a
-// cw1 - and every note the grader makes along the way is its own: bearer
-// notes it holds the preimage of, a three-leaf script tree, and a key-path
-// note. It never holds anything the mint generated, and whatever happens it
-// ends holding a spend of all the value it started with.
 
 // options.mintFee: the service's advertised fee ({baseFeeMsat, feePpm}),
 // null for known-fee-free, or leave the key absent when unknown - the
@@ -1027,71 +998,8 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     ? options.previousPubkeys.filter(isCompressedPubkey)
     : []
   const url = new URL(fromLud17(noteUrl))
-  const k1 = url.searchParams.get('k1')?.trim()
-  const given = k1 ? decodeSpend(k1) : null
-  assert(given, 'that note carries no spend: its k1 must be a 64-hex preimage, a ck1 or a cw1')
-  // A signature in a spend is bound to the domain of the note's own URL:
-  // its lowercase hostname, never the scheme or the port.
-  const domain = url.hostname.toLowerCase()
-  const originalQ = bytesToHex(given.outputKey)
-  // The note given, in every spelling the grader can name it by: its cp1,
-  // and its hex h when it is a bearer note given by its preimage.
-  const originalRefs = [
-    ['cp1', encodeCp1(given.outputKey)],
-    ...(given.h ? [['hex h', bytesToHex(given.h)]] : [])
-  ]
-
-  // The note URL with nothing on it, for every lookup that follows. The
-  // amount and any certificate (c, or sig before luds 50d740a) are claims
-  // the informational GET ignores anyway.
-  const base = new URL(url)
-  for (const key of ['k1', 'amount', 'c', 'sig', 'p', 'h']) base.searchParams.delete(key)
-  const infoBy = (key, value) => {
-    const u = new URL(base)
-    u.searchParams.set(key, value)
-    return get(u)
-  }
-  const lookup = spend => infoBy('k1', spend)
-  const lookupRef = ref => infoBy('p', ref)
-
-  // Every bearer note the grader makes, so a certificate over its h (the
-  // pre-taproot message) can be named for what it is.
-  const hOfQ = new Map(given.h ? [[originalQ, bytesToHex(given.h)]] : [])
-  const freshBearer = () => {
-    const preimage = randomBytes(32)
-    const h = sha256(preimage)
-    const q = bytesToHex(bearerNote(h).outputKey)
-    hOfQ.set(q, bytesToHex(h))
-    return {k1: bytesToHex(preimage), h: bytesToHex(h), q, cp1: encodeCp1(hexToBytes(q))}
-  }
-  // A bearer note's full cw1, the long form of its 64-hex preimage.
-  const respell = spend => {
-    const decoded = decodeSpend(spend)
-    return decoded?.preimage ? bearerSpend(decoded.preimage) : null
-  }
-
-  // The note the grader holds right now: a spend of it, and its Q.
-  let current = k1
-  let currentQ = originalQ
-  const adopt = spend => {
-    current = spend
-    currentQ = bytesToHex(decodeSpend(spend).outputKey)
-  }
-
-  // Every certificate the mint hands back, with the note it should be for:
-  // graded where it arrives when a check is about it, and all together at
-  // the end.
-  const certificates = []
-  // LUD-25 names a certificate `c` (and a split's change `c2`) since luds
-  // 50d740a; before that it was `sig`/`sig2`. The grader reads only the
-  // current name, so a mint sending only the old one is graded uncertified,
-  // and says why. A mint still sending the old name alongside the new one
-  // (a transition) is not faulted for it.
-  const noteCertificate = (where, body, qHex, amountMsat, {change = false} = {}) => {
-    const cert = body?.[change ? 'c2' : 'c'] ?? null
-    const legacy = body?.[change ? 'sig2' : 'sig'] ?? null
-    certificates.push({where, sig: cert, legacyOnly: cert === null && legacy !== null, qHex, amountMsat})
-  }
+  const k1 = url.searchParams.get('k1')?.toLowerCase()
+  assert(k1 && /^[0-9a-f]{64}$/.test(k1), 'that note carries no 32-byte hex k1')
 
   let info
   await report.check('informational GET echoes the k1 it was queried with', async () => {
@@ -1102,146 +1010,97 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     assert(isAllowedUrl(info.callback), `callback is not fetchable: ${info.callback}`)
     assert(Number.isFinite(info.maxWithdrawable), 'no maxWithdrawable')
     assert(
-      String(info.k1 ?? '').toLowerCase() === k1.toLowerCase(),
-      'the response k1 differs from the one queried - it must be the spend itself, echoed, never a derived id'
+      info.k1?.toLowerCase() === k1,
+      'the response k1 differs from the one queried - it must be the bearer secret itself, never a derived id'
     )
-    noteCertificate('the informational GET of the note given', info, originalQ, info.maxWithdrawable)
     return `${info.maxWithdrawable} msat`
   })
   if (!info?.callback) return
-
-  const value = info.maxWithdrawable
-  const callback = ({k1s, p1, p2, amount}) => {
-    const cb = new URL(info.callback)
-    for (const spend of k1s) cb.searchParams.append('k1', spend)
-    if (amount !== undefined) cb.searchParams.append('amount', String(amount))
-    if (p1 !== undefined) cb.searchParams.append('p1', p1)
-    if (p2 !== undefined) cb.searchParams.append('p2', p2)
-    return cb
-  }
-  const call = params => get(callback(params))
-
-  // A mint that has rotated its signing key may publish the old ones as
-  // previousPubkeys, so notes it issued before the rotation still verify.
-  // Any key it currently stands behind is an acceptable signer for grading
-  // purposes. That is a narrower claim than it looks: it says the
-  // signature is genuine, not that a wallet should accept the new key -
-  // LUD-25 puts that decision with the holder.
-  const signers = () => [info.mintPubkey, ...previousPubkeys].filter(isCompressedPubkey)
-  const describeSigner = signedBy =>
-    signedBy === info.mintPubkey
-      ? 'verified offline'
-      : `verified offline against a previous signing key (${signedBy.slice(0, 16)}...)`
-  const unverified = () =>
-    previousPubkeys.length > 0
-      ? 'the certificate verifies against neither the advertised mintPubkey nor any published previous key'
-      : 'the certificate does not verify against the advertised mintPubkey'
-  // Is `sig` a cs1 for this note at this value? {signedBy} or {problem}.
-  const judgeCertificate = (sig, qHex, amountMsat) => {
-    if (!isCompressedPubkey(info.mintPubkey)) {
-      return {problem: 'a certificate with no 33-byte compressed mintPubkey advertised verifies against nothing'}
-    }
-    const certificate = decodeCertificate(sig)
-    if (!certificate) {
-      return {problem: `sig is not an amount-bearing cs1 certificate (got ${JSON.stringify(sig).slice(0, 48)})`}
-    }
-    if (certificate.amountMsat !== amountMsat) {
-      return {problem: `the cs1 says ${certificate.amountMsat} msat but the note is worth ${amountMsat} msat`}
-    }
-    const signedBy = signers().find(key => verifyCertificate(qHex, amountMsat, certificate.signature, key))
-    if (signedBy) return {signedBy}
-    const h = hOfQ.get(qHex)
-    if (h && signers().some(key => verifyCertificate(h, amountMsat, certificate.signature, key))) {
-      return {
-        problem:
-          "the cs1 signs the bearer note's h, the pre-taproot message - LUD-25 certifies every note over hex(Q), so a wallet checking this one offline rejects it"
-      }
-    }
-    return {problem: unverified()}
-  }
 
   await report.check('the informational GET does not burn the note', async () => {
     const again = await get(url)
     assert(again.status !== 'ERROR', `the second GET was refused: ${again.reason}`)
     assert(
-      again.maxWithdrawable === value,
-      `value changed between two informational GETs: ${value} then ${again.maxWithdrawable}`
+      again.maxWithdrawable === info.maxWithdrawable,
+      `value changed between two informational GETs: ${info.maxWithdrawable} then ${again.maxWithdrawable}`
     )
     return 'idempotent'
   })
 
   await report.check('ignores the amount in the note URL', async () => {
     const lying = new URL(url)
-    lying.searchParams.set('amount', String(value * 100 + 1))
+    lying.searchParams.set('amount', String(info.maxWithdrawable * 100 + 1))
     const body = await get(lying)
     assert(body.status !== 'ERROR', `refused when amount was inflated: ${body.reason}`)
     assert(
-      body.maxWithdrawable === value,
+      body.maxWithdrawable === info.maxWithdrawable,
       `the URL's own amount changed the reported value: ${body.maxWithdrawable}`
     )
     return 'maxWithdrawable is authoritative'
   })
 
-  // LUD-25 "Checking a note without exposing it": `?p=` takes a cp1, or a
-  // bearer note's hex h, in place of k1, so a holder can look a note up
-  // without putting its spend in a query string every proxy between it and
-  // the mint may log. A MUST since the draft renamed `h` to `p`.
-  let lookupOffered = false
-  await report.check('answers a note lookup by p without the spend', async () => {
-    const answered = []
-    for (const [spelling, ref] of originalRefs) {
-      const body = await lookupRef(ref)
-      assert(
-        body.status !== 'ERROR' && body.tag === 'withdrawRequest',
-        `refused ?p= naming the note by its ${spelling}: ${body.reason ?? JSON.stringify(body).slice(0, 80)} - LUD-25 has a SERVICE accept a cp1 or a bearer note's hex h there`
-      )
-      // A holder asking by p already has the spend, or asks for someone
-      // who does, so the field buys it nothing, and filling it in puts the
-      // spend back on the wire this lookup exists to keep it off.
-      assert(
-        body.k1 === undefined,
-        `the lookup by ${spelling} carried a k1 - it must omit it, or it puts the spend back in the reply the holder asked by p to avoid`
-      )
-      assert(
-        body.maxWithdrawable === value,
-        `the same note is worth ${body.maxWithdrawable} by its ${spelling} and ${value} by k1`
-      )
-      noteCertificate(`the lookup by ${spelling}`, body, originalQ, body.maxWithdrawable)
-      answered.push(spelling)
+  // LUD-25 "Checking a note without exposing it". Optional, and detected
+  // rather than announced: the draft deliberately gives an unrecognized `h`
+  // the same answer an unknown `k1` gets, so a mint that never implemented
+  // it is indistinguishable from one asked about a note it does not hold.
+  // A live note's own hash is therefore the only probe that separates them.
+  let hashLookupOffered = false
+  await report.check('answers a note lookup by hash without the secret (optional)', async () => {
+    const byHash = new URL(url)
+    byHash.searchParams.delete('k1')
+    byHash.searchParams.delete('amount')
+    byHash.searchParams.set('h', noteId(k1))
+    const body = await get(byHash)
+    if (body.status === 'ERROR' || body.tag !== 'withdrawRequest') {
+      return 'not offered - every informational lookup puts the live secret in a query string, where any proxy that logs full URLs keeps it'
     }
-    lookupOffered = true
-    // A note it never registered gets the unknown-note answer, the same
-    // one a spend of that note gets. One that answers anyway reports a
-    // note where none exists, and a wallet restoring from seed reads that
-    // as a note it has lost the spend of.
-    const nobody = freshBearer()
-    const invented = await lookupRef(nobody.h)
-    const ordinaryUnknown = await lookup(nobody.k1)
+    hashLookupOffered = true
+    // The whole point of the lookup. A wallet asking by hash already holds
+    // the secret - it could not have computed the hash otherwise - so the
+    // field buys it nothing, and filling it in puts the note back on the
+    // wire this lookup exists to keep it off.
+    assert(
+      body.k1 === undefined,
+      'the response carried a k1 - a lookup by hash must omit it, or it puts the bearer secret back in the reply the wallet asked by hash to avoid'
+    )
+    assert(
+      body.maxWithdrawable === info.maxWithdrawable,
+      `the same note is worth ${body.maxWithdrawable} by hash and ${info.maxWithdrawable} by k1`
+    )
+    // An h it never registered must get the unknown-note answer. One that
+    // answers anyway reports a note where none exists, and a wallet
+    // restoring from seed reads that as a note it has lost the secret to.
+    const unknownSecret = bytesToHex(randomBytes(32))
+    const nobody = new URL(url)
+    nobody.searchParams.delete('k1')
+    nobody.searchParams.delete('amount')
+    nobody.searchParams.set('h', noteId(unknownSecret))
+    const invented = await get(nobody)
+    const unknownK1 = new URL(url)
+    unknownK1.searchParams.set('k1', unknownSecret)
+    unknownK1.searchParams.delete('h')
+    unknownK1.searchParams.delete('amount')
+    const ordinaryUnknown = await get(unknownK1)
     assert(
       invented.status === 'ERROR' || invented.tag !== 'withdrawRequest',
-      'answered for a note it never registered - an unrecognised p must get the answer an unknown k1 would'
+      'answered for a hash it never registered - an unrecognized h must get the same response an unknown k1 would'
     )
     assert(
       invented.status === ordinaryUnknown.status && invented.reason === ordinaryUnknown.reason,
-      `an unknown p answered ${JSON.stringify(invented)} but an unknown k1 answered ${JSON.stringify(ordinaryUnknown)}`
-    )
-    const unknownKey = await lookupRef(encodeCp1(schnorr.getPublicKey(secp256k1.utils.randomSecretKey())))
-    assert(
-      unknownKey.status === 'ERROR' || unknownKey.tag !== 'withdrawRequest',
-      'answered for a cp1 it never registered'
+      `an unknown h answered ${JSON.stringify(invented)} but an unknown k1 answered ${JSON.stringify(ordinaryUnknown)}`
     )
 
-    // `p` is accepted in place of `k1`, not alongside it. Accepting both
+    // `h` is accepted in place of `k1`, not alongside it. Accepting both
     // lets an intermediary add a second lookup identity and leaves clients
     // unable to know which note the response describes.
     const both = new URL(url)
-    both.searchParams.set('p', originalRefs[0][1])
+    both.searchParams.set('h', noteId(k1))
     const ambiguous = await get(both)
     assert(
       ambiguous.status === 'ERROR',
-      'accepted both k1 and p on one informational lookup - exactly one lookup identity is allowed'
+      'accepted both k1 and h on one informational lookup - exactly one lookup identity is allowed'
     )
-    return `by ${answered.join(' and by ')}, with no k1 in the reply; unknown and mixed lookups refused`
+    return 'by hash, with no k1 in the reply; unknown and mixed lookups refused'
   })
 
   // The merge cap. LUD-25 bounds a merge by URL length rather than by the
@@ -1256,7 +1115,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     for (let i = 0; i < many; i++) {
       cb.searchParams.append('k1', bytesToHex(randomBytes(32)))
     }
-    cb.searchParams.append('p1', freshBearer().h)
+    cb.searchParams.append('h', noteId(bytesToHex(randomBytes(32))))
     const body = await get(cb)
     // Whatever else it does, it must not say yes. Every input was invented
     // by this runner and names no note anywhere.
@@ -1269,190 +1128,220 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       : `no explicit cap - refused as "${body.reason}", so an oversized merge is indistinguishable from an invalid one and a wallet must batch by URL length`
   })
 
-  await report.check('refuses a rotate with no p1', async () => {
-    const body = await call({k1s: [current]})
+  await report.check('refuses a rotate with no h', async () => {
+    const cb = new URL(info.callback)
+    cb.searchParams.append('k1', k1)
+    const body = await get(cb)
     assert(
       body.status === 'ERROR',
-      'accepted a mutation with no p1 - a SERVICE must never generate the replacement note'
+      'accepted a mutation with no h - a SERVICE must never generate the replacement secret'
     )
     return body.reason
   })
 
-  await report.check('refuses a split with no p2', async () => {
-    const body = await call({k1s: [current], amount: Math.max(1, Math.floor(value / 2)), p1: freshBearer().h})
+  await report.check('refuses a split with no h2', async () => {
+    const cb = new URL(info.callback)
+    cb.searchParams.append('k1', k1)
+    cb.searchParams.append('amount', String(Math.max(1, Math.floor(info.maxWithdrawable / 2))))
+    cb.searchParams.append('h', noteId(bytesToHex(randomBytes(32))))
+    const body = await get(cb)
     assert(
       body.status === 'ERROR',
-      'accepted a split with only one output - the change note has nowhere to go but a SERVICE-generated one'
+      'accepted a split with only one output hash - the change note has nowhere to go but a SERVICE-generated secret'
     )
-    const still = await lookup(current)
+    const after = new URL(url)
+    after.searchParams.set('k1', k1)
+    const still = await get(after)
     assert(still.status !== 'ERROR', `a refused split burned the note anyway: ${still.reason}`)
     return body.reason
   })
 
+  let current = k1
+  let currentSig = null
   await report.check('rotate mints a note the service never saw the secret of', async () => {
-    const fresh = freshBearer()
-    const body = await call({k1s: [current], p1: fresh.h})
+    const fresh = bytesToHex(randomBytes(32))
+    const cb = new URL(info.callback)
+    cb.searchParams.append('k1', current)
+    cb.searchParams.append('h', noteId(fresh))
+    const body = await get(cb)
     assert(body.status === 'OK', `refused: ${body.reason}`)
-    // Adopt the new note BEFORE asserting anything about compliance. The
+    // Adopt the new secret BEFORE asserting anything about compliance. The
     // mutation has already happened, so a runner that throws first would
     // leave every later check pointed at a note this service just burned,
     // and report a pile of cascading failures that say nothing.
-    adopt(fresh.k1)
-    noteCertificate('the first rotate', body, fresh.q, value)
+    current = fresh
+    currentSig = body.sig ?? null
     assert(
       body.k1 === undefined && body.change === undefined,
       'the response carried a secret - a compliant SERVICE returns none, since it generated none'
     )
 
-    const after = await lookup(fresh.k1)
+    const check = new URL(url)
+    check.searchParams.set('k1', fresh)
+    const after = await get(check)
     assert(after.status !== 'ERROR', `the rotated note is not spendable: ${after.reason}`)
-    assert(after.maxWithdrawable === value, `value changed across a rotate: ${value} -> ${after.maxWithdrawable}`)
-
-    const dead = await lookup(k1)
-    assert(dead.status === 'ERROR', 'the rotated-away note is still spendable')
-    return 'burned the old note, minted the new'
-  })
-
-  // LUD-25 has a SERVICE certify every note it issues, a bearer note
-  // included, since every note now has a public Q to certify. A SHOULD, so
-  // an uncertified output warns; a certificate that is there and wrong is
-  // worse than none, because a wallet checking it offline refuses a good
-  // note, and fails.
-  await report.check('certifies a bearer output over hex(Q)', async () => {
-    const first = certificates.find(c => c.where === 'the first rotate')
-    if (!first) throw soft('the rotate did not complete, so there is no output to check')
-    if (first.sig === null) {
-      if (first.legacyOnly) throw soft('the rotate returned its certificate only as sig, the name before luds 50d740a; LUD-25 names it c')
-      throw soft('the rotate returned no certificate - LUD-25 says a SERVICE SHOULD certify every note, a bearer note included')
-    }
-    const verdict = judgeCertificate(first.sig, first.qHex, first.amountMsat)
-    assert(verdict.signedBy, verdict.problem)
-    return `cs1 over hex(Q), ${describeSigner(verdict.signedBy)}`
-  })
-
-  await report.check('reports a spent note distinguishably from an unknown one', async () => {
-    if (!lookupOffered) throw soft('the lookup by p is not offered')
-    for (const [spelling, ref] of originalRefs) {
-      const burned = await lookupRef(ref)
-      assert(
-        burned.status === 'ERROR' && typeof burned.reason === 'string' &&
-          /spent/i.test(burned.reason) && !/unknown|not found/i.test(burned.reason),
-        `a spent note asked for by its ${spelling} must be identified as spent, got ${JSON.stringify(burned)}`
-      )
-    }
-    const unknown = await lookupRef(freshBearer().h)
     assert(
-      unknown.status === 'ERROR' && typeof unknown.reason === 'string' &&
-        /unknown|not found/i.test(unknown.reason) && !/spent/i.test(unknown.reason),
-      `an unregistered note must be identified as unknown, got ${JSON.stringify(unknown)}`
+      after.maxWithdrawable === info.maxWithdrawable,
+      `value changed across a rotate: ${info.maxWithdrawable} -> ${after.maxWithdrawable}`
     )
-    return 'spent and unknown notes are distinguishable without disclosing a spend'
+
+    const old = new URL(url)
+    old.searchParams.set('k1', k1)
+    const dead = await get(old)
+    assert(dead.status === 'ERROR', 'the rotated-away secret is still spendable')
+    return 'burned the old secret, minted the new'
   })
 
-  // The informational GET hands out the queried note's certificate, so a
-  // holder need not rotate just to get one. Optional there; but a c that
-  // is there must be a cs1 for exactly this note, or a wallet treating it
-  // as an offline proof is misled.
-  await report.check('a certificate on the informational GET verifies over hex(Q)', async () => {
-    const body = await lookup(current)
-    assert(body.status !== 'ERROR', `informational GET refused: ${body.reason}`)
-    if (body.c === undefined || body.c === null) {
-      if (typeof body.sig === 'string') throw soft('a certificate is offered only as sig, the name before luds 50d740a; LUD-25 names it c')
-      return 'no certificate offered here'
+  // A mint that has rotated its signing key may publish the old ones as
+  // previousPubkeys, so notes it issued before the rotation still verify.
+  // Any key it currently stands behind is an acceptable signer for grading
+  // purposes. That is a narrower claim than it looks: it says the
+  // signature is genuine, not that a wallet should accept the new key -
+  // LUD-25 puts that decision with the holder.
+  const signerOf = verifies => [info.mintPubkey, ...previousPubkeys].find(key => verifies(key))
+  const describeSigner = signedBy =>
+    signedBy === info.mintPubkey
+      ? 'verified offline'
+      : `verified offline against a previous signing key (${signedBy.slice(0, 16)}...)`
+  const unverified = () =>
+    previousPubkeys.length > 0
+      ? 'the signature verifies against neither the advertised mintPubkey nor any published previous key'
+      : 'the signature does not verify against the advertised mintPubkey and amount'
+
+  await report.check('a legacy hash mutation signature verifies when present', async () => {
+    // Part 1 signatures are optional: a plain hash has no public note
+    // identifier to certify without disclosing its bearer secret. Older
+    // SERVICE implementations may still return one, and every signature
+    // that is present must verify.
+    if (currentSig === null) {
+      return 'unsigned legacy Part 1 output accepted'
     }
-    const verdict = judgeCertificate(body.c, currentQ, body.maxWithdrawable)
-    assert(verdict.signedBy, verdict.problem)
-    return `cs1 for the queried note, ${describeSigner(verdict.signedBy)}`
+    assert(info.mintPubkey, 'a sig with no mintPubkey advertised verifies against nothing')
+    assert(isCompressedPubkey(info.mintPubkey), 'mintPubkey is not a 33-byte compressed secp256k1 key')
+    const signedBy = signerOf(key => verifySignature(current, info.maxWithdrawable, currentSig, key))
+    assert(signedBy, unverified())
+    return `legacy Part 1 signature ${describeSigner(signedBy)}`
   })
 
-  // The still-alive probe the adversarial checks below share: a compliant
-  // refusal is ATOMIC, so the note it refused to touch must still be
-  // spendable afterwards, and worth what it was.
+  await report.check('reports a spent hash distinguishably from an unknown hash', async () => {
+    if (!hashLookupOffered) throw soft('hash lookup is not offered')
+    const burned = new URL(url)
+    burned.searchParams.delete('k1')
+    burned.searchParams.delete('amount')
+    burned.searchParams.set('h', noteId(k1))
+    const burnedResponse = await get(burned)
+    assert(
+      burnedResponse.status === 'ERROR' && typeof burnedResponse.reason === 'string' &&
+        /spent/i.test(burnedResponse.reason) && !/unknown|not found/i.test(burnedResponse.reason),
+      `a spent hash must be identified as spent, got ${JSON.stringify(burnedResponse)}`
+    )
+
+    const unknown = new URL(burned)
+    unknown.searchParams.set('h', noteId(bytesToHex(randomBytes(32))))
+    const unknownResponse = await get(unknown)
+    assert(
+      unknownResponse.status === 'ERROR' && typeof unknownResponse.reason === 'string' &&
+        /unknown|not found/i.test(unknownResponse.reason) && !/spent/i.test(unknownResponse.reason),
+      `an unregistered hash must be identified as unknown, got ${JSON.stringify(unknownResponse)}`
+    )
+    return 'spent and unknown hashes are distinguishable without disclosing k1'
+  })
+
+  await report.check('keeps signatures off the informational endpoint', async () => {
+    // A plain note has no certificate, so its informational GET carries no
+    // sig. Part 2 does hand out a cs1 here for a cp1 note, and the Part 2
+    // check below expects it; this probe is by hex k1, where one would
+    // invite a wallet to treat an online answer as an offline proof.
+    const here = new URL(url)
+    here.searchParams.set('k1', current)
+    const body = await get(here)
+    assert(body.status !== 'ERROR', `informational GET refused: ${body.reason}`)
+    assert(body.sig === undefined, 'the informational GET returned a sig')
+    assert(body.sig2 === undefined, 'the informational GET returned a sig2')
+    return 'no signature where the spec forbids one'
+  })
+
+  // The still-alive probe the three adversarial checks below share: a
+  // compliant refusal is ATOMIC, so the note it refused to touch must
+  // still be spendable afterwards.
   const assertStillLive = async () => {
-    const still = await lookup(current)
+    const check = new URL(url)
+    check.searchParams.set('k1', current)
+    const still = await get(check)
     assert(still.status !== 'ERROR', `the refusal burned the note anyway: ${still.reason}`)
-    assert(still.maxWithdrawable === value, `the refusal changed the note's value: ${value} -> ${still.maxWithdrawable}`)
   }
 
   await report.check('refuses a duplicated k1', async () => {
     // One note named twice in a merge-shaped request. Counting its value
-    // twice into the output creates money from nothing - and matching on
-    // strings rather than notes misses the same note spelt two ways.
-    const probes = [['the same k1 twice', [current, current]]]
-    const spelt = respell(current)
-    if (spelt) probes.push(['one note as its preimage and its full cw1', [current, spelt]])
-    const reasons = []
-    for (const [what, k1s] of probes) {
-      const fresh = freshBearer()
-      const body = await call({k1s, p1: fresh.h})
-      if (body.status === 'OK') {
-        // the mutation landed - adopt the output first, so later checks
-        // keep pointing at live money whatever the verdict
-        adopt(fresh.k1)
-        const output = await lookup(fresh.k1)
-        assert(
-          output.maxWithdrawable !== value * 2,
-          `${what} was counted twice - the output is worth double the note`
-        )
-        throw soft(
-          `accepted ${what} (deduplicated to ${output.maxWithdrawable} msat) - an atomic refusal is the safer answer`
-        )
-      }
-      await assertStillLive()
-      reasons.push(`${what}: ${body.reason}`)
-    }
-    return reasons.join('; ')
-  })
-
-  // A p1 naming a note that already exists, outstanding or burned, would
-  // credit value into a note someone else may hold the spend of - here the
-  // note given at the start, whose spend every previous holder knows.
-  // LUD-25 fixes the refusal as exactly "already in use": a WALLET paying
-  // someone's next key reads it as "try the next index".
-  await report.check('refuses a p1 naming a burned note, as "already in use"', async () => {
-    const reasons = []
-    for (const [spelling, ref] of originalRefs) {
-      const body = await call({k1s: [current], p1: ref})
-      if (body.status === 'OK') {
-        // the output IS the note given at the start: adopt it by that
-        // note's own spend, and say so
-        adopt(k1)
-        throw new Error(
-          `minted into a burned note named by its ${spelling} - the output is spendable by a spend every previous holder already knows`
-        )
-      }
-      await assertStillLive()
+    // twice into the output creates money from nothing.
+    const fresh = bytesToHex(randomBytes(32))
+    const cb = new URL(info.callback)
+    cb.searchParams.append('k1', current)
+    cb.searchParams.append('k1', current)
+    cb.searchParams.append('h', noteId(fresh))
+    const body = await get(cb)
+    if (body.status === 'OK') {
+      // the mutation landed - adopt the output first, so later checks keep
+      // pointing at live money whatever the verdict
+      current = fresh
+      currentSig = body.sig ?? null
+      const after = new URL(url)
+      after.searchParams.set('k1', fresh)
+      const output = await get(after)
       assert(
-        body.reason === 'already in use',
-        `refused a p1 naming the burned note by its ${spelling}, but as ${JSON.stringify(body.reason)} - LUD-25 fixes the reason as exactly "already in use"`
+        output.maxWithdrawable !== info.maxWithdrawable * 2,
+        'a duplicated k1 was counted twice - the output is worth double the note'
       )
-      reasons.push(spelling)
+      throw soft(
+        `accepted a duplicated k1 (deduplicated to ${output.maxWithdrawable} msat) - an atomic refusal is the safer answer`
+      )
     }
-    return `refused as "already in use" by its ${reasons.join(' and by its ')}`
+    await assertStillLive()
+    return body.reason
   })
 
-  await report.check('refuses a split whose p1 equals p2', async () => {
-    const half = Math.floor(value / 2)
-    if (half < 1) throw soft('note too small to attempt')
-    const twin = freshBearer()
-    const probes = [
-      ['the same h twice', twin.h, twin.h],
-      ['one note as its hex h and its cp1', twin.h, twin.cp1]
-    ]
-    const reasons = []
-    for (const [what, p1, p2] of probes) {
-      const body = await call({k1s: [current], amount: half, p1, p2})
-      if (body.status === 'OK') {
-        adopt(twin.k1)
-        const output = await lookup(twin.k1)
-        throw new Error(
-          `accepted ${what} - one note now carries ${output.maxWithdrawable ?? 'nothing'} msat of what should be two notes`
-        )
-      }
-      await assertStillLive()
-      reasons.push(`${what}: ${body.reason}`)
+  await report.check('refuses an output hash that already names a note', async () => {
+    // The original note's id is a known existing (burned) id. Minting over
+    // an existing id hands the output to whoever knows its preimage - here,
+    // every previous holder of the original note.
+    const cb = new URL(info.callback)
+    cb.searchParams.append('k1', current)
+    cb.searchParams.append('h', noteId(k1))
+    const body = await get(cb)
+    if (body.status === 'OK') {
+      // the output's secret IS the original k1 - adopt it and say so
+      current = k1
+      currentSig = body.sig ?? null
+      throw new Error(
+        'minted over an existing note id - the output is spendable with a secret every previous holder already knows'
+      )
     }
-    return reasons.join('; ')
+    await assertStillLive()
+    return body.reason
+  })
+
+  await report.check('refuses a split whose h equals h2', async () => {
+    const half = Math.floor(info.maxWithdrawable / 2)
+    if (half < 1) throw soft('note too small to attempt')
+    const twin = bytesToHex(randomBytes(32))
+    const cb = new URL(info.callback)
+    cb.searchParams.append('k1', current)
+    cb.searchParams.append('amount', String(half))
+    cb.searchParams.append('h', noteId(twin))
+    cb.searchParams.append('h2', noteId(twin))
+    const body = await get(cb)
+    if (body.status === 'OK') {
+      current = twin
+      currentSig = body.sig ?? null
+      const after = new URL(url)
+      after.searchParams.set('k1', twin)
+      const output = await get(after)
+      throw new Error(
+        `accepted h2 equal to h - one id now carries ${output.maxWithdrawable ?? 'nothing'} msat of what should be two notes`
+      )
+    }
+    await assertStillLive()
+    return body.reason
   })
 
   await report.check('never mutates on a non-GET request', async () => {
@@ -1460,14 +1349,21 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     // carrying the callback's query string must leave the note untouched -
     // real HTTP stacks send both on their own initiative.
     for (const method of ['POST', 'OPTIONS']) {
-      const fresh = freshBearer()
+      const fresh = bytesToHex(randomBytes(32))
+      const cb = new URL(info.callback)
+      cb.searchParams.append('k1', current)
+      cb.searchParams.append('h', noteId(fresh))
       // the response - even an error - is not the assertion; the store is
-      await fetch(callback({k1s: [current], p1: fresh.h}).toString(), {method, signal: AbortSignal.timeout(15_000)})
+      await fetch(cb.toString(), {method, signal: AbortSignal.timeout(15_000)})
         .then(res => res.arrayBuffer())
         .catch(() => {})
-      const still = await lookup(current)
+      const stillUrl = new URL(url)
+      stillUrl.searchParams.set('k1', current)
+      const still = await get(stillUrl)
       assert(still.status !== 'ERROR', `a ${method} request burned the note - the mutating callback must answer GET only`)
-      const output = await lookup(fresh.k1)
+      const probe = new URL(url)
+      probe.searchParams.set('k1', fresh)
+      const output = await get(probe)
       assert(output.status === 'ERROR', `a ${method} request minted its output - the mutating callback must answer GET only`)
     }
     return 'POST and OPTIONS left the note untouched'
@@ -1479,66 +1375,92 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     // Leave the change one msat short of the base fee. LUD-25 says fail the
     // whole split rather than hand back a change note worth less than the
     // fee that was meant to come out of it.
-    const amount = value - knownBaseFee + 1
-    if (amount < 1 || amount >= value) {
+    const amount = info.maxWithdrawable - knownBaseFee + 1
+    if (amount < 1 || amount >= info.maxWithdrawable) {
       throw soft('note too small to leave change short of the base fee')
     }
-    const body = await call({k1s: [current], amount, p1: freshBearer().h, p2: freshBearer().h})
+    const cb = new URL(info.callback)
+    cb.searchParams.append('k1', current)
+    cb.searchParams.append('amount', String(amount))
+    cb.searchParams.append('h', noteId(bytesToHex(randomBytes(32))))
+    cb.searchParams.append('h2', noteId(bytesToHex(randomBytes(32))))
+    const body = await get(cb)
     assert(
       body.status === 'ERROR',
-      `accepted a split leaving ${value - amount} msat of change against a ${knownBaseFee} msat base fee`
+      `accepted a split leaving ${info.maxWithdrawable - amount} msat of change against a ${knownBaseFee} msat base fee`
     )
-    await assertStillLive()
+    const after = new URL(url)
+    after.searchParams.set('k1', current)
+    const still = await get(after)
+    assert(still.status !== 'ERROR', `a refused split burned the note anyway: ${still.reason}`)
+    assert(
+      still.maxWithdrawable === info.maxWithdrawable,
+      `a refused split changed the note's value: ${info.maxWithdrawable} -> ${still.maxWithdrawable}`
+    )
     return body.reason
   })
 
   await report.check('split conserves value', async () => {
-    const half = Math.floor(value / 2)
+    const half = Math.floor(info.maxWithdrawable / 2)
     if (half < 1) throw soft('note too small to split')
-    if (knownBaseFee !== null && value - half < knownBaseFee + 1) {
+    if (knownBaseFee !== null && info.maxWithdrawable - half < knownBaseFee + 1) {
       throw soft('note too small to split past the advertised base fee')
     }
-    const a = freshBearer()
-    const b = freshBearer()
-    const body = await call({k1s: [current], amount: half, p1: a.h, p2: b.h})
+    const a = bytesToHex(randomBytes(32))
+    const b = bytesToHex(randomBytes(32))
+    const cb = new URL(info.callback)
+    cb.searchParams.append('k1', current)
+    cb.searchParams.append('amount', String(half))
+    cb.searchParams.append('h', noteId(a))
+    cb.searchParams.append('h2', noteId(b))
+    const body = await get(cb)
     assert(body.status === 'OK', `refused: ${body.reason}`)
 
-    const valueOf = async note => {
-      const r = await lookup(note.k1)
+    const valueOf = async secret => {
+      const u = new URL(url)
+      u.searchParams.set('k1', secret)
+      const r = await get(u)
       assert(r.status !== 'ERROR', `split output is not spendable: ${r.reason}`)
       return r.maxWithdrawable
     }
     const [va, vb] = [await valueOf(a), await valueOf(b)]
-    noteCertificate('a split, first output', body, a.q, va)
-    noteCertificate('a split, change', body, b.q, vb, {change: true})
     assert(
       va === half,
       `asked to split off ${half}, got ${va} - any split fee comes out of change, never the requested amount`
     )
     if (knownBaseFee !== null) {
-      const expectedChange = value - half - knownBaseFee
+      const expectedChange = info.maxWithdrawable - half - knownBaseFee
       assert(
         vb === expectedChange,
         `change was ${vb} msat - LUD-25 says total minus amount minus the base fee, ${expectedChange}`
       )
     } else {
-      assert(va + vb <= value, `split created value: ${va} + ${vb} > ${value}`)
+      assert(
+        va + vb <= info.maxWithdrawable,
+        `split created value: ${va} + ${vb} > ${info.maxWithdrawable}`
+      )
     }
 
     // put it back together so the runner ends holding one note
-    const merged = freshBearer()
-    const mbody = await call({k1s: [a.k1, b.k1], p1: merged.h})
+    const merged = bytesToHex(randomBytes(32))
+    const mcb = new URL(info.callback)
+    mcb.searchParams.append('k1', a)
+    mcb.searchParams.append('k1', b)
+    mcb.searchParams.append('h', noteId(merged))
+    const mbody = await get(mcb)
     assert(mbody.status === 'OK', `merge refused: ${mbody.reason}`)
-    adopt(merged.k1)
+    current = merged
     const total = await valueOf(merged)
-    noteCertificate('a merge', mbody, merged.q, total)
     if (knownBaseFee !== null) {
       assert(
         total === va + vb + knownBaseFee,
         `a merge of 2 notes refunds one base fee per LUD-25: expected ${va + vb + knownBaseFee}, got ${total}`
       )
     } else {
-      assert(total >= va + vb && total <= value, `merge did not conserve value: ${va} + ${vb} became ${total}`)
+      assert(
+        total >= va + vb && total <= info.maxWithdrawable,
+        `merge did not conserve value: ${va} + ${vb} became ${total}`
+      )
     }
     return `${va} + ${vb}, merged back to ${total}`
   })
@@ -1549,404 +1471,170 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   // idempotent methods with no switch to turn it off. The retry is byte
   // identical. A SERVICE that answers it as an already-spent input tells
   // the holder the mutation never happened, and a holder that believes it
-  // discards the only copy of a spend the SERVICE really did mint a note
+  // discards the only copy of a secret the SERVICE really did mint a note
   // against. Nobody is told; the money is simply gone.
   //
   // This is a MUST. A retry must replay the original success and must not
-  // burn or alter either output. And it is matched on the notes the
-  // request names, not the strings naming them: a wallet that rebuilt the
-  // request, or a proxy that normalised it, may spell the same spend or the
-  // same output another way (luds 6e865b1).
+  // burn or alter either output.
   await report.check('replays a retried mutation rather than refusing it', async () => {
-    const liveValue = async spend => {
-      const r = await lookup(spend)
+    const valueAt = async secret => {
+      const u = new URL(url)
+      u.searchParams.set('k1', secret)
+      const r = await get(u)
       return r.status === 'ERROR' ? null : r.maxWithdrawable
     }
 
     // --- a rotate, retried ---
-    const prior = current
-    const fresh = freshBearer()
-    const first = await call({k1s: [prior], p1: fresh.h})
+    const fresh = bytesToHex(randomBytes(32))
+    const rotate = new URL(info.callback)
+    rotate.searchParams.append('k1', current)
+    rotate.searchParams.append('h', noteId(fresh))
+    const first = await get(rotate)
     assert(first.status === 'OK', `the rotate itself was refused: ${first.reason}`)
-    adopt(fresh.k1)
-    const minted = await liveValue(fresh.k1)
+    current = fresh
+    currentSig = first.sig ?? null
+    const minted = await valueAt(fresh)
     assert(minted !== null, 'the rotate reported OK but minted nothing')
-    noteCertificate('a rotate', first, fresh.q, minted)
 
-    const retried = await call({k1s: [prior], p1: fresh.h})
-    const stillThere = await liveValue(fresh.k1)
-    assert(stillThere !== null, 'the retried rotate burned the note the first one minted - a retry must never destroy value')
-    assert(stillThere === minted, `the retried rotate changed the note's value: ${minted} -> ${stillThere}`)
+    const retried = await get(rotate)
+    const stillThere = await valueAt(fresh)
+    assert(
+      stillThere !== null,
+      'the retried rotate burned the note the first one minted - a retry must never destroy value'
+    )
+    assert(
+      stillThere === minted,
+      `the retried rotate changed the note's value: ${minted} -> ${stillThere}`
+    )
+
     assert(
       retried.status === 'OK',
       `a retried rotate is answered "${retried.reason}" while the note it minted is live and worth ${stillThere} msat`
     )
-    assert(retried.c === first.c, 'a retried rotate returned a different certificate (c) than the original')
-
-    // --- the same rotate, retried in other spellings ---
-    const respelt = [
-      ...(respell(prior) ? [['its note by the full cw1 rather than the preimage', {k1s: [respell(prior)], p1: fresh.h}]] : []),
-      ['its output by cp1 rather than hex h', {k1s: [prior], p1: fresh.cp1}]
-    ]
-    for (const [what, params] of respelt) {
-      const again = await call(params)
-      const unchanged = await liveValue(fresh.k1)
-      assert(unchanged === minted, `a retried rotate naming ${what} changed the note it minted: ${minted} -> ${unchanged}`)
-      assert(
-        again.status === 'OK',
-        `a retried rotate naming ${what} is answered "${again.reason}" - LUD-25 matches a retry on the notes it names, not the strings naming them`
-      )
-      assert(again.c === first.c, `a retried rotate naming ${what} returned a different certificate than the original`)
-    }
+    assert(retried.sig === first.sig, 'a retried rotate returned a different sig than the original')
 
     // --- a split, retried ---
-    // p2 and the change amount are part of what makes a request the same
+    // h2 and the change amount are part of what makes a request the same
     // request, so a rotate on its own does not cover it.
     const half = Math.floor(minted / 2)
     if (half < 1 || (knownBaseFee !== null && minted - half < knownBaseFee + 1)) {
-      throw soft('a rotate replays, in every spelling; note too small to exercise a split retry')
+      throw soft('a byte-identical rotate replays; note too small to exercise a split retry')
     }
-    const a = freshBearer()
-    const b = freshBearer()
-    const split = {k1s: [current], amount: half, p1: a.h, p2: b.h}
-    const splitFirst = await call(split)
+    const a = bytesToHex(randomBytes(32))
+    const b = bytesToHex(randomBytes(32))
+    const split = new URL(info.callback)
+    split.searchParams.append('k1', current)
+    split.searchParams.append('amount', String(half))
+    split.searchParams.append('h', noteId(a))
+    split.searchParams.append('h2', noteId(b))
+    const splitFirst = await get(split)
     if (splitFirst.status !== 'OK') {
       throw new Error(`the split itself was refused: ${splitFirst.reason}`)
     }
-    const [va, vb] = [await liveValue(a.k1), await liveValue(b.k1)]
-    noteCertificate('a split, first output', splitFirst, a.q, va)
-    noteCertificate('a split, change', splitFirst, b.q, vb, {change: true})
-    const splitRetried = await call(split)
-    const [va2, vb2] = [await liveValue(a.k1), await liveValue(b.k1)]
-    assert(va2 === va && vb2 === vb, `the retried split changed its outputs: ${va}/${vb} -> ${va2}/${vb2}`)
+    const [va, vb] = [await valueAt(a), await valueAt(b)]
+    const splitRetried = await get(split)
+    const [va2, vb2] = [await valueAt(a), await valueAt(b)]
+    assert(
+      va2 === va && vb2 === vb,
+      `the retried split changed its outputs: ${va}/${vb} -> ${va2}/${vb2}`
+    )
     assert(
       splitRetried.status === 'OK',
       `a retried split is answered "${splitRetried.reason}" while both its outputs are live`
     )
-    assert(splitRetried.c === splitFirst.c, 'a retried split returned a different certificate (c) than the original')
-    assert(splitRetried.c2 === splitFirst.c2, 'a retried split returned a different change certificate (c2) than the original')
+    assert(splitRetried.sig === splitFirst.sig, 'a retried split returned a different sig than the original')
+    assert(splitRetried.sig2 === splitFirst.sig2, 'a retried split returned a different sig2 than the original')
 
     // put the two halves back together, so the runner ends holding one note
-    const merged = freshBearer()
-    const mergeBody = await call({k1s: [a.k1, b.k1], p1: merged.h})
+    const merged = bytesToHex(randomBytes(32))
+    const mergeBack = new URL(info.callback)
+    mergeBack.searchParams.append('k1', a)
+    mergeBack.searchParams.append('k1', b)
+    mergeBack.searchParams.append('h', noteId(merged))
+    const mergeBody = await get(mergeBack)
     if (mergeBody.status === 'OK') {
-      adopt(merged.k1)
-      noteCertificate('a merge', mergeBody, merged.q, await liveValue(merged.k1))
+      current = merged
+      currentSig = mergeBody.sig ?? null
     }
 
-    return 'a rotate replays byte for byte and respelt, and so does a split'
+    return 'a byte-identical rotate and split both replay the original success'
   })
 
   await report.check('refuses a replayed burn', async () => {
-    const probes = [['the spend it was given', k1], ...(respell(k1) ? [['its full cw1', respell(k1)]] : [])]
-    const reasons = []
-    for (const [what, spend] of probes) {
-      const fresh = freshBearer()
-      const body = await call({k1s: [spend], p1: fresh.h})
-      if (body.status === 'OK') {
-        adopt(fresh.k1)
-        throw new Error(`a note burned earlier was spent again by ${what}`)
-      }
-      reasons.push(body.reason)
-    }
-    return reasons.join('; ')
-  })
-
-  // ---- script paths: one note, several ways to open it -------------------
-  //
-  // The value goes into a note of three leaves under an internal key the
-  // grader holds:
-  //
-  //   0  OP_SHA256 <h> OP_EQUAL, leaf version 0xc0  - the way home
-  //   1  the same shape at leaf version 0xc2        - an upgrade hook
-  //   2  OP_SHA256 <h> OP_EQUAL OP_SUCCESS80        - another
-  //
-  // Consensus accepts leaves 1 and 2 unconditionally; LUD-25 has a mint
-  // refuse both, since anyone who saw one could spend it. Each is in the
-  // note's own tree, so its refusal proves a rule rather than an unknown
-  // note. The time claims ride on leaf 0, whose script checks no time at
-  // all: only the mint's own clock rules can refuse them. And whatever the
-  // mint gets wrong, leaf 0 and then the key path bring the value home.
-  let tree = null
-  const assertTreeLive = async () => {
-    const still = lookupOffered ? await lookupRef(tree.cp1) : await lookup(tree.home)
-    assert(still.status !== 'ERROR', `the refusal burned the script-tree note anyway: ${still.reason}`)
-    assert(still.maxWithdrawable === tree.value, `the refusal changed the note's value: ${tree.value} -> ${still.maxWithdrawable}`)
-  }
-  // Brings the tree note's value home to a fresh bearer note by the first
-  // of `ways` the mint accepts. Returns which, or null if none did.
-  const leaveTree = async ways => {
-    for (const [what, spend] of ways) {
-      const home = freshBearer()
-      const body = await call({k1s: [spend], p1: home.h})
-      if (body.status === 'OK') {
-        adopt(home.k1)
-        noteCertificate('the rotate out of the script tree', body, home.q, tree.value)
-        tree = null
-        return what
-      }
-    }
-    return null
-  }
-
-  await report.check("a bearer note's full cw1 is the same spend as its preimage", async () => {
-    const decoded = decodeSpend(current)
-    if (!decoded?.preimage) throw soft('the note held here is not a bearer preimage, so it has no long form to compare')
-    const cw1 = bearerSpend(decoded.preimage)
-    const [short, long] = [await lookup(current), await lookup(cw1)]
-    assert(short.status !== 'ERROR', `the preimage no longer opens the note: ${short.reason}`)
-    assert(
-      long.status !== 'ERROR',
-      `refused the note's own full cw1 on the informational GET: ${long.reason} - LUD-25 makes the 64-hex preimage nothing but a short form of exactly this spend`
-    )
-    assert(long.maxWithdrawable === short.maxWithdrawable, `the note is worth ${long.maxWithdrawable} by its cw1 and ${short.maxWithdrawable} by its preimage`)
-    assert(String(long.k1 ?? '').toLowerCase() === cw1, 'the informational GET by cw1 did not echo the cw1 it was queried with')
-
-    // Spend it by the cw1, into the three-leaf tree.
-    const internal = secp256k1.utils.randomSecretKey()
-    const secrets = [randomBytes(32), randomBytes(32), randomBytes(32)]
-    const built = scriptTree(schnorr.getPublicKey(internal), [
-      {script: bearerLeaf(sha256(secrets[0])), version: 0xc0},
-      {script: bearerLeaf(sha256(secrets[1])), version: 0xc2},
-      {script: new Uint8Array([...bearerLeaf(sha256(secrets[2])), 0x50]), version: 0xc0}
-    ])
-    const cp1 = encodeCp1(built.outputKey)
-    const body = await call({k1s: [cw1], p1: cp1})
-    assert(body.status === 'OK', `refused a rotate spent by the note's full cw1: ${body.reason}`)
-    const home = built.spend(0, [secrets[0]])
-    const q = bytesToHex(built.outputKey)
-    tree = {
-      cp1,
-      q,
-      value: short.maxWithdrawable,
-      home,
-      secrets,
-      built,
-      keyPath: keyPathSpend(tweakSecretKey(internal, built.tweak), domain)
-    }
-    adopt(home)
-    noteCertificate('the rotate into the script tree', body, q, tree.value)
-
-    const inTree = await lookup(home)
-    if (inTree.status === 'ERROR') {
-      // It took the value but cannot open the leaf meant to bring it back.
-      // Get it home by any other path before saying so.
-      const via = await leaveTree([
-        ['the hashlock leaf', home],
-        ['the key path', tree.keyPath]
-      ])
-      throw new Error(
-        `credited the script-tree note but refused its own hashlock leaf, two levels down under an internal key: ${inTree.reason} - LUD-25 accepts every spend consensus does. ${via ? `The value came home by ${via}` : `The value is still at ${cp1}, spendable by ${home}`}`
-      )
-    }
-    assert(inTree.maxWithdrawable === tree.value, `value changed going into the script tree: ${tree.value} -> ${inTree.maxWithdrawable}`)
-    return 'answered as the preimage does, then spent it into a three-leaf script tree'
-  })
-
-  // A spend a mint must refuse, tried at the informational GET and at the
-  // callback. The GET must refuse it too: LUD-25 has it verify the spend in
-  // full, so a holder checking a note it was handed learns whether the
-  // spend really opens it.
-  const refusedOnTree = (name, why, spendOf) =>
-    report.check(name, async () => {
-      if (!tree) throw soft('there is no script-tree note to probe - see the check above')
-      const spend = spendOf(tree)
-      const asked = await lookup(spend)
-      const out = freshBearer()
-      const body = await call({k1s: [spend], p1: out.h})
-      if (body.status === 'OK') {
-        const lost = tree.value
-        adopt(out.k1)
-        noteCertificate('a rotate the mint should have refused', body, out.q, lost)
-        tree = null
-        throw new Error(`spent the note by ${why} - anyone who saw that spend could have taken the value`)
-      }
-      assert(
-        asked.status === 'ERROR',
-        `the callback refused ${why}, but the informational GET answered for it as though it opened the note - LUD-25 has that GET verify the spend in full`
-      )
-      await assertTreeLive()
-      return body.reason
-    })
-
-  await refusedOnTree('refuses a leaf version other than 0xc0', 'a leaf at version 0xc2', t => t.built.spend(1, [t.secrets[1]]))
-  await refusedOnTree('refuses a leaf carrying an OP_SUCCESS opcode', 'a leaf carrying OP_SUCCESS80', t => t.built.spend(2, [t.secrets[2]]))
-  await refusedOnTree(
-    'refuses a block-height locktime',
-    'a spend claiming locktime 800000, a block height',
-    t => t.built.spend(0, [t.secrets[0]], {locktime: 800_000, sequence: 0xfffffffe})
-  )
-  // Ten years out: well clear of any mint's clock skew, and still a u32.
-  const future = Math.floor(Date.now() / 1000) + 10 * 365 * 24 * 3600
-  await refusedOnTree(
-    'refuses a locktime still in the future',
-    `a spend claiming locktime ${future}, ten years from now`,
-    t => t.built.spend(0, [t.secrets[0]], {locktime: future, sequence: 0xfffffffe})
-  )
-  await refusedOnTree(
-    'refuses a block-count relative lock',
-    'a spend claiming a relative lock of 6 blocks',
-    t => t.built.spend(0, [t.secrets[0]], {sequence: 6})
-  )
-  // BIP-68's time flag with the largest count: 0xffff units of 512 s, some
-  // 388 days from when the mint credited the note a moment ago.
-  await refusedOnTree(
-    'refuses a relative lock that has not yet run',
-    'a spend claiming a relative lock of 0xffff 512-second units, not yet elapsed',
-    t => t.built.spend(0, [t.secrets[0]], {sequence: (1 << 22) | 0xffff})
-  )
-
-  // The time rules refuse block heights and the future, nothing else. A
-  // mint refusing every non-zero locktime passes all the probes above for
-  // the wrong reason, so the way home claims one already past: 500000000,
-  // the smallest value that is a Unix time (5 November 1985).
-  await report.check('accepts a locktime already past', async () => {
-    if (!tree) throw soft('there is no script-tree note to spend - see the checks above')
-    const past = tree.built.spend(0, [tree.secrets[0]], {locktime: 500_000_000, sequence: 0xfffffffe})
-    const asked = await lookup(past)
-    const {cp1, home} = tree
-    const first = 'its hashlock leaf, claiming locktime 500000000'
-    const via = await leaveTree([
-      [first, past],
-      ['its hashlock leaf, claiming no time', tree.home],
-      ['its key path', tree.keyPath]
-    ])
-    assert(via, `could not spend the script-tree note by any of its paths - the value is still at ${cp1}, spendable by ${home}`)
-    assert(
-      via === first,
-      `refused a spend claiming locktime 500000000, a Unix time already past - LUD-25 refuses only block heights and the future. The value came home by ${via}`
-    )
-    assert(
-      asked.status !== 'ERROR',
-      `the callback took a spend claiming locktime 500000000, but the informational GET refused it: ${asked.reason}`
-    )
-    return `spent the script-tree note by ${first} (5 November 1985)`
-  })
-
-  // ---- key paths: a ck1 is bound to one mint -----------------------------
-  //
-  // A key-path note is x(sk·G) itself, untweaked, as a WALLET deriving its
-  // notes from a seed makes them. Its ck1 signs the canonical transaction
-  // whose prevout commits to the note URL's domain, so a signature one mint
-  // has seen can never be replayed at another.
-  let keyNote = null
-  await report.check('credits a key-path note named by its cp1', async () => {
-    const secretKey = secp256k1.utils.randomSecretKey()
-    const pk = schnorr.getPublicKey(secretKey)
-    const q = bytesToHex(pk)
-    const before = await lookup(current)
-    assert(before.status !== 'ERROR', `the note held here no longer opens: ${before.reason}`)
-    const body = await call({k1s: [current], p1: encodeCp1(pk)})
-    assert(body.status === 'OK', `refused a rotate into a cp1: ${body.reason} - LUD-25 has a SERVICE credit any cp1 it is given`)
-    keyNote = {
-      secretKey,
-      q,
-      value: before.maxWithdrawable,
-      ck1: keyPathSpend(secretKey, domain),
-      elsewhere: keyPathSpend(secretKey, 'other.invalid'),
-      // the right key named, but signed by another key over another message
-      forged: encodeCk1(pk, schnorr.sign(sha256(utf8ToBytes('not the sighash')), secp256k1.utils.randomSecretKey()))
-    }
-    adopt(keyNote.ck1)
-    noteCertificate('the rotate into a key-path note', body, q, keyNote.value)
-    return `rotated into cp1<${q.slice(0, 12)}...>`
-  })
-
-  await report.check('the informational GET refuses a spend that does not verify', async () => {
-    if (!keyNote) throw soft('there is no key-path note to probe - see the check above')
-    for (const [what, spend] of [
-      ['a ck1 signed for another domain', keyNote.elsewhere],
-      ['a ck1 whose signature is by another key', keyNote.forged]
-    ]) {
-      const body = await lookup(spend)
-      assert(
-        body.status === 'ERROR',
-        `answered for ${what} as though it opened the note - LUD-25 has the informational GET verify the spend in full, so a holder learns whether the spend it holds really opens the note`
-      )
-    }
-    return 'refused a ck1 signed for another domain and one signed by another key'
-  })
-
-  await report.check('refuses a ck1 bound to another domain', async () => {
-    if (!keyNote) throw soft('there is no key-path note to probe - see the check above')
-    const out = freshBearer()
-    const body = await call({k1s: [keyNote.elsewhere], p1: out.h})
-    if (body.status === 'OK') {
-      adopt(out.k1)
-      noteCertificate('a rotate the mint should have refused', body, out.q, keyNote.value)
-      keyNote = null
-      throw new Error(`spent the note by a ck1 signed for other.invalid, not ${domain} - a signature any mint has seen can be replayed here`)
-    }
-    const still = await lookup(keyNote.ck1)
-    assert(still.status !== 'ERROR', `the refusal burned the key-path note anyway: ${still.reason}`)
+    const cb = new URL(info.callback)
+    cb.searchParams.append('k1', k1)
+    cb.searchParams.append('h', noteId(bytesToHex(randomBytes(32))))
+    const body = await get(cb)
+    assert(body.status === 'ERROR', 'a secret burned earlier was accepted again')
     return body.reason
   })
 
-  await report.check('spends a key-path note by a ck1 bound to its own domain', async () => {
-    if (!keyNote) throw soft('there is no key-path note to spend - see the checks above')
-    const byKey = await lookup(keyNote.ck1)
-    const home = freshBearer()
-    const body = await call({k1s: [keyNote.ck1], p1: home.h})
-    if (body.status === 'OK') {
-      adopt(home.k1)
-      noteCertificate('the rotate out of the key-path note', body, home.q, keyNote.value)
-    } else {
-      // Bring the value home before failing. The fixed-message ck1 LUD-25
-      // has since dropped is tried only as a rescue: a mint that still
-      // reads it is not graded for doing so.
-      const legacy = encodeCk1(
-        hexToBytes(keyNote.q),
-        schnorr.sign(sha256(utf8ToBytes('LNURLcash')), keyNote.secretKey, new Uint8Array(32))
-      )
-      const rescue = freshBearer()
-      const rescued = await call({k1s: [legacy], p1: rescue.h})
-      if (rescued.status === 'OK') adopt(rescue.k1)
-      throw new Error(
-        `refused a ck1 signed over the canonical spend transaction for ${domain}: ${body.reason}. ${rescued.status === 'OK' ? 'The value came home only by the deprecated fixed-message ck1' : `The value is still at cp1<${keyNote.q}>, spendable by ${keyNote.ck1}`}`
-      )
-    }
-    assert(byKey.status !== 'ERROR', `the callback took the ck1, but the informational GET refused it: ${byKey.reason}`)
-    assert(byKey.maxWithdrawable === keyNote.value, `the key-path note is worth ${byKey.maxWithdrawable} by its ck1, not ${keyNote.value}`)
-    assert(String(byKey.k1 ?? '').toLowerCase() === keyNote.ck1, 'the informational GET by ck1 did not echo the ck1 it was queried with')
-    noteCertificate('the informational GET of the key-path note', byKey, keyNote.q, byKey.maxWithdrawable)
-    keyNote = null
-    return `bound to ${domain}, and spent home to a bearer note`
+  // LUD-25 Part 2. The spec's one MUST for signatures lives here: a cp1
+  // note is a public key, and the SERVICE certifies every one it issues
+  // with a cs1 over (key, amount) that recovers to mintPubkey. Part 2 is
+  // optional, so a SERVICE that refuses the cp1 output warns rather than
+  // fails. Last, because the note comes back as a plain secret only if
+  // the rotate home succeeds.
+  await report.check('certifies a cp1 note it issues (Part 2)', async () => {
+    const secretKey = secp256k1.utils.randomSecretKey()
+    const pubkey = schnorr.getPublicKey(secretKey)
+    const cp1 = encodeCash('cp', pubkey)
+    const out = new URL(info.callback)
+    out.searchParams.append('k1', current)
+    out.searchParams.append('p1', cp1)
+    const body = await get(out)
+    if (body.status === 'ERROR') throw soft(`Part 2 not offered: a cp1 output was refused (${body.reason})`)
+    // The plain secret is burned either way; from here the bearer secret
+    // is the key's ownership proof, until the rotate home below.
+    const ck1 = ownershipProof(secretKey)
+    current = ck1
+    assert(info.mintPubkey, 'issued a cp1 note with no mintPubkey advertised - nothing to verify its certificate against')
+    assert(isCompressedPubkey(info.mintPubkey), 'mintPubkey is not a 33-byte compressed secp256k1 key')
+    const pubkeyHex = bytesToHex(pubkey)
+    const certificate = decodeCertificate(body.sig)
+    assert(certificate, `the rotate to a cp1 output returned no amount-bearing cs1 certificate in sig (got ${JSON.stringify(body.sig)})`)
+    assert(
+      certificate.amountMsat === info.maxWithdrawable,
+      `the cs1 says ${certificate.amountMsat} msat but the note is worth ${info.maxWithdrawable} msat`
+    )
+    const signedBy = signerOf(key => verifyCertificate(pubkeyHex, certificate.amountMsat, certificate.signature, key))
+    assert(signedBy, unverified())
+
+    // The informational GET by ck1 delivers the certificate again, so a
+    // holder need not rotate just to obtain one.
+    const byKey = new URL(url)
+    byKey.searchParams.set('k1', ck1)
+    const lookup = await get(byKey)
+    assert(lookup.status !== 'ERROR', `the cp1 note is not spendable by its ck1: ${lookup.reason}`)
+    assert(
+      lookup.maxWithdrawable === info.maxWithdrawable,
+      `value changed across a rotate to cp1: ${info.maxWithdrawable} -> ${lookup.maxWithdrawable}`
+    )
+    const again = decodeCertificate(lookup.sig)
+    assert(again, 'the informational GET by ck1 returned no amount-bearing cs1 certificate')
+    assert(
+      again.amountMsat === lookup.maxWithdrawable,
+      `the informational cs1 says ${again.amountMsat} msat but the note is worth ${lookup.maxWithdrawable} msat`
+    )
+    assert(
+      signerOf(key => verifyCertificate(pubkeyHex, again.amountMsat, again.signature, key)),
+      'the certificate on the informational GET does not verify'
+    )
+
+    // Home: back to a plain secret, spent by the ck1.
+    const fresh = bytesToHex(randomBytes(32))
+    const home = new URL(info.callback)
+    home.searchParams.append('k1', ck1)
+    home.searchParams.append('p1', noteId(fresh))
+    const back = await get(home)
+    assert(back.status === 'OK', `the cp1 note could not be rotated back to a plain secret by its ck1: ${back.reason}`)
+    current = fresh
+    return `${describeSigner(signedBy)}; the plain note it rotated home to is ${back.sig === undefined ? 'unsigned' : 'still signed the Part 1 way'}`
   })
 
-  // Every certificate the mint handed back, wherever it came from. LUD-25
-  // has a SERVICE certify every note (a SHOULD), and a certificate is only
-  // any use offline if it signs exactly (hex(Q), value): one that does not
-  // is a wallet rejecting a good note, so it fails.
-  await report.check('every certificate verifies over hex(Q) and the note value', async () => {
-    const present = certificates.filter(c => c.sig !== null)
-    const wrong = []
-    const signedBy = new Set()
-    for (const c of present) {
-      const verdict = judgeCertificate(c.sig, c.qHex, c.amountMsat)
-      if (verdict.signedBy) signedBy.add(verdict.signedBy)
-      else wrong.push(`${c.where}: ${verdict.problem}`)
-    }
-    assert(wrong.length === 0, wrong.join('; '))
-    const missing = certificates.length - present.length
-    const legacyOnly = certificates.filter(c => c.legacyOnly).length
-    if (missing > 0) {
-      throw soft(
-        `${missing} of ${certificates.length} notes came back uncertified${legacyOnly > 0 ? ` (${legacyOnly} of them certified only as sig/sig2, the names before luds 50d740a; LUD-25 names them c/c2)` : ''} - LUD-25 says a SERVICE SHOULD certify every note it issues${present.length > 0 ? `; the ${present.length} certificates given all verify` : ''}`
-      )
-    }
-    const keys = [...signedBy].map(key => (key === info.mintPubkey ? 'mintPubkey' : `previous key ${key.slice(0, 16)}...`))
-    return `${present.length} certificates, every one over hex(Q) and the note's value, under ${keys.join(' and ') || 'nothing'}`
-  })
-
-  return {
-    finalSecret: current,
-    noteUrl: (() => {
-      const u = new URL(url)
-      u.searchParams.delete('c')
-      u.searchParams.delete('sig')
-      u.searchParams.delete('amount')
-      u.searchParams.set('k1', current)
-      return u.toString()
-    })()
-  }
+  return {finalSecret: current, noteUrl: (() => {
+    const u = new URL(url)
+    u.searchParams.set('k1', current)
+    return u.toString()
+  })()}
 }

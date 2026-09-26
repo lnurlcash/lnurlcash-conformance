@@ -10,9 +10,6 @@ export type WithdrawLinkForm = 'lnurlw' | 'plain'
 
 export type RetriedMutation = 'refuse' | 'replay'
 
-/** a time-claim rule a misbehaving mock can be told to skip */
-export type TimeRule = 'blockHeight' | 'future' | 'blockCount' | 'relative'
-
 export type HashLookup =
   | boolean
   | 'echoesK1'
@@ -38,28 +35,8 @@ export interface MockMintOptions {
    * signmessage output unreordered.
    */
   signatureLayout?: SignatureLayout
-  /**
-   * Certify every note issued with a cs1 over hex(Q), a bearer note
-   * included (default). LUD-25 makes certifying a SHOULD; false withholds
-   * c/c2 everywhere, which the grader warns about and never fails.
-   */
+  /** non-compliant: withhold the mandatory sig/sig2 */
   signatures?: boolean
-  /**
-   * The names certificates travel under: 'c' (default) is LUD-25 as of luds
-   * 50d740a, c and c2; 'sig' is the pre-50d740a sig/sig2 alone; 'both'
-   * sends each under both names, as a mint mid-transition does.
-   */
-  certificateNames?: 'c' | 'sig' | 'both'
-  /**
-   * The metadata type of a registered address's internal-transfer hint:
-   * 'text/cpub' (default) as of luds 50d740a, 'text/xpub' before.
-   */
-  addressHintType?: string
-  /**
-   * The hosts a spend's signature may be bound to, as a list or a
-   * comma-separated string. Unset, the hostname the mock was reached at.
-   */
-  domains?: string[] | string
   /**
    * How the payRequest spells its withdrawLink. 'plain' (default) is the
    * fetchable https:// URL the reference mint emits and the spec's diagram
@@ -103,9 +80,7 @@ export interface MockMintOptions {
   roundFeeToSat?: boolean
   /** withhold this many msat on top of the fee, landing outside the compliant band */
   extraFeeMsat?: number
-  /** non-compliant: accept a split with no p2, generating the change note instead of refusing */
-  acceptsMissingP2?: boolean
-  /** the older name of acceptsMissingP2 */
+  /** non-compliant: accept a split with no h2, generating the change secret instead of refusing */
   acceptsMissingH2?: boolean
   /** non-compliant: split without taking the base fee out of change, and so without its floor */
   splitIgnoresBaseFee?: boolean
@@ -117,35 +92,6 @@ export interface MockMintOptions {
   verifyLeaksEarly?: boolean
   /** expose /_test/ endpoints. Never enable against anything real. */
   testHooks?: boolean
-
-  // ---- misbehaviour: the unified taproot model (luds 6e865b1) ----
-
-  /** non-compliant: accept a leaf version other than 0xc0, as consensus alone does */
-  leafVersionUnchecked?: boolean
-  /** non-compliant: accept a leaf carrying an OP_SUCCESSx opcode */
-  opSuccessUnchecked?: boolean
-  /**
-   * non-compliant: ignore a script path's time claim. true skips every
-   * rule; otherwise one or more of 'blockHeight', 'future', 'blockCount'
-   * and 'relative', as a list or comma-separated.
-   */
-  ignoresTimeClaims?: boolean | TimeRule | TimeRule[] | string
-  /** non-compliant, over-strict: refuse every non-zero locktime, a past one included */
-  refusesLocktimes?: boolean
-  /** non-compliant: accept any ck1 whose Q is outstanding without checking its signature */
-  unverifiedCk1?: boolean
-  /** non-compliant: answer the informational GET for a k1 by its Q, never verifying the spend */
-  infoSkipsVerification?: boolean
-  /** non-compliant: match a retried mutation on raw strings rather than the notes they name */
-  replayMatchesStrings?: boolean
-  /** the reason a p1/p2 naming a note already in use gets; LUD-25 fixes "already in use" */
-  alreadyInUseReason?: string
-  /** non-compliant: certify a bearer note over its h, the pre-taproot message, not hex(Q) */
-  certificateOverH?: boolean
-  /** non-compliant: refuse a cp1 wherever one may go, as a mint without key-path notes does */
-  refusesCp1Outputs?: boolean
-  /** non-compliant: accept a cp1 whose Q is not the x coordinate of a curve point */
-  acceptsOffCurveCp1?: boolean
 
   // ---- optional, non-spec extensions ----
   //
@@ -189,16 +135,14 @@ export interface MockMintOptions {
    * HTTP stacks retry a GET on a dropped connection, so a SERVICE sees
    * the byte-identical request twice. 'replay' (default) returns the
    * original success as LUD-25 requires; 'refuse' is the non-compliant
-   * fixture. The same request means the same set of notes burned, the
-   * same p1, the same p2 and the same amount, all compared as the Qs they
-   * decode to; anything else naming a burned input is refused as before.
+   * fixture. Identical means the same input k1 set, the
+   * same h, the same h2 and the same amount; anything else naming a
+   * burned input is refused exactly as before.
    */
   retriedMutation?: RetriedMutation
   /**
-   * The informational lookup by `?p=` (a cp1, or a bearer note's hex h;
-   * `?h=` is read as its older name), which LUD-25 makes a MUST. `true` is
-   * conforming; string values reproduce distinct non-compliant responses,
-   * and false an older SERVICE the grader fails.
+   * Optional informational lookup by sha256(k1). `true` is conforming;
+   * string values reproduce distinct non-compliant responses.
    */
   hashLookup?: HashLookup
   /** serve GET /stats, the liabilities endpoint. Off means 404, as before. */
@@ -280,25 +224,15 @@ export interface MintLiabilities {
 }
 
 export interface MockMintState {
-  /**
-   * Keyed by hex(Q), the note's taproot output key. `lockedAt` is when the
-   * mock credited it (Unix seconds), where a relative lock starts; `h` is
-   * a bearer note's hash, kept only when it was named by one.
-   */
-  notes: Map<
-    string,
-    {amountMsat: number; state: NoteState; lockedAt: number; h?: string; pendingSince?: number}
-  >
+  notes: Map<string, {amountMsat: number; state: NoteState; pendingSince?: number}>
   invoices: Map<
     string,
     {
       amountMsat: number
       preimage: string
       settled: boolean
-      /** hex(Q) of the note this quote was bound to, when the wallet named one */
+      /** the output id this quote was bound to, when the wallet named one */
       boundTo?: string
-      /** the hex h that named it, when it was named by one */
-      boundH?: string | null
       /** the exact invoice returned on the quote, for LUD-21 binding */
       pr?: string
     }
@@ -308,23 +242,16 @@ export interface MockMintState {
   previousPubkeys: string[]
   opts: Required<MockMintOptions>
   /**
-   * Fund a note directly, bypassing the minting flow. `k1` is any spend of
-   * it: a 64-hex preimage (the bearer note it names), a ck1 or a cw1.
-   * Returns the note's cs1 certificate, or undefined for the
+   * Fund a note directly, bypassing the minting flow. Returns the note's
+   * signature, or undefined only for the deliberately non-compliant
    * `signatures: false` fixture.
    *
-   * Pass `{previousKey: true}` to certify it under `previousPrivateKey`
+   * Pass `{previousKey: true}` to sign it under `previousPrivateKey`
    * instead, which is how a case puts one note under the old signing key
    * and the rest under the new one.
    */
   creditNote(
     k1: string,
-    amountMsat: number,
-    options?: {previousKey?: boolean}
-  ): string | undefined
-  /** Fund a note by what names it rather than a spend: a cp1 or a bearer note's hex h. */
-  creditOutput(
-    ref: string,
     amountMsat: number,
     options?: {previousKey?: boolean}
   ): string | undefined

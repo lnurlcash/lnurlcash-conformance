@@ -2,9 +2,8 @@
   "version": 1,
   "spec": "LUD-03, LUD-25",
   "description": "The informational GET on a note. Never burns, rotates or alters it. maxWithdrawable is the ONLY authoritative statement of what a note is worth - the URL's own `amount` is a claim and the SERVICE ignores it here. The response's k1 MUST be the bearer secret itself, never a derived or opaque id. Offline verification is mandatory in the current draft, so the response MUST also carry `mintPubkey`, the stable compressed secp256k1 key the SERVICE's note signatures verify against; without it a holder handed a note has nothing to check it against.",
-  "queriedUrl": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=99999&c=ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+  "queriedUrl": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=99999&sig=ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
   "requestMustNotSend": [
-    "c",
     "sig"
   ],
   "requestMustSendUnchanged": [
