@@ -481,15 +481,18 @@ const cashDerivation = {
   ]
 }
 
-// ---- vectors: Part 2, ownership proofs and certificates ------------------
+// ---- vectors: key-path notes, spends and certificates --------------------
 //
-// LUD-25 Part 2 keys a note by a public key. The holder keeps sk, discloses
-// `cp1<pk>`, and spends the note with `ck1`, the x-only pk followed by a
-// BIP-340 Schnorr signature over the fixed message "LNURLcash". The mint
-// certifies each note with `cs1`, a 65-byte recoverable ECDSA signature over
-// "LNURLcash:<amount_msat>:<hex(pk)>". A watch-only `cx1` (the branch's
+// LUD-25 keys every note by a BIP-341 taproot output key Q. A key-path note
+// is Q = x(sk·G) used as is: the holder keeps sk, discloses `cp1<Q>`, and
+// spends the note with `ck1`, Q followed by a BIP-340 signature over the
+// key-path sighash of the canonical spend transaction for the mint's domain
+// (see "the canonical spend transaction" below). The mint certifies each
+// note with `cs1`, a 65-byte recoverable ECDSA signature over
+// "LNURLcash:<amount_msat>:<hex(Q)>". A watch-only `cx1` (the branch's
 // x-only key and chain code) lets a mint derive every pk on a branch and so
-// mint straight to a holder's next key.
+// mint straight to a holder's next key. The file is still called part2.json
+// because the draft once called this half of LUD-25 "Part 2".
 //
 // Built from the primitives like everything else here. The address branch is
 // the literal m/139'/d1..d4 path this section's text specifies, with the
@@ -525,10 +528,10 @@ const signRecoverable = (secretKey, digest) => {
   return concat(sig.subarray(1), sig.subarray(0, 1))
 }
 
-const OWNERSHIP_MESSAGE = utf8ToBytes('LNURLcash')
-const OWNERSHIP_DIGEST = sha256(OWNERSHIP_MESSAGE)
-// BIP-340 permits auxiliary randomness. Fixed zeroes keep published vectors
-// reproducible; implementations may use fresh randomness and still verify.
+// BIP-340 permits auxiliary randomness. LUD-25 has a WALLET sign a ck1 with
+// an all-zero aux_rand, so the ck1 is a deterministic function of the key
+// and the domain and comes back on recovery from seed; the same zeroes keep
+// every other signature here reproducible.
 const SCHNORR_AUX = new Uint8Array(32)
 // Signs sha256(message), a 32-byte digest, rather than the raw message
 // bytes: BIP-340's own reference implementation, and most conforming
@@ -536,6 +539,142 @@ const SCHNORR_AUX = new Uint8Array(32)
 // a 32-byte message (2026-09-16, luds#6de59b2).
 const signSchnorr = (secretKey, message) =>
   schnorr.sign(sha256(utf8ToBytes(message)), secretKey, SCHNORR_AUX)
+
+// ---- the canonical spend transaction --------------------------------------
+//
+// Every note is spent as input 0 of one fixed, never-broadcast transaction
+// (25.md "The canonical spend transaction"):
+//
+//   nVersion   2
+//   vin[0]     prevout (tagged_hash("LNURLcash/mint", domain), 0),
+//              empty scriptSig, nSequence as claimed
+//   vout[0]    value 0, empty scriptPubKey
+//   nLockTime  as claimed
+//   spent      (OP_1 <Q>, 0)
+//
+// and every signature in a spend signs the BIP-341 sighash of that input.
+// Built here field by field from BIP-341's own "common signature message"
+// rather than through any taproot library, for the reason at the top of
+// this file. A key path always claims locktime 0 and sequence 0xffffffff.
+
+const TAPLEAF_VERSION = 0xc0
+// BIP-341's nothing-up-my-sleeve point, lift_x(sha256(G)): no known
+// discrete log, so a note on it has no key path.
+const NUMS_H = hexToBytes('50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0')
+
+const u32le = n => {
+  const out = new Uint8Array(4)
+  new DataView(out.buffer).setUint32(0, n, true)
+  return out
+}
+const u32be = n => {
+  const out = new Uint8Array(4)
+  new DataView(out.buffer).setUint32(0, n, false)
+  return out
+}
+const u16be = n => Uint8Array.of(n >> 8, n & 0xff)
+const I64_ZERO = new Uint8Array(8)
+const compactSize = n => {
+  if (n < 0xfd) return Uint8Array.of(n)
+  if (n <= 0xffff) return Uint8Array.of(0xfd, n & 0xff, n >> 8)
+  throw new Error('no item here is that long')
+}
+
+const tapLeafHash = (script, version = TAPLEAF_VERSION) =>
+  taggedHash('TapLeaf', Uint8Array.of(version), compactSize(script.length), script)
+
+const tapBranch = (a, b) =>
+  bytesToHex(a) < bytesToHex(b) ? taggedHash('TapBranch', a, b) : taggedHash('TapBranch', b, a)
+
+const liftEven = x => secp256k1.Point.fromBytes(concat(Uint8Array.of(0x02), x))
+const xOnlyOf = point => point.toBytes(true).slice(1)
+
+// Q = lift_x(P) + tagged_hash("TapTweak", P || root)·G
+const taprootOutput = (internalKey, merkleRoot) => {
+  const t = bytesToNumber(taggedHash('TapTweak', internalKey, merkleRoot))
+  if (t >= CURVE_N) throw new Error('tweak out of range')
+  const Q = liftEven(internalKey).add(secp256k1.Point.BASE.multiply(t))
+  return {t, Q: xOnlyOf(Q), parity: Q.y % 2n === 0n ? 0 : 1}
+}
+
+const bearerLeafOf = h => concat(Uint8Array.of(0xa8, 0x20), h, Uint8Array.of(0x87))
+
+// A bearer note, from its preimage: NUMS internal key, one hashlock leaf.
+const bearerNoteOf = preimage => {
+  const h = sha256(preimage)
+  const leaf = bearerLeafOf(h)
+  const leafHash = tapLeafHash(leaf)
+  const {t, Q, parity} = taprootOutput(NUMS_H, leafHash)
+  return {preimage, h, leaf, leafHash, t, Q, parity, controlBlock: concat(Uint8Array.of(TAPLEAF_VERSION | parity), NUMS_H)}
+}
+
+// The domain a spend is bound to: the host's lowercase name, never its port.
+const spendDomainOf = host => new URL(`http://${host}`).hostname.toLowerCase()
+
+const prevoutTxidOf = domain => taggedHash('LNURLcash/mint', utf8ToBytes(domain))
+const p2trOf = Q => concat(Uint8Array.of(0x51, 0x20), Q)
+
+// BIP-341's SigMsg, one named field at a time, SIGHASH_DEFAULT, integers
+// little-endian; a script path appends BIP-342's extension.
+const sigMsgFieldsOf = ({Q, domain, locktime = 0, sequence = 0xffffffff, leaf = null}) => [
+  ['hash_type', Uint8Array.of(0x00)],
+  ['nVersion', u32le(2)],
+  ['nLockTime', u32le(locktime)],
+  ['sha_prevouts', sha256(concat(prevoutTxidOf(domain), u32le(0)))],
+  ['sha_amounts', sha256(I64_ZERO)],
+  ['sha_scriptpubkeys', sha256(concat(Uint8Array.of(0x22), p2trOf(Q)))],
+  ['sha_sequences', sha256(u32le(sequence))],
+  ['sha_outputs', sha256(concat(I64_ZERO, Uint8Array.of(0x00)))],
+  ['spend_type', Uint8Array.of(leaf ? 0x02 : 0x00)],
+  ['input_index', u32le(0)],
+  ...(leaf
+    ? [
+        ['tapleaf_hash', tapLeafHash(leaf)],
+        ['key_version', Uint8Array.of(0x00)],
+        ['codesep_pos', u32le(0xffffffff)]
+      ]
+    : [])
+]
+const sigMsgOf = args => concat(...sigMsgFieldsOf(args).map(([, value]) => value))
+const tapSighashOf = sigMsg => taggedHash('TapSighash', Uint8Array.of(0x00), sigMsg)
+const keyPathSighashOf = (Q, domain) => tapSighashOf(sigMsgOf({Q, domain}))
+
+// The ck1 that spends the key-path note x(sk·G) at `domain`.
+const keyPathSpendOf = (secretKey, domain) => {
+  const Q = schnorr.getPublicKey(secretKey)
+  const sighash = keyPathSighashOf(Q, domain)
+  const signature = schnorr.sign(sighash, secretKey, SCHNORR_AUX)
+  return {Q, sighash, signature, ck1: bech32mOf('ck', concat(Q, signature))}
+}
+
+// u32 locktime || u32 sequence || (u16 len || item)* over the script, the
+// control block and the witness bottom of stack first; all big-endian.
+const cw1PayloadOf = ({locktime = 0, sequence = 0xffffffff, script, controlBlock, witness}) =>
+  concat(
+    u32be(locktime),
+    u32be(sequence),
+    ...[script, controlBlock, ...witness].flatMap(item => [u16be(item.length), item])
+  )
+const cw1Of = spend => bech32mOf('cw', cw1PayloadOf(spend))
+
+// The canonical spend transaction itself, serialised with its witness, so a
+// verifier can hand it to libbitcoinkernel unchanged.
+const spendTransactionOf = ({domain, locktime = 0, sequence = 0xffffffff, stack}) =>
+  concat(
+    u32le(2),
+    Uint8Array.of(0x00, 0x01), // segwit marker and flag
+    Uint8Array.of(0x01), // one input
+    prevoutTxidOf(domain),
+    u32le(0),
+    Uint8Array.of(0x00), // empty scriptSig
+    u32le(sequence),
+    Uint8Array.of(0x01), // one output
+    I64_ZERO,
+    Uint8Array.of(0x00), // empty scriptPubKey
+    compactSize(stack.length),
+    ...stack.flatMap(item => [compactSize(item.length), item]),
+    u32le(locktime)
+  )
 
 // BOLT-11's amount suffix, reused verbatim by cs1's human-readable part.
 // Pick the coarsest unit that can express the integer msat amount exactly.
@@ -569,8 +708,7 @@ const noteKeysAt = (node, index) => {
   const p = bytesToNumber(node.privateKey)
   const P = secp256k1.Point.BASE.multiply(p)
   const Px = P.toBytes(true).slice(1)
-  const t = bytesToNumber(taggedHash('LNURLcash/derive', Px, node.chainCode, ser32(index)))
-  if (t >= CURVE_N) throw new Error(`unusable tweak at ${index}`)
+  const t = bytesToNumber(taggedHash('LNURLcash/derive', Px, node.chainCode, ser32(index))) % CURVE_N
   const even = P.y % 2n === 0n
   const sk = ((even ? p : CURVE_N - p) + t) % CURVE_N
   const watched = secp256k1.Point.fromBytes(concat(Uint8Array.of(0x02), Px))
@@ -592,10 +730,12 @@ const part2Branch = (mnemonic, host) => {
   const node = cashDomainNode(cashRoot, host)
   const P = secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey))
   const branchPubkey = P.toBytes(true).slice(1)
+  const domain = spendDomainOf(host)
   return {
     mnemonic,
     seedHex: bytesToHex(seed),
     host,
+    domain,
     cashRoot: nodeHex(cashRootOf(seed)),
     domainIndices,
     addressNode: nodeHex(node),
@@ -605,14 +745,16 @@ const part2Branch = (mnemonic, host) => {
     cx1: bech32mOf('cx', concat(branchPubkey, node.chainCode)),
     notes: PART2_INDICES.map(index => {
       const {secretKey, pubkey} = noteKeysAt(node, index)
-      const ownershipSignature = schnorr.sign(OWNERSHIP_DIGEST, secretKey, SCHNORR_AUX)
+      const spend = keyPathSpendOf(secretKey, domain)
+      if (bytesToHex(spend.Q) !== bytesToHex(pubkey)) throw new Error(`key-path Q is not the note key at ${index}`)
       return {
         index,
         notePubkey: bytesToHex(pubkey),
         cp1: bech32mOf('cp', pubkey),
         noteSecretKey: bytesToHex(secretKey),
-        ownershipSignature: bytesToHex(ownershipSignature),
-        ck1: bech32mOf('ck', concat(pubkey, ownershipSignature))
+        sighash: bytesToHex(spend.sighash),
+        keyPathSignature: bytesToHex(spend.signature),
+        ck1: spend.ck1
       }
     })
   }
@@ -646,10 +788,13 @@ const part2Certificates = [
   part2Certificate(firstNotes[2].notePubkey, 99999),
   part2Certificate(firstNotes[3].notePubkey, 100000000)
 ]
-const addressProof = (action, username) => {
-  const message = `LNURLcash:${action}:${username}`
+// Bound to the SERVICE's own domain, so a proof one mint captured cannot be
+// replayed at another (25.md "Lightning Address auto-mint").
+const addressProof = (action, username, domain = PART2_HOSTS[0]) => {
+  const message = `LNURLcash:${action}:${domain}:${username}`
   return {
     action,
+    domain,
     username,
     message,
     digest: bytesToHex(sha256(utf8ToBytes(message))),
@@ -732,13 +877,18 @@ const specVector2 = () => {
   const notes = [0, 1, 2].map(i => specNoteVector(branch, i))
   const {secretKey: sk0} = noteKeysAt(branch, 0)
   const username = 'alice'
-  const addressProofOf = action => ({
-    action,
-    username,
-    message: `LNURLcash:${action}:${username}`,
-    digest: bytesToHex(sha256(utf8ToBytes(`LNURLcash:${action}:${username}`))),
-    signature: bytesToHex(signSchnorr(sk0, `LNURLcash:${action}:${username}`))
-  })
+  // The vector's own domain, bound into the message since luds 265759f.
+  const addressProofOf = action => {
+    const message = `LNURLcash:${action}:${domain}:${username}`
+    return {
+      action,
+      domain,
+      username,
+      message,
+      digest: bytesToHex(sha256(utf8ToBytes(message))),
+      signature: bytesToHex(signSchnorr(sk0, message))
+    }
+  }
   return {
     seedHex: bytesToHex(seed),
     domain,
@@ -762,48 +912,88 @@ const specVector2 = () => {
   }
 }
 
+// Test vector 3: the key-path spend of vector 1's pk_0 at mint.example,
+// every step from the domain to the signature, down to the serialised
+// canonical spend transaction a libbitcoinkernel verifier would be handed.
 const specVector3 = () => {
-  // sk_0/pk_0 from vector 1
   const v1 = specVector1()
   const sk = hexToBytes(v1.notes[0].sk)
-  const pk = hexToBytes(v1.notes[0].pk)
-  const signature = signSchnorr(sk, 'LNURLcash')
+  const Q = hexToBytes(v1.notes[0].pk)
+  const domain = 'mint.example'
+  const fields = sigMsgFieldsOf({Q, domain})
+  const sigMsg = concat(...fields.map(([, value]) => value))
+  const sighash = tapSighashOf(sigMsg)
+  const signature = schnorr.sign(sighash, sk, SCHNORR_AUX)
+  if (!schnorr.verify(signature, sighash, Q)) throw new Error('vector 3 does not verify')
   return {
     secretKey: bytesToHex(sk),
-    pubkeyXOnly: bytesToHex(pk),
-    digest: bytesToHex(sha256(utf8ToBytes('LNURLcash'))),
-    ownershipSignature: bytesToHex(signature),
-    ck1: bech32mOf('ck', concat(pk, signature))
+    Q: bytesToHex(Q),
+    cp1: bech32mOf('cp', Q),
+    domain,
+    prevoutTxid: bytesToHex(prevoutTxidOf(domain)),
+    spentScriptPubKey: bytesToHex(p2trOf(Q)),
+    sigMsgFields: Object.fromEntries(fields.map(([name, value]) => [name, bytesToHex(value)])),
+    sigMsg: bytesToHex(sigMsg),
+    sighash: bytesToHex(sighash),
+    auxRand: bytesToHex(SCHNORR_AUX),
+    signature: bytesToHex(signature),
+    spendTransaction: bytesToHex(spendTransactionOf({domain, stack: [signature]})),
+    ck1: bech32mOf('ck', concat(Q, signature))
+  }
+}
+
+// An arbitrary mint signing key, the one test vector 4 names.
+const SPEC_MINT_SEED_LABEL = 'LUD-25 test vector mint node'
+const SPEC_MINT_KEY = sha256(utf8ToBytes(SPEC_MINT_SEED_LABEL))
+
+const specCertificate = (qHex, amountMsat) => {
+  const message = `LNURLcash:${amountMsat}:${qHex}`
+  const digest = lightningSignedDigest(message)
+  const signature = signRecoverable(SPEC_MINT_KEY, digest)
+  return {
+    amountMsat,
+    message,
+    digest: bytesToHex(digest),
+    signature: bytesToHex(signature),
+    cs1: bech32mOf(`cs${amountSuffix(amountMsat)}`, signature)
   }
 }
 
 const specVector4 = () => {
-  const mintSeedLabel = 'LUD-25 test vector mint node'
-  const mintKey = sha256(utf8ToBytes(mintSeedLabel))
-  const mintPubkey = bytesToHex(secp256k1.getPublicKey(mintKey, true))
   // pk_0/pk_1 from vector 1
   const v1 = specVector1()
   const pk = v1.notes[0].pk
   const otherPk = v1.notes[1].pk
-  const certificateAt = amountMsat => {
-    const message = `LNURLcash:${amountMsat}:${pk}`
-    const digest = lightningSignedDigest(message)
-    const signature = signRecoverable(mintKey, digest)
-    return {
-      amountMsat,
-      message,
-      digest: bytesToHex(digest),
-      signature: bytesToHex(signature),
-      cs1: bech32mOf(`cs${amountSuffix(amountMsat)}`, signature)
-    }
-  }
   return {
-    mintSeedLabel,
-    mintPrivateKey: bytesToHex(mintKey),
-    mintPubkey,
+    mintSeedLabel: SPEC_MINT_SEED_LABEL,
+    mintPrivateKey: bytesToHex(SPEC_MINT_KEY),
+    mintPubkey: bytesToHex(secp256k1.getPublicKey(SPEC_MINT_KEY, true)),
     notePubkey: pk,
     otherNotePubkey: otherPk,
-    certificates: [certificateAt(1000), certificateAt(21000000)]
+    certificates: [specCertificate(pk, 1000), specCertificate(pk, 21000000)]
+  }
+}
+
+// Test vector 5: a bearer note, both short forms, its full cw1, and a cs1
+// for it under vector 4's mint key.
+const specVector5 = () => {
+  const note = bearerNoteOf(hexToBytes('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'))
+  const cw1 = cw1Of({script: note.leaf, controlBlock: note.controlBlock, witness: [note.preimage]})
+  const certificate = specCertificate(bytesToHex(note.Q), 1000)
+  return {
+    preimage: bytesToHex(note.preimage),
+    h: bytesToHex(note.h),
+    leaf: bytesToHex(note.leaf),
+    tapleafHash: bytesToHex(note.leafHash),
+    H: bytesToHex(NUMS_H),
+    t: bytesToHex(numberTo32(note.t)),
+    Q: bytesToHex(note.Q),
+    controlBlock: bytesToHex(note.controlBlock),
+    cp1: bech32mOf('cp', note.Q),
+    cw1,
+    mintPubkey: bytesToHex(secp256k1.getPublicKey(SPEC_MINT_KEY, true)),
+    certificate,
+    certifiedNoteUrl: `lnurlw://mint.example/w?k1=${bytesToHex(note.preimage)}&sig=${certificate.cs1}`
   }
 }
 
@@ -811,30 +1001,32 @@ const specVectors = {
   version: VERSION,
   spec: SPEC,
   description:
-    "LUD-25's own published \"Test Vectors\" section (25.md), transcribed here so every implementation checks itself against the exact numbers the spec document publishes, not just this project's own internally-generated fixtures. Vectors 1 and 2 reuse BIP-32's own published test vector 1 and 2 seeds deliberately, and deliberately land on opposite branch-key parities (vector 1 odd, vector 2 even) so both halves of the sk_i formula are exercised. t and Q are shown for each note alongside pk/sk so every intermediate step, not just the final hex, is independently checkable.",
+    "LUD-25's own published \"Test Vectors\" section (25.md, lnurl/luds 6e865b1), reproduced here from the primitives so every implementation checks itself against the exact numbers the spec document publishes, not just this project's own fixtures; the selfcheck compares every value with the spec text itself. Vectors 1 and 2 reuse BIP-32's own published test vector 1 and 2 seeds and land on opposite branch-key parities (vector 1 odd, vector 2 even), so both halves of the sk_i formula are exercised; t and Q are shown for each note alongside pk/sk. Vector 2's register/unregister proofs sign sha256(\"LNURLcash:<action>:<domain>:<username>\"), bound to the vector's own domain. Vector 3 is a key-path spend (ck1) of vector 1's pk_0 at mint.example: the prevout, every BIP-341 SigMsg field by name, the sighash, the BIP-340 signature with an all-zero aux_rand, and the serialised canonical spend transaction with its witness. Vector 4 is the mint's cs1 certificate over (hex(Q), amount) under a fixed key. Vector 5 is a bearer note: its preimage (the k1 short form), h (the cp1 short form), the OP_SHA256 <h> OP_EQUAL leaf, its tapleaf hash, the NUMS internal key H, the tweak, Q, the control block, cp1, the full cw1, and a cs1 for it under vector 4's key.",
   vector1: specVector1(),
   vector2: specVector2(),
   vector3: specVector3(),
-  vector4: specVector4()
+  vector4: specVector4(),
+  vector5: specVector5()
 }
 
 const part2 = {
   version: VERSION,
   spec: SPEC,
   description:
-    'LUD-25 Part 2: notes keyed by a public key and spent by a BIP-340 Schnorr proof. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/0, msg = utf8(host)), and addressNode is m/139\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)); notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. ownershipSignature is a 64-byte BIP-340 Schnorr signature over sha256("LNURLcash") - a 32-byte digest, not the raw 9-byte string, since most conforming Schnorr signers (libsecp256k1\'s schnorrsig module included) only accept a 32-byte message (2026-09-16, luds#6de59b2) - and ck1 is bech32m("ck", notePubkey || ownershipSignature): the value that spends the note. Register/update/unregister proofs are Schnorr signatures from index zero over sha256("LNURLcash:<action>:<username>"), same reasoning, separating both action and name. A certificate remains a recoverable ECDSA signature by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).',
+    'LUD-25 key-path notes (the half of the draft once called Part 2): a note whose output key Q is a holder\'s own key, used as is with no BIP-86 tweak, spent by a ck1 and certified by a cs1. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/0, msg = utf8(host)), and addressNode is m/139\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note: t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(index)) mod n; notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. A ck1 spends the note at one mint only: domain is the branch host\'s lowercase hostname with any port dropped, sighash is the BIP-341 key-path signature hash (SIGHASH_DEFAULT) of input 0 of the canonical spend transaction for that domain (prevout tagged_hash("LNURLcash/mint", domain), spent output (OP_1 <notePubkey>, 0); spends.json lists every SigMsg field), keyPathSignature is BIP-340 Schnorr over that sighash with an all-zero aux_rand, and ck1 is bech32m("ck", notePubkey || keyPathSignature). The same ck1 fails at any other domain. Register/unregister proofs are Schnorr signatures from index zero over sha256("LNURLcash:<action>:<domain>:<username>"), separating action, mint and name. A certificate is a recoverable ECDSA signature by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350).',
   conventions: {
     addressBranch: "m/139'/d1/d2/d3/d4",
     hashingKey: "m/139'/0",
-    specTextSays: "m/139'/d1/d2/d3/d4 with the hashing key at m/139'/0 - now the literal path every implementation uses; there is no separate purpose for Part 2",
-    noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t >= n is unusable, use the next index',
+    specTextSays: "m/139'/d1/d2/d3/d4 with the hashing key at m/139'/0 - the literal path every implementation uses",
+    noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t is reduced mod n, as the spec requires (no index here reaches n)',
     indexWidth: '4 bytes, big-endian, any uint32, never hardened',
-    ownershipMessage: 'LNURLcash',
-    ownershipMessageEncoding: 'UTF-8 bytes, sha256-hashed to a 32-byte digest before signing (2026-09-16, luds#6de59b2)',
-    ownershipSignature: 'BIP-340 Schnorr, 64 bytes; vectors use 32 zero auxiliary bytes',
+    spendDomain: "the host's lowercase hostname, never its scheme or port; the derivation above still hashes the host exactly as stored, port included",
+    canonicalSpendTransaction: 'nVersion 2; vin[0] prevout (tagged_hash("LNURLcash/mint", domain), 0), empty scriptSig, nSequence 0xffffffff; vout[0] value 0, empty scriptPubKey; nLockTime 0; spent output (OP_1 <notePubkey>, 0)',
+    ck1Signs: 'tagged_hash("TapSighash", 0x00 || SigMsg), the BIP-341 key-path sighash (SIGHASH_DEFAULT, spend_type 0x00) of input 0 of the canonical spend transaction for the domain',
+    keyPathSignature: 'BIP-340 Schnorr, 64 bytes, all-zero aux_rand, so a ck1 is a deterministic function of the key and the domain',
     ck1Payload: '32-byte x-only public key || 64-byte Schnorr signature',
-    addressProofMessage: 'LNURLcash:<register|unregister>:<username>',
-    addressProofMessageEncoding: 'UTF-8 bytes, sha256-hashed to a 32-byte digest before signing, same reasoning as ownershipMessageEncoding',
+    addressProofMessage: 'LNURLcash:<register|unregister>:<domain>:<username>',
+    addressProofMessageEncoding: 'UTF-8 bytes, sha256-hashed to a 32-byte digest, then BIP-340 Schnorr by the branch\'s index-zero key',
     certificateMessage: 'LNURLcash:<amount_msat>:<hex(pk)>',
     certificateHrp: 'cs || BOLT11_amount_suffix(amount_msat)'
   },
@@ -844,7 +1036,12 @@ const part2 = {
   },
   branches: part2Branches,
   certificates: part2Certificates,
-  addressProofs: [addressProof('register', 'alice'), addressProof('unregister', 'alice'), addressProof('register', 'bob')],
+  addressProofs: [
+    addressProof('register', 'alice'),
+    addressProof('unregister', 'alice'),
+    addressProof('register', 'bob'),
+    addressProof('register', 'alice', 'moneyer.dev')
+  ],
   valid: [
     {type: 'cp1', value: sampleCp1.toUpperCase(), bytes: bytesToHex(samplePubkey), why: 'all uppercase is the same string (BIP-350)'}
   ],
@@ -855,7 +1052,7 @@ const part2 = {
     {type: 'cp1', value: sampleCp1.slice(0, -1) + (sampleCp1.endsWith('q') ? 'p' : 'q'), why: 'the checksum does not verify'},
     {type: 'cp1', value: mixedCase(sampleCp1), why: 'mixed case (BIP-350)'},
     {type: 'ck1', value: sampleCp1, why: 'a cp1 is not a ck1'},
-    {type: 'ck1', value: bech32mOf('ck', hexToBytes(firstNotes[0].ownershipSignature)), why: '64-byte signature without the 32-byte public key'},
+    {type: 'ck1', value: bech32mOf('ck', hexToBytes(firstNotes[0].keyPathSignature)), why: '64-byte signature without the 32-byte public key'},
     {type: 'cs1', value: firstNotes[0].ck1, why: 'a ck1 is not a cs1'},
     {type: 'cs1', value: bech32mOf('cs', hexToBytes(part2Certificates[0].signature)), why: 'legacy fixed cs HRP carries no amount'},
     {type: 'cx1', value: bech32mOf('cx', samplePubkey), why: '32 bytes, not 64'}
@@ -878,21 +1075,26 @@ const nostrSeedCase = (identityHex, host) => {
   const seed = hmac(sha256, hexToBytes(identityHex), utf8ToBytes(NOSTR_SEED_LABEL))
   const node = cashDomainNode(cashRootOf(seed), host)
   const branchPubkey = secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey)).toBytes(true).slice(1)
+  const domain = spendDomainOf(host)
   return {
     identity: identityHex,
     identityPubkey: bytesToHex(secp256k1.Point.BASE.multiply(bytesToNumber(hexToBytes(identityHex))).toBytes(true).slice(1)),
     host,
+    domain,
     seed: bytesToHex(seed),
     addressNode: nodeHex(node),
     cx1: bech32mOf('cx', concat(branchPubkey, node.chainCode)),
     notes: [0, 1, 7].map(index => {
       const {secretKey, pubkey} = noteKeysAt(node, index)
+      const spend = keyPathSpendOf(secretKey, domain)
       return {
         index,
         noteSecretKey: bytesToHex(secretKey),
         notePubkey: bytesToHex(pubkey),
         cp1: bech32mOf('cp', pubkey),
-        ck1: bech32mOf('ck', concat(pubkey, schnorr.sign(OWNERSHIP_DIGEST, secretKey, SCHNORR_AUX)))
+        sighash: bytesToHex(spend.sighash),
+        keyPathSignature: bytesToHex(spend.signature),
+        ck1: spend.ck1
       }
     })
   }
@@ -906,7 +1108,7 @@ const nostrSeed = {
   spec: SPEC,
   extension: true,
   description:
-    'An extension, not LUD-25: a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words. seed = HMAC-SHA256(key = identity (the 32-byte secret key), msg = utf8("LNURLcash/nostr-seed")); the branch is then the reference wallet\'s m/139\'/d1..d4 from that seed exactly as in part2.json, and every note field means what it means there. identityPubkey is the identity\'s x-only public key, the npub a lightning address belongs to. heartwood-esp32 derives this on the device and lnurlcash-kit exports it (deriveNostrAddressNode); a mint sees an ordinary cx1.',
+    'An extension, not LUD-25: a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words. seed = HMAC-SHA256(key = identity (the 32-byte secret key), msg = utf8("LNURLcash/nostr-seed")); the branch is then the reference wallet\'s m/139\'/d1..d4 from that seed exactly as in part2.json, and every note field means what it means there: domain is the case host\'s lowercase hostname without its port, and each ck1 signs that domain\'s key-path sighash. identityPubkey is the identity\'s x-only public key, the npub a lightning address belongs to. heartwood-esp32 derives this on the device and lnurlcash-kit exports it (deriveNostrAddressNode); a mint sees an ordinary cx1.',
   label: NOSTR_SEED_LABEL,
   cases: [
     nostrSeedCase(IDENTITY_ONE, 'moneyer.dev'),
@@ -3186,6 +3388,328 @@ const settleForValue = {
   ]
 }
 
+// ---- vectors: spends (LUD-25 unified taproot) -----------------------------
+//
+// Everything a mint or wallet needs to spend and judge a note, beyond the
+// five vectors 25.md publishes: bearer notes of both parities, one key's ck1
+// at several domains and the domains it must fail at, a three-leaf tree with
+// a leaf the leaf policy refuses on each of its two grounds, a signature
+// check inside a leaf, the time-claim policy at every threshold, and the
+// cw1 payloads that must not decode. Expected verdicts are written out by
+// hand; the selfcheck recomputes each with its own reading of the rules.
+
+const SPEND_NOW = 1_800_000_000
+const SEQUENCE_FINAL = 0xffffffff
+const SEQUENCE_NO_RELATIVE = 0xfffffffe
+const SEQUENCE_TIME_FLAG = 1 << 22
+
+const bearerCase = (name, preimage) => {
+  const note = bearerNoteOf(preimage)
+  return {
+    name,
+    preimage: bytesToHex(note.preimage),
+    h: bytesToHex(note.h),
+    leaf: bytesToHex(note.leaf),
+    tapleafHash: bytesToHex(note.leafHash),
+    tweak: bytesToHex(numberTo32(note.t)),
+    Q: bytesToHex(note.Q),
+    parity: note.parity,
+    controlBlock: bytesToHex(note.controlBlock),
+    cp1: bech32mOf('cp', note.Q),
+    cw1: cw1Of({script: note.leaf, controlBlock: note.controlBlock, witness: [note.preimage]})
+  }
+}
+
+// The first preimage in a fixed sequence whose note has an odd-y Q, so the
+// control block's parity bit is exercised both ways.
+const oddParityPreimage = (() => {
+  for (let i = 0; ; i++) {
+    const preimage = sha256(utf8ToBytes(`lnurlcash-conformance odd parity ${i}`))
+    if (bearerNoteOf(preimage).parity === 1) return preimage
+  }
+})()
+
+const spendBearers = [
+  bearerCase("test vector 5's preimage (even Q)", hexToBytes('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f')),
+  bearerCase('an odd-y Q, so the control block starts 0xc1', oddParityPreimage),
+  bearerCase('all 0xff', hexToBytes('ff'.repeat(32)))
+]
+
+// One key at several domains: vector 1's sk_0, so the mint.example ck1 is
+// test vector 3's exactly.
+const SPEND_KEY = hexToBytes('944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f')
+const SPEND_KEY_Q = schnorr.getPublicKey(SPEND_KEY)
+const keyPathAt = domain => {
+  const normalised = domain.toLowerCase()
+  const spend = keyPathSpendOf(SPEND_KEY, normalised)
+  return {
+    domain,
+    normalisedDomain: normalised,
+    prevoutTxid: bytesToHex(prevoutTxidOf(normalised)),
+    sighash: bytesToHex(spend.sighash),
+    signature: bytesToHex(spend.signature),
+    ck1: spend.ck1
+  }
+}
+
+// The three-leaf tree the grader rotates a funded note into, under a fixed
+// internal key the holder owns: a hashlock that should open it, the same
+// shape at an unknown leaf version, and a hashlock followed by OP_SUCCESS80.
+// Consensus accepts all three; LUD-25 has a SERVICE refuse the last two.
+const TREE_INTERNAL_SECRET = sha256(utf8ToBytes('lnurlcash-conformance tree internal key'))
+const treeCase = () => {
+  const internalKey = schnorr.getPublicKey(TREE_INTERNAL_SECRET)
+  const preimages = ['0a', '0b', '0c'].map(byte => hexToBytes(byte.repeat(32)))
+  const leaves = [
+    {version: 0xc0, script: bearerLeafOf(sha256(preimages[0])), verdict: 'accept', reason: null},
+    {version: 0xc2, script: bearerLeafOf(sha256(preimages[1])), verdict: 'reject', reason: 'unknown tapleaf version'},
+    {
+      version: 0xc0,
+      script: concat(bearerLeafOf(sha256(preimages[2])), Uint8Array.of(0x50)),
+      verdict: 'reject',
+      reason: 'OP_SUCCESS'
+    }
+  ]
+  const hashes = leaves.map(leaf => tapLeafHash(leaf.script, leaf.version))
+  const left = tapBranch(hashes[0], hashes[1])
+  const root = tapBranch(left, hashes[2])
+  const {t, Q, parity} = taprootOutput(internalKey, root)
+  const paths = [[hashes[1], hashes[2]], [hashes[0], hashes[2]], [left]]
+  // The key path signs for Q with the tweaked secret: the internal secret,
+  // negated first if its point has odd y, plus the tweak.
+  const P = secp256k1.Point.BASE.multiply(bytesToNumber(TREE_INTERNAL_SECRET))
+  const d = P.y % 2n === 0n ? bytesToNumber(TREE_INTERNAL_SECRET) : CURVE_N - bytesToNumber(TREE_INTERNAL_SECRET)
+  const tweakedSecret = numberTo32((d + t) % CURVE_N)
+  if (bytesToHex(schnorr.getPublicKey(tweakedSecret)) !== bytesToHex(Q)) throw new Error('tweaked key is not Q')
+  const keySighash = keyPathSighashOf(Q, 'mint.example')
+  const keySignature = schnorr.sign(keySighash, tweakedSecret, SCHNORR_AUX)
+  return {
+    internalSecretKey: bytesToHex(TREE_INTERNAL_SECRET),
+    internalKey: bytesToHex(internalKey),
+    shape: 'root = branch(branch(leaves[0], leaves[1]), leaves[2])',
+    merkleRoot: bytesToHex(root),
+    tweak: bytesToHex(numberTo32(t)),
+    Q: bytesToHex(Q),
+    parity,
+    cp1: bech32mOf('cp', Q),
+    leaves: leaves.map((leaf, i) => {
+      const controlBlock = concat(Uint8Array.of(leaf.version | parity), internalKey, ...paths[i])
+      return {
+        version: leaf.version,
+        script: bytesToHex(leaf.script),
+        tapleafHash: bytesToHex(hashes[i]),
+        controlBlock: bytesToHex(controlBlock),
+        witness: [bytesToHex(preimages[i])],
+        cw1: cw1Of({script: leaf.script, controlBlock, witness: [preimages[i]]}),
+        verdict: leaf.verdict,
+        reason: leaf.reason
+      }
+    }),
+    keyPath: {
+      domain: 'mint.example',
+      tweakedSecretKey: bytesToHex(tweakedSecret),
+      sighash: bytesToHex(keySighash),
+      signature: bytesToHex(keySignature),
+      ck1: bech32mOf('ck', concat(Q, keySignature))
+    }
+  }
+}
+
+// A leaf that checks a signature, so a signer can check its script-path
+// sighash: BIP-342's extension appended, and the claimed time signed.
+const CHECKSIG_SECRET = sha256(utf8ToBytes('lnurlcash-conformance checksig key'))
+const checksigCase = () => {
+  const key = schnorr.getPublicKey(CHECKSIG_SECRET)
+  const leaf = concat(Uint8Array.of(0x20), key, Uint8Array.of(0xac))
+  const {Q, parity} = taprootOutput(NUMS_H, tapLeafHash(leaf))
+  const controlBlock = concat(Uint8Array.of(TAPLEAF_VERSION | parity), NUMS_H)
+  const domain = 'mint.example'
+  const signed = (locktime, sequence) => {
+    const fields = sigMsgFieldsOf({Q, domain, locktime, sequence, leaf})
+    const sigMsg = concat(...fields.map(([, value]) => value))
+    const sighash = tapSighashOf(sigMsg)
+    const signature = schnorr.sign(sighash, CHECKSIG_SECRET, SCHNORR_AUX)
+    return {
+      locktime,
+      sequence,
+      sigMsg: bytesToHex(sigMsg),
+      sighash: bytesToHex(sighash),
+      signature: bytesToHex(signature),
+      cw1: cw1Of({locktime, sequence, script: leaf, controlBlock, witness: [signature]})
+    }
+  }
+  return {
+    secretKey: bytesToHex(CHECKSIG_SECRET),
+    pubkey: bytesToHex(key),
+    leaf: bytesToHex(leaf),
+    controlBlock: bytesToHex(controlBlock),
+    Q: bytesToHex(Q),
+    cp1: bech32mOf('cp', Q),
+    domain,
+    spends: [signed(0, SEQUENCE_FINAL), signed(1_700_000_000, SEQUENCE_NO_RELATIVE)]
+  }
+}
+
+const timeClaim = (name, {locktime = 0, sequence = SEQUENCE_FINAL, lockedAt = SPEND_NOW - 86_400}, verdict, why) => ({
+  name,
+  locktime,
+  sequence,
+  now: SPEND_NOW,
+  lockedAt,
+  verdict,
+  why
+})
+
+const timeClaims = [
+  timeClaim('no claim at all', {}, 'accept', 'locktime 0 and a final sequence claim nothing'),
+  timeClaim('a block height', {locktime: 800_000, sequence: SEQUENCE_NO_RELATIVE}, 'reject', 'below 500,000,000 an nLockTime is a block height, which has no meaning without a chain'),
+  timeClaim('one below the threshold', {locktime: 499_999_999, sequence: SEQUENCE_NO_RELATIVE}, 'reject', 'still a block height'),
+  timeClaim('the threshold itself', {locktime: 500_000_000, sequence: SEQUENCE_NO_RELATIVE}, 'accept', 'at least 500,000,000 is a Unix time, and this one is long past'),
+  timeClaim('a Unix time in the past', {locktime: SPEND_NOW - 1, sequence: SEQUENCE_NO_RELATIVE}, 'accept', 'already reached by the mint clock'),
+  timeClaim('exactly now', {locktime: SPEND_NOW, sequence: SEQUENCE_NO_RELATIVE}, 'accept', 'not in the future'),
+  timeClaim('one second in the future', {locktime: SPEND_NOW + 1, sequence: SEQUENCE_NO_RELATIVE}, 'reject', 'a locktime the mint clock has not reached'),
+  timeClaim('the largest locktime', {locktime: 0xffffffff, sequence: SEQUENCE_NO_RELATIVE}, 'reject', 'far in the future'),
+  timeClaim('a future locktime under a final sequence', {locktime: SPEND_NOW + 1, sequence: SEQUENCE_FINAL}, 'reject', 'LUD-25 judges any non-zero nLockTime, even where a final sequence would switch it off on chain'),
+  timeClaim('a block-count relative lock', {sequence: 10}, 'reject', 'bit 31 clear enables a relative lock, and without the time flag (bit 22) it counts blocks'),
+  timeClaim('a relative lock of zero blocks', {sequence: 0}, 'reject', 'still an enabled block-count lock, however short'),
+  timeClaim('a relative time lock not yet elapsed', {sequence: SEQUENCE_TIME_FLAG | 1, lockedAt: SPEND_NOW - 511}, 'reject', 'one 512-second unit from when the mint credited the note, one second short'),
+  timeClaim('a relative time lock exactly elapsed', {sequence: SEQUENCE_TIME_FLAG | 1, lockedAt: SPEND_NOW - 512}, 'accept', 'one 512-second unit has passed since the mint credited the note'),
+  timeClaim('the largest relative time lock', {sequence: SEQUENCE_TIME_FLAG | 0xffff, lockedAt: SPEND_NOW - 86_400}, 'reject', '65535 units is over a year'),
+  timeClaim('bits outside the BIP-68 mask', {sequence: SEQUENCE_TIME_FLAG | (1 << 16) | 1, lockedAt: SPEND_NOW - 512}, 'accept', 'only the low 16 bits count units; bits 16 to 21 are ignored, as BIP-68 ignores them'),
+  timeClaim('the disable bit set over a block count', {sequence: 0x80000000 + 10}, 'accept', 'bit 31 set switches the relative lock off entirely'),
+  timeClaim('both claims, both satisfied', {locktime: SPEND_NOW - 1, sequence: SEQUENCE_TIME_FLAG | 1, lockedAt: SPEND_NOW - 512}, 'accept', 'each rule is checked on its own')
+]
+
+// Bitwise operators in JS are signed 32-bit, so a sequence built with one
+// can turn negative. Every claim must stay a uint32.
+for (const t of timeClaims) {
+  if (![t.locktime, t.sequence].every(n => Number.isInteger(n) && n >= 0 && n <= 0xffffffff)) {
+    throw new Error(`${t.name}: not a uint32 claim`)
+  }
+}
+
+const leafPolicy = (name, version, script, verdict, why) => ({name, version, script: bytesToHex(script), verdict, why})
+const vector5Leaf = bearerLeafOf(hexToBytes('630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd'))
+const leafPolicies = [
+  leafPolicy('a bearer hashlock', 0xc0, vector5Leaf, 'allowed', 'the one tapscript leaf version'),
+  leafPolicy('the same leaf at version 0xc2', 0xc2, vector5Leaf, 'refused', 'an unknown leaf version succeeds unconditionally under consensus'),
+  leafPolicy('the same leaf at version 0xfe', 0xfe, vector5Leaf, 'refused', 'likewise'),
+  leafPolicy('OP_SUCCESS80 alone', 0xc0, Uint8Array.of(0x50), 'refused', '0x50 is OP_SUCCESS80 in tapscript'),
+  leafPolicy('OP_SUCCESS98', 0xc0, Uint8Array.of(0x51, 0x62), 'refused', '0x62 (OP_VER in legacy script) is OP_SUCCESS98'),
+  leafPolicy('OP_SUCCESS187', 0xc0, Uint8Array.of(0xbb), 'refused', 'the first of the 187-254 run'),
+  leafPolicy('OP_SUCCESS254', 0xc0, Uint8Array.of(0x51, 0xfe), 'refused', 'the last of it'),
+  leafPolicy('0xff is not an OP_SUCCESS', 0xc0, Uint8Array.of(0x51, 0xff), 'allowed', 'OP_INVALIDOPCODE fails under consensus but is no upgrade hook, so the leaf policy has nothing to say'),
+  leafPolicy('0x50 inside a direct push', 0xc0, Uint8Array.of(0x01, 0x50, 0x51), 'allowed', 'pushed data is data, not an opcode'),
+  leafPolicy('0x50 and 0x62 inside OP_PUSHDATA1', 0xc0, Uint8Array.of(0x4c, 0x02, 0x50, 0x62, 0x51), 'allowed', 'OP_PUSHDATA1 carries a one-byte length'),
+  leafPolicy('0xbb and 0xfe inside OP_PUSHDATA2', 0xc0, Uint8Array.of(0x4d, 0x02, 0x00, 0xbb, 0xfe, 0x51), 'allowed', 'OP_PUSHDATA2 carries a two-byte little-endian length'),
+  leafPolicy('0x50 inside OP_PUSHDATA4', 0xc0, Uint8Array.of(0x4e, 0x01, 0x00, 0x00, 0x00, 0x50, 0x51), 'allowed', 'OP_PUSHDATA4 carries a four-byte little-endian length'),
+  leafPolicy('OP_SUCCESS after pushed data', 0xc0, Uint8Array.of(0x01, 0x51, 0x50), 'refused', 'the scan resumes after the push')
+]
+
+// Payloads built from test vector 5's cw1, each broken one way.
+const vector5Payload = cw1PayloadOf({
+  script: vector5Leaf,
+  controlBlock: hexToBytes('c050929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0'),
+  witness: [hexToBytes('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f')]
+})
+const flipParity = payload => {
+  const out = payload.slice()
+  const controlAt = 8 + 2 + vector5Leaf.length + 2
+  out[controlAt] ^= 0x01
+  return out
+}
+const malformedCw1 = [
+  {name: 'a trailing byte after the last item', value: bech32mOf('cw', concat(vector5Payload, Uint8Array.of(0x00))), why: 'the length prefixes must consume the payload exactly'},
+  {name: 'the last item one byte short', value: bech32mOf('cw', vector5Payload.slice(0, -1)), why: 'a length prefix claims more bytes than remain'},
+  {name: 'a length prefix cut in half', value: bech32mOf('cw', concat(vector5Payload.slice(0, 8), Uint8Array.of(0x00))), why: 'one byte where two are needed'},
+  {name: 'the script alone', value: bech32mOf('cw', vector5Payload.slice(0, 8 + 2 + vector5Leaf.length)), why: 'no control block'},
+  {name: 'the header alone', value: bech32mOf('cw', vector5Payload.slice(0, 8)), why: 'no script and no control block'},
+  {name: 'shorter than the header', value: bech32mOf('cw', vector5Payload.slice(0, 7)), why: 'not even a locktime and a sequence'},
+  {name: 'a control block of 32 bytes', value: cw1Of({script: vector5Leaf, controlBlock: NUMS_H, witness: []}), why: 'a control block is 33 + 32m bytes'},
+  {name: 'a control block of 34 bytes', value: cw1Of({script: vector5Leaf, controlBlock: concat(Uint8Array.of(0xc0), NUMS_H, Uint8Array.of(0)), witness: []}), why: 'a control block is 33 + 32m bytes'},
+  {name: 'the wrong parity bit', value: bech32mOf('cw', flipParity(vector5Payload)), why: 'the control block names the other Q parity, so it commits to no key'},
+  {name: 'a ck human-readable part', value: bech32mOf('ck', vector5Payload), why: 'a cw1 payload under the ck prefix'},
+  {name: 'a bech32 checksum', value: bech32.encode('cw', bech32.toWords(vector5Payload), false), why: 'bech32, not bech32m'}
+]
+
+const offCurve = x => ({x, cp1: bech32mOf('cp', hexToBytes(x))})
+const invalidCp1 = [
+  {...offCurve('0000000000000000000000000000000000000000000000000000000000000005'), why: 'x = 5 is not the x coordinate of any secp256k1 point'},
+  {...offCurve('fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f'), why: 'x = p is outside the field'}
+]
+for (const c of invalidCp1) {
+  let onCurve = true
+  try {
+    liftEven(hexToBytes(c.x))
+  } catch {
+    onCurve = false
+  }
+  if (onCurve) throw new Error(`${c.x} is on the curve after all`)
+}
+
+const spends = {
+  version: VERSION,
+  spec: SPEC,
+  description:
+    'Spending a LUD-25 note (lnurl/luds 6e865b1, "unified taproot verification"). Every note is a BIP-341 output key Q; a ck1 opens it by the key path and a cw1 by one leaf of its script tree, and every signature in either signs the BIP-341 sighash of input 0 of the canonical spend transaction for the mint\'s domain. bearers: bearer notes (NUMS internal key, one OP_SHA256 <h> OP_EQUAL leaf) with every intermediate value. keyPath: one key\'s ck1 at several domains, and crossDomain pairs that must not verify. tree: the three-leaf note the grader rotates a funded note into, with each leaf\'s cw1 and the verdict LUD-25\'s leaf policy gives it, and the key path of the tweaked key. checksig: a <key> OP_CHECKSIG leaf with its script-path SigMsg and sighash at two claimed times. timeClaims, leafPolicy: the two SERVICE-side rules consensus does not decide, each case with the verdict and why. malformedCw1 and invalidCp1 must not decode to a note. shortForms: a 64-hex value names the same note, or makes the same spend, as its long form. Expected verdicts are written by hand; tools/selfcheck.mjs recomputes every one.',
+  conventions: {
+    domain: "the SERVICE's full domain name, lowercased, never its scheme or port: new URL(noteUrl).hostname.toLowerCase()",
+    canonicalSpendTransaction:
+      'nVersion 2; vin[0] prevout (tagged_hash("LNURLcash/mint", domain), 0), empty scriptSig, nSequence as claimed; vout[0] value 0, empty scriptPubKey; nLockTime as claimed; spent output (OP_1 <Q>, 0). Serialised with its witness in spec-vectors.json vector3.spendTransaction',
+    sigMsg:
+      'hash_type 0x00 || nVersion u32le 2 || nLockTime u32le || sha256(prevout txid || u32le 0) || sha256(i64le 0) || sha256(0x22 || 0x51 0x20 || Q) || sha256(u32le nSequence) || sha256(i64le 0 || 0x00) || spend_type (0x00 key path, 0x02 script path) || input_index u32le 0, then for a script path tapleaf_hash(leaf) || 0x00 || 0xffffffff',
+    sighash: 'tagged_hash("TapSighash", 0x00 || SigMsg)',
+    keyPath: 'ck1 = Q (32) || BIP-340 signature (64) over the key-path sighash with locktime 0 and sequence 0xffffffff; SIGHASH_DEFAULT only; any other payload length is refused',
+    cw1Payload: 'u32 locktime || u32 sequence || (u16 len || item)* over the script, the control block, then the witness items bottom of stack first; integers big-endian; the prefixes must consume the payload exactly, and a script and control block are mandatory',
+    leafPolicy: {
+      leafVersion: 'control_block[0] & 0xfe must be 0xc0',
+      opSuccess: [80, 98, '126-129', '131-134', 137, 138, 141, 142, '149-153', '187-254'],
+      scan: 'opcodes outside pushed data only: 0x01-0x4b push that many bytes, OP_PUSHDATA1/2/4 (0x4c/0x4d/0x4e) push a 1/2/4-byte little-endian length'
+    },
+    timeClaims: {
+      locktimeThreshold: 500_000_000,
+      locktime: 'non-zero: refused below the threshold (a block height), refused above the mint clock',
+      sequenceDisableFlag: 0x80000000,
+      sequenceTypeFlag: SEQUENCE_TIME_FLAG,
+      sequenceValueMask: 0xffff,
+      granularitySeconds: 512,
+      sequence: 'bit 31 set: no relative lock. Otherwise bit 22 must be set (else a block count, refused), and (sequence & 0xffff) * 512 seconds must have passed since the mint credited the note (lockedAt)'
+    }
+  },
+  nums: bytesToHex(NUMS_H),
+  bearers: spendBearers,
+  keyPath: {
+    secretKey: bytesToHex(SPEND_KEY),
+    Q: bytesToHex(SPEND_KEY_Q),
+    cp1: bech32mOf('cp', SPEND_KEY_Q),
+    spends: ['mint.example', 'moneyer.dev', 'localhost', '127.0.0.1', 'MINT.EXAMPLE'].map(keyPathAt),
+    crossDomain: [
+      {signedFor: 'mint.example', verifiedAt: 'moneyer.dev', valid: false, why: 'another mint'},
+      {signedFor: 'mint.example', verifiedAt: 'mint.example.com', valid: false, why: 'a longer name is a different domain'},
+      {signedFor: 'localhost', verifiedAt: '127.0.0.1', valid: false, why: 'the same machine under another name is another domain'},
+      {signedFor: 'mint.example', verifiedAt: 'MINT.EXAMPLE', valid: true, why: 'domains are compared lowercased'}
+    ]
+  },
+  domains: [
+    {url: 'https://mint.example/w?k1=00', domain: 'mint.example'},
+    {url: 'https://Mint.Example/w', domain: 'mint.example'},
+    {url: 'http://127.0.0.1:8899/w', domain: '127.0.0.1'},
+    {url: 'https://localhost:3338/w', domain: 'localhost'},
+    {url: 'lnurlw://moneyer.dev/w?k1=00', domain: 'moneyer.dev'}
+  ],
+  tree: treeCase(),
+  checksig: checksigCase(),
+  timeClaims,
+  leafPolicy: leafPolicies,
+  malformedCw1,
+  invalidCp1,
+  shortForms: spendBearers.map(b => ({
+    Q: b.Q,
+    cp1Slot: {hex: b.h, sameAs: b.cp1},
+    k1Slot: {hex: b.preimage, sameAs: b.cw1}
+  }))
+}
+
 // ---- write ---------------------------------------------------------------
 
 const files = [
@@ -3210,7 +3734,8 @@ const files = [
   write('mint-to-hash.json', mintToHash),
   write('part2.json', part2),
   write('nostr-seed.json', nostrSeed),
-  write('spec-vectors.json', specVectors)
+  write('spec-vectors.json', specVectors),
+  write('spends.json', spends)
 ]
 
 write('index.json', {

@@ -18,6 +18,7 @@ import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {randomBytes} from 'node:crypto'
 import {realpathSync} from 'node:fs'
 import {pathToFileURL} from 'node:url'
+import {bearer, encodeCp1, encodeCs1, hOf, judge, noteOf, spendOf, timeRulesSkipped} from './spend.mjs'
 
 const LSM_PREFIX = 'Lightning Signed Message:'
 
@@ -44,15 +45,20 @@ const ser32 = value => {
 
 const noteId = k1 => bytesToHex(sha256(hexToBytes(k1)))
 
-const sigDigest = (noteIdHex, amountMsat) =>
+// The Lightning-signed-message digest over LNURLcash:<amount>:<subject>.
+// For a certificate the subject is hex(Q); the optional bound-mint receipt
+// keeps the h it has always signed.
+const sigDigest = (subjectHex, amountMsat) =>
   sha256(
     sha256(
       new Uint8Array([
         ...utf8ToBytes(LSM_PREFIX),
-        ...utf8ToBytes(`LNURLcash:${amountMsat}:${noteIdHex}`)
+        ...utf8ToBytes(`LNURLcash:${amountMsat}:${subjectHex}`)
       ])
     )
   )
+
+const nowSecs = () => Math.floor(Date.now() / 1000)
 
 // msat -> the amount part of a bolt11 human-readable part, exactly. 'n' is
 // 100 msat per unit, 'p' is 0.1, so anything not a multiple of 100 msat
@@ -81,8 +87,13 @@ const DEFAULTS = {
   // reproduces the layout lnurl-mint once emitted, forwarding its node's
   // signmessage output unreordered.
   signatureLayout: 'trailing',
-  // withhold sig/sig2 entirely, as a SERVICE with no funding source does
+  // Certify every note it issues with a cs1 over hex(Q), a bearer note
+  // included. LUD-25 makes that a SHOULD; false withholds sig/sig2
+  // entirely, as a SERVICE with no signer does.
   signatures: true,
+  // The hosts a spend's signature may be bound to. Unset, the mock takes
+  // the hostname it was reached at, which is what a note URL for it names.
+  domains: undefined,
   // how the payRequest spells its withdrawLink. 'plain' is the fetchable
   // https:// URL the reference mint emits and the spec's diagram shows;
   // 'lnurlw' is the LUD-17 scheme form some mints emitted under the
@@ -117,7 +128,7 @@ const DEFAULTS = {
   // fail every melt's payment, restoring the note
   meltAlwaysFails: false,
   // non-compliant: generate the replacement secret SERVICE-side and hand
-  // it back, the exposure LUD-25's h/h2 exists to close
+  // it back, the exposure LUD-25's p1/p2 exist to close
   serverGeneratedSecrets: false,
   // non-compliant: round the total mint fee up to a whole sat, as a fee
   // ceiling the mint fee to a whole sat, as dni's lnurl-mint does on
@@ -133,6 +144,43 @@ const DEFAULTS = {
   verifyLeaksEarly: false,
   // delay before responding, in milliseconds
   slowMs: 0,
+  // ---- misbehaviour: the unified taproot model ----
+  //
+  // Each of these is a rule LUD-25 (luds 6e865b1) states and a real mint
+  // could plausibly skip. The grader must catch every one.
+  //
+  // accept a leaf version other than 0xc0, as consensus alone does, so
+  // anyone who sees such a leaf can spend it
+  leafVersionUnchecked: false,
+  // accept a leaf carrying an OP_SUCCESSx opcode, likewise
+  opSuccessUnchecked: false,
+  // ignore a script path's time claim: true for every rule, or one or more
+  // of 'blockHeight', 'future', 'blockCount' and 'relative' (a list, or
+  // comma-separated), so each refusal can be shown to matter on its own
+  ignoresTimeClaims: false,
+  // over-strict: refuse every non-zero locktime, a past Unix time included
+  refusesLocktimes: false,
+  // accept any ck1 whose Q is outstanding without checking its signature,
+  // so a spend bound to another mint's domain, or to none, opens the note
+  unverifiedCk1: false,
+  // answer the informational GET for a k1 from its Q alone, never checking
+  // that the spend opens it
+  infoSkipsVerification: false,
+  // match a retried mutation on the raw k1, p1 and p2 strings rather than
+  // the notes they decode to, so a retry spelling the same spend another
+  // way is refused as already spent
+  replayMatchesStrings: false,
+  // the reason a p1/p2 naming a note already outstanding or burned gets.
+  // LUD-25 fixes it as exactly "already in use"
+  alreadyInUseReason: 'already in use',
+  // certify a bearer note over its h, the pre-taproot message, instead of
+  // over hex(Q)
+  certificateOverH: false,
+  // refuse a cp1 wherever one may go, as a mint that never took up key
+  // path notes does
+  refusesCp1Outputs: false,
+  // accept a cp1 whose Q is not the x coordinate of a curve point
+  acceptsOffCurveCp1: false,
   // reject splits and mints, as a mint winding down does
   sunset: false,
   // expose /_test/ endpoints so out-of-process test suites can fund a
@@ -205,8 +253,9 @@ const DEFAULTS = {
   // two can be cached or stale.
   mintToHash: false,
   // LUD-25 "Checking a note without exposing it": answer the informational
-  // GET by `?h=sha256(k1)` as well as by `?k1=`, so a wallet can look a note
-  // up without putting the live secret in a query string. Optional.
+  // GET by `?p=` (a cp1, or a bearer note's hex h) as well as by `?k1=`, so
+  // a wallet can look a note up without putting its spend in a query
+  // string. LUD-25 makes this a MUST; `?h=` is still read as p's older name.
   //   true             - compliant
   //   'echoesK1'       - non-compliant: fills in k1, putting the secret back
   //                      on the wire the lookup existed to keep it off
@@ -215,8 +264,7 @@ const DEFAULTS = {
   //   'hidesSpent'     - non-compliant: hides a retained burned h as unknown
   //   'revealsSpent'   - legacy alias for the now-compliant true behaviour
   //   'acceptsBoth'    - non-compliant: accepts k1 and h together
-  // Current reference wallet and mint use secret-free informational
-  // lookups by default. Set false only to model an older SERVICE.
+  // Set false only to model an older SERVICE, which the grader now fails.
   hashLookup: true,
   // LUD-25 lets a SERVICE refuse an oversized merge outright rather than
   // let the URL be mangled upstream. 0 is no explicit cap; a positive number
@@ -321,20 +369,23 @@ export const createMockMint = async (options = {}) => {
       : []
   )
 
-  // notes are stored by id - sha256(k1) - never by the secret itself. For a
-  // freshly minted note that id is exactly the payment hash of the invoice
-  // that funded it, so the preimage never needs to be persisted at all.
-  const notes = new Map() // id -> {amountMsat, state: outstanding|pending|burned}
+  // Every note is a taproot output key Q, stored under hex(Q), and nothing
+  // secret is ever kept: a bearer note's h is remembered only so the
+  // certificateOverH fixture can sign the pre-taproot message. lockedAt is
+  // when the mock credited the note, where a relative lock starts counting.
+  const notes = new Map() // hex(Q) -> {amountMsat, state, lockedAt, h?}
   const invoices = new Map() // paymentHash -> {amountMsat, preimage, settled}
+  // The note a mint invoice would be keyed under if it fell back to its
+  // payment preimage: the bearer note of its payment hash. Spoken for from
+  // the moment the invoice exists, so nothing can be minted over it.
+  const invoiceNotes = new Set()
   // Provenance for retried mutations: which outputs a given set of inputs
-  // minted. Recorded, never inferred - matching on "a note exists at h"
-  // alone would let anyone holding a burned k1 and any outstanding note
-  // id pull a success out of the mint.
-  const swaps = new Map() // identity -> [{id, amountMsat, sig}]
-  // Output ids a mint quote has already claimed: h -> the payment hash of
-  // the invoice that will credit it. Only ever written when mintToHash is
-  // on, so with the option off this is empty and every collision check
-  // below asks exactly what it asked before.
+  // minted. Recorded, never inferred - matching on "a note exists at Q"
+  // alone would let anyone holding a burned spend and any outstanding note
+  // pull a success out of the mint.
+  const swaps = new Map() // identity -> [{q, amountMsat, sig}]
+  // Outputs a mint quote has already claimed: hex(Q) -> the payment hash of
+  // the invoice that will credit it.
   const boundOutputs = new Map()
 
   // A deterministic watch-only branch for the registered-address fixture.
@@ -351,50 +402,66 @@ export const createMockMint = async (options = {}) => {
   )
   let registeredIndex = 0
 
-  // An id is spoken for if it is a note in any state, the payment hash of
-  // an invoice this mint issued, or the output a bound quote is waiting
-  // to credit. Minting over any of them hands the output to somebody who
+  // A Q is spoken for if it is a note in any state, the fallback note of an
+  // invoice this mint issued, or the output a bound quote is waiting to
+  // credit. Minting over any of them hands the output to somebody who
   // already knows how to spend it, or bricks a payment that can no longer
   // land.
-  const outputIdInUse = id =>
-    notes.has(id) || invoices.has(id) || boundOutputs.has(id)
+  const outputInUse = qHex =>
+    notes.has(qHex) || invoiceNotes.has(qHex) || boundOutputs.has(qHex)
 
   const nextRegisteredOutput = () => {
     const branch = secp256k1.Point.fromBytes(concat(Uint8Array.of(0x02), registeredBranchPubkey))
     for (;;) {
       const index = registeredIndex++
-      const tweak = BigInt(
-        `0x${bytesToHex(taggedHash('LNURLcash/derive', registeredBranchPubkey, registeredChainCode, ser32(index)))}`
-      )
-      if (tweak >= secp256k1.Point.Fn.ORDER) continue
-      const output = bytesToHex(branch.add(secp256k1.Point.BASE.multiply(tweak)).toBytes(true).slice(1))
-      if (!outputIdInUse(output)) return output
+      // t mod n, as the spec requires: a tweak >= n is reduced, not skipped
+      const tweak =
+        BigInt(`0x${bytesToHex(taggedHash('LNURLcash/derive', registeredBranchPubkey, registeredChainCode, ser32(index)))}`) %
+        secp256k1.Point.Fn.ORDER
+      const note = branch.add(secp256k1.Point.BASE.multiplyUnsafe(tweak))
+      if (note.equals(secp256k1.Point.ZERO)) continue
+      const output = bytesToHex(note.toBytes(true).slice(1))
+      if (!outputInUse(output)) return output
     }
   }
 
-  // What makes a request the same request: the same input k1 set, the
-  // same h, the same h2, the same amount. The inputs are a set rather
-  // than a sequence, because a merge naming the same notes in a different
-  // order is the same merge. Anything else naming a burned input is a
-  // double-spend attempt and is refused exactly as it was before, with
-  // the same reason string, so no oracle appears.
-  const swapIdentity = (k1s, h, h2, amountRaw) =>
-    [[...k1s].sort().join(','), h ?? '', h2 ?? '', amountRaw ?? ''].join('|')
+  // What makes a request the same request: the same set of notes burned,
+  // the same p1, the same p2, the same amount. Matched on the Qs they
+  // decode to, since one note may be opened by more than one valid spend
+  // and named by more than one spelling (luds 6e865b1). The inputs are a
+  // set, because a merge naming the same notes in a different order is the
+  // same merge. Anything else naming a burned input is a double-spend and
+  // gets the ordinary refusal, so no oracle appears.
+  const swapIdentity = (inputs, out1, out2, amountRaw) =>
+    [[...inputs].sort().join(','), out1 ?? '', out2 ?? '', amountRaw ?? ''].join('|')
 
-  const sign = (noteIdHex, amountMsat, key = priv) => {
+  const signWith = (digest, key) => {
+    const lead = secp256k1.sign(digest, key, {format: 'recovered', prehash: false})
+    return opts.signatureLayout === 'leading' ? lead : new Uint8Array([...lead.subarray(1), lead[0]])
+  }
+
+  // A cs1 over (hex(Q), amount), the certificate LUD-25 has a SERVICE
+  // hand out for every note it issues. Undefined when signatures are off.
+  const certify = (qHex, amountMsat, {h = null, previousKey = opts.signWithPreviousKey} = {}) => {
     if (!opts.signatures) return undefined
-    const lead = secp256k1.sign(sigDigest(noteIdHex, amountMsat), key, {
-      format: 'recovered',
-      prehash: false
-    })
-    const trailing = new Uint8Array([...lead.subarray(1), lead[0]])
-    return bytesToHex(opts.signatureLayout === 'leading' ? lead : trailing)
+    const key = previousKey && previousPriv ? previousPriv : priv
+    const subject = opts.certificateOverH && h ? h : qHex
+    return encodeCs1(amountMsat, signWith(sigDigest(subject, amountMsat), key))
   }
 
-  const mintNote = (id, amountMsat, {previousKey = opts.signWithPreviousKey} = {}) => {
-    notes.set(id, {amountMsat, state: 'outstanding'})
-    return sign(id, amountMsat, previousKey && previousPriv ? previousPriv : priv)
+  // The optional bound-mint receipt keeps its own signature: raw hex over
+  // LUD-25's earlier message LNURLcash:<amount>:<h> (docs/BOUND-MINT-RECEIPTS.md).
+  const signReceipt = (h, amountMsat) =>
+    opts.signatures ? bytesToHex(signWith(sigDigest(h, amountMsat), priv)) : undefined
+
+  const mintNote = (qHex, amountMsat, options = {}) => {
+    notes.set(qHex, {amountMsat, state: 'outstanding', lockedAt: nowSecs(), ...(options.h ? {h: options.h} : {})})
+    return certify(qHex, amountMsat, options)
   }
+
+  // The note a k1 opens, by its Q, whatever spelling the k1 takes. Also
+  // takes a cp1 or a hex h, for the helpers below that only name a note.
+  const qOfK1 = k1 => spendOf(k1)?.q ?? null
 
   const applyFee = gross => {
     const proportional =
@@ -429,21 +496,33 @@ export const createMockMint = async (options = {}) => {
     opts,
     // test hooks
     previousPubkeys,
-    // creditNote(k1, amount) is unchanged. Pass {previousKey: true} to
-    // sign the note under previousPrivateKey instead, which is how a case
-    // puts one note under the old key and the rest under the new.
+    // creditNote(k1, amount) credits the note a spend opens: a 64-hex
+    // preimage (the usual case, and the bearer note it names), a ck1 or a
+    // cw1. Pass {previousKey: true} to certify it under previousPrivateKey
+    // instead, which is how a case puts one note under the old key and
+    // the rest under the new. Returns the note's cs1, if it gets one.
     creditNote(k1, amountMsat, options = {}) {
-      return mintNote(noteId(k1), amountMsat, options)
+      const spend = spendOf(k1)
+      if (!spend) throw new Error('creditNote takes a spend: a 64-hex preimage, a ck1 or a cw1')
+      const h = /^[0-9a-f]{64}$/i.test(k1.trim()) ? noteId(k1.trim().toLowerCase()) : null
+      return mintNote(spend.q, amountMsat, {...options, ...(h ? {h} : {})})
+    },
+    // creditOutput(ref, amount) credits a note by what names it: a cp1 or a
+    // bearer note's hex h, as a WALLET discloses it.
+    creditOutput(ref, amountMsat, options = {}) {
+      const q = noteOf(ref)
+      if (!q) throw new Error('creditOutput takes a cp1 or a 64-hex h')
+      return mintNote(q, amountMsat, {...options, ...(hOf(ref) ? {h: hOf(ref)} : {})})
     },
     noteState(k1) {
-      return notes.get(noteId(k1))?.state ?? null
+      return notes.get(qOfK1(k1))?.state ?? null
     },
     settleMelt(k1) {
-      const note = notes.get(noteId(k1))
+      const note = notes.get(qOfK1(k1))
       if (note) note.state = 'burned'
     },
     failMelt(k1) {
-      const note = notes.get(noteId(k1))
+      const note = notes.get(qOfK1(k1))
       if (note) note.state = 'outstanding'
     }
   }
@@ -462,14 +541,18 @@ export const createMockMint = async (options = {}) => {
     }
     const fail = reason => send({status: 'ERROR', reason})
     if (url.pathname === '/_test/credit') {
-      const k1 = q.get('k1')?.toLowerCase()
+      // k1 names the note by a spend of it, p by its cp1 or hex h.
+      const k1 = q.get('k1')?.trim()
+      const p = q.get('p')?.trim()
       const amount = Number(q.get('amount'))
-      if (!k1 || !/^[0-9a-f]{64}$/.test(k1) || !Number.isFinite(amount)) {
-        return fail('need k1 (32 bytes hex) and amount')
+      const qHex = k1 ? qOfK1(k1) : p ? noteOf(p) : null
+      if (!qHex || !Number.isFinite(amount)) {
+        return fail('need k1 (a 64-hex preimage, ck1 or cw1) or p (a cp1 or 64-hex h), and amount')
       }
       const previousKey = q.get('key') === 'previous'
-      const sig = mintNote(noteId(k1), amount, {previousKey})
-      return send({status: 'OK', k1, amount, sig: sig ?? null})
+      const h = k1 && /^[0-9a-f]{64}$/i.test(k1) ? noteId(k1.toLowerCase()) : p ? hOf(p) : null
+      const sig = mintNote(qHex, amount, {previousKey, ...(h ? {h} : {})})
+      return send({status: 'OK', ...(k1 ? {k1} : {p}), amount, sig: sig ?? null})
     }
     if (url.pathname === '/_test/settle') {
       const hash = q.get('payment_hash')?.toLowerCase()
@@ -477,17 +560,17 @@ export const createMockMint = async (options = {}) => {
       if (!invoice) return fail('unknown payment hash')
       invoice.settled = true
       // Paying a mint invoice brings its comment-bound note into existence.
-      // The payment-hash target is reachable only under deliberate legacy
-      // defect flags that allowed an unnamed quote.
-      const target = invoice.boundTo ?? hash
-      if (!notes.has(target)) mintNote(target, invoice.amountMsat)
+      // The payment-preimage fallback is reachable only under deliberate
+      // legacy defect flags that allowed an unnamed quote.
+      const target = invoice.boundTo ?? bearer(hexToBytes(hash)).q
+      if (!notes.has(target)) mintNote(target, invoice.amountMsat, {h: invoice.boundH ?? (invoice.boundTo ? null : hash)})
       if (invoice.boundTo) boundOutputs.delete(invoice.boundTo)
       return send({status: 'OK', settled: true})
     }
     if (url.pathname === '/_test/state') {
-      const k1 = q.get('k1')?.toLowerCase()
+      const k1 = q.get('k1')?.trim()
       if (!k1) return fail('need k1')
-      return send({status: 'OK', state: notes.get(noteId(k1))?.state ?? null})
+      return send({status: 'OK', state: notes.get(qOfK1(k1))?.state ?? null})
     }
     return fail('unknown test hook')
   }
@@ -709,8 +792,9 @@ export const createMockMint = async (options = {}) => {
       // read at all, so the callback answers exactly what it answered
       // before the option existed.
       let boundTo = null
+      let boundH = null
       let echoBound = false
-      let requestedH = null
+      let requested = null
       if (opts.mintToHash) {
         // absent is not the same as empty: a wallet that sent `h=` meant
         // to bind, and must not be handed an unbound quote in silence
@@ -724,79 +808,80 @@ export const createMockMint = async (options = {}) => {
           // own lowercase secret. Normalised here, before the collision
           // check, or an upper-case spelling walks straight past it.
           const wellFormed = /^[0-9a-f]{64}$/i.test(sent)
-          const h = wellFormed ? sent.toLowerCase() : sent
           // Both refusals come BEFORE an invoice exists, which is the
           // whole point: a wallet must never pay for a quote this mint
           // was always going to reject.
           if (!wellFormed && !opts.mintToHashAcceptsMalformedH) {
             return fail('Invalid h.')
           }
-          // An id already spoken for must never be minted over. Refused
-          // with the same reason a colliding output hash gets on the
-          // withdraw callback, so a probe learns nothing about which ids
-          // exist here.
-          if (outputIdInUse(h) && !opts.mintToHashAcceptsUsedH) {
+          // An output already spoken for must never be minted over.
+          // Refused with the reason the extension has always given, so a
+          // probe learns nothing about which notes exist here.
+          const named = wellFormed ? noteOf(sent) : null
+          if (named && outputInUse(named) && !opts.mintToHashAcceptsUsedH) {
             return fail('Invalid or already spent k1.')
           }
           if (wellFormed) {
-            requestedH = h
+            requested = named
             // The echo says "this quote is bound", so an honest mint
             // sets it exactly when it did bind. mintToHashIgnoresH is the
             // mint that says it and does not; leaving 'quote' out of
             // mintToHashAdvertisedOn is the mint that does and does not say.
             echoBound = mintToHashPlaces.has('quote')
-            if (!opts.mintToHashIgnoresH) boundTo = h
+            if (!opts.mintToHashIgnoresH) {
+              boundTo = named
+              boundH = sent.toLowerCase()
+            }
           }
         }
       }
 
-      // The LUD-25 spelling. It is mandatory for every mint quote. The
-      // additive `h` spelling may corroborate it, but never substitutes for
-      // it and must name the same output when both are present.
+      // The LUD-25 spelling. It is mandatory for every mint quote: a cp1<Q>,
+      // or a bearer note's hex h. The additive `h` spelling may corroborate
+      // it, but never substitutes for it and must name the same note.
       let namedByComment = false
       // >= 64, the same threshold the runner reads the capability at: a
       // commentAllowed too short to carry a 32-byte hash is not this
       // capability, so nothing about it may be required either.
       if (opts.commentAllowed >= 64) {
         const sent = q.get('comment')
-        const wellFormed = sent !== null && sent !== '' && /^[0-9a-f]{64}$/i.test(sent)
-        {
-          if (wellFormed) {
-            const h = sent.toLowerCase()
-            // Same collision rule the `h` spelling gets: an id already
-            // spoken for must never be minted over, whichever parameter
-            // named it.
-            if (outputIdInUse(h) && !opts.mintToHashAcceptsUsedH) {
-              return fail('Invalid or already spent k1.')
-            }
-            if (
-              requestedH !== null &&
-              requestedH !== h &&
-              !opts.mintToHashIgnoresH
-            ) {
-              return fail('h and comment must name the same output.')
-            }
-            // The normative comment always binds the quote. The defect flag
-            // only models an extension implementation that ignores or fails
-            // to compare h.
-            boundTo = h
-            namedByComment = true
-          } else if (opts.registeredAddress) {
-            // The next unused key on the branch. Claimed as the quote is
-            // issued, so two free-text quotes never name one output.
-            boundTo = nextRegisteredOutput()
-            namedByComment = true
-          } else if (
-            !opts.commentFallsBack &&
-            !(opts.commentFallsBackWhenAbsent && sent === null)
-          ) {
-            // A mint quote without the mandatory comment can only fall back
-            // to the payment preimage. The current draft forbids that even
-            // when the additive `h` field happened to name an output too.
-            return fail(
-              'Missing or malformed comment: a hex-encoded 32-byte hashed secret is required to mint.'
-            )
+        const hex = sent === null ? null : hOf(sent)
+        const named =
+          sent === null || (opts.refusesCp1Outputs && !hex)
+            ? null
+            : noteOf(sent, {offCurveOk: opts.acceptsOffCurveCp1})
+        if (named) {
+          // Same collision rule the `h` spelling gets: an output already
+          // spoken for must never be minted over, whichever parameter
+          // named it, in whichever spelling.
+          if (outputInUse(named) && !opts.mintToHashAcceptsUsedH) {
+            return fail('Invalid or already spent k1.')
           }
+          if (requested !== null && requested !== named && !opts.mintToHashIgnoresH) {
+            return fail('h and comment must name the same output.')
+          }
+          // The normative comment always binds the quote. The defect flag
+          // only models an extension implementation that ignores or fails
+          // to compare h.
+          boundTo = named
+          boundH = hex
+          namedByComment = true
+        } else if (opts.registeredAddress) {
+          // The next unused key on the branch. Claimed as the quote is
+          // issued, so two free-text quotes never name one output.
+          boundTo = nextRegisteredOutput()
+          boundH = null
+          namedByComment = true
+        } else if (
+          !opts.commentFallsBack &&
+          !(opts.commentFallsBackWhenAbsent && sent === null)
+        ) {
+          // A mint quote without the mandatory comment can only fall back
+          // to the payment preimage. The current draft forbids that even
+          // when the additive `h` field happened to name an output too.
+          return fail(
+            "Missing or malformed comment: a cp1<Q>, or a bearer note's hex-encoded h, is required to mint."
+          )
         }
       }
 
@@ -806,9 +891,11 @@ export const createMockMint = async (options = {}) => {
       const invoice = {amountMsat: net, preimage, settled: false, pr}
       if (boundTo) {
         invoice.boundTo = boundTo
+        invoice.boundH = boundH
         boundOutputs.set(boundTo, paymentHash)
       }
       invoices.set(paymentHash, invoice)
+      invoiceNotes.add(bearer(hexToBytes(paymentHash)).q)
       const body = {pr, disposable: false}
       // Verify is safe for every conforming quote because comment-bound
       // minting makes the payment preimage ordinary settlement proof. The
@@ -823,12 +910,12 @@ export const createMockMint = async (options = {}) => {
       if (echoBound) body.mintToHash = true
       if (
         echoBound &&
-        boundTo &&
+        boundH &&
         opts.mintReceipt &&
         opts.verify &&
         opts.signatures
       ) {
-        body.mint = {h: boundTo, amount: net}
+        body.mint = {h: boundH, amount: net}
       }
       return send(body)
     }
@@ -851,30 +938,53 @@ export const createMockMint = async (options = {}) => {
         preimage: invoice.settled || opts.verifyLeaksEarly ? invoice.preimage : null,
         pr: invoice.pr ?? fakeInvoice(invoice.amountMsat, invoice.preimage)
       }
-      if (invoice.boundTo && opts.mintReceipt && opts.signatures) {
+      if (invoice.boundH && opts.mintReceipt && opts.signatures) {
         body.mint = {
-          h: invoice.boundTo,
+          h: invoice.boundH,
           amount: invoice.amountMsat,
           ...(invoice.settled
-            ? {sig: sign(invoice.boundTo, invoice.amountMsat)}
+            ? {sig: signReceipt(invoice.boundH, invoice.amountMsat)}
             : {})
         }
       }
       return send(body)
     }
 
+    // The hosts a spend's signature may be bound to: what the mock was told,
+    // or the hostname it was reached at, never the port.
+    const domains = opts.domains
+      ? asList(opts.domains).map(d => d.toLowerCase())
+      : [new URL(origin).hostname.toLowerCase()]
+    const lax = {
+      unverifiedCk1: opts.unverifiedCk1,
+      leafVersion: opts.leafVersionUnchecked,
+      opSuccess: opts.opSuccessUnchecked,
+      timeClaims: timeRulesSkipped(opts.ignoresTimeClaims)
+    }
+    // Does this spend open this note, right now? The mock's clock is the
+    // only one there is: a timelock it honours is its own assertion.
+    const opens = (spend, note) => {
+      if (opts.refusesLocktimes && spend.kind === 'script' && spend.locktime !== 0) {
+        return {ok: false, reason: 'locktimes are not supported here', specific: true}
+      }
+      return judge(spend, {domains, now: nowSecs(), lockedAt: note.lockedAt, lax})
+    }
+    const offCurveOk = opts.acceptsOffCurveCp1
+    const outputOf = ref =>
+      ref === null || (opts.refusesCp1Outputs && !hOf(ref)) ? null : noteOf(ref, {offCurveOk})
+
     // ---- LUD-03 informational GET ----
     if (url.pathname === '/w') {
-      const k1 = q.get('k1')?.toLowerCase()
-      // The hash lookup. Notes are already keyed by sha256(k1) internally,
-      // so this is a second way in to a lookup the mint can always do - and
-      // `h` is only ever read here, never at the callback, where the same
-      // letter means the hash of a NEW note.
-      const asked = q.get('h')?.toLowerCase()
-      if (k1 && asked && opts.hashLookup !== 'acceptsBoth') return fail('Unknown note.')
-      if (!k1 && asked && opts.hashLookup) {
-        if (!/^[0-9a-f]{64}$/.test(asked)) return fail('Unknown note.')
-        const held = notes.get(asked)
+      const k1 = q.has('k1') ? q.get('k1').trim() : null
+      // The lookup that keeps the spend off the wire: `p` names the note by
+      // its cp1 or a bearer note's hex h, and `h` is p's older name. Only
+      // ever read here, never at the callback, where p1/p2 name NEW notes.
+      const asked = q.has('p') ? q.get('p').trim() : q.has('h') ? q.get('h').trim() : null
+      if (k1 !== null && asked !== null && opts.hashLookup !== 'acceptsBoth') return fail('Unknown note.')
+      if (k1 === null && asked !== null && opts.hashLookup) {
+        const qHex = outputOf(asked)
+        if (!qHex) return fail('Unknown note.')
+        const held = notes.get(qHex)
         const invent = opts.hashLookup === 'answersUnknown' && !held
         if (!invent) {
           if (!held) return fail('Unknown note.')
@@ -883,14 +993,16 @@ export const createMockMint = async (options = {}) => {
           }
           if (held.state === 'pending') return fail('pending')
         }
+        const value = held?.amountMsat ?? 21000
+        const sig = held ? certify(qHex, value, {h: held.h}) : undefined
         return send({
           tag: 'withdrawRequest',
           callback: `${origin}/w/cb`,
-          // k1 is omitted: a wallet asking by hash already holds the secret,
-          // which is the only way it could have computed the hash to send.
+          // k1 is omitted: a wallet asking by p already holds the spend,
+          // or it asks on behalf of someone who does.
           ...(opts.hashLookup === 'echoesK1' ? {k1: 'c'.repeat(64)} : {}),
           minWithdrawable: 0,
-          maxWithdrawable: (held?.amountMsat ?? 21000) + opts.lieAboutValue,
+          maxWithdrawable: value + opts.lieAboutValue,
           defaultDescription: 'an LNURLcash note',
           // Keep the mock's optional way-home extension identical for
           // secret-free and raw-secret lookups. This is test fixture policy,
@@ -902,18 +1014,30 @@ export const createMockMint = async (options = {}) => {
                   : `${origin}/.well-known/lnurlp/${opts.username}`
               }
             : {}),
-          mintPubkey: pubkey
+          mintPubkey: pubkey,
+          ...(sig ? {sig} : {})
         })
       }
       if (!k1) return fail('Unknown note.')
-      if (!/^[0-9a-f]{64}$/.test(k1)) return fail('Unknown note.')
-      const note = notes.get(noteId(k1))
+      const spend = spendOf(k1)
+      if (!spend) return fail('Unknown note.')
+      const note = notes.get(spend.q)
       if (!note) return fail('Unknown note.')
+      // LUD-25: the spend is verified in full before anything is said, so
+      // a holder checking a note learns whether the spend it holds really
+      // opens it. A script path's own reason is safe to pass on.
+      if (!opts.infoSkipsVerification) {
+        const verdict = opens(spend, note)
+        if (!verdict.ok) return fail(verdict.specific ? verdict.reason : 'Unknown note.')
+      }
       if (note.state === 'burned') return fail('Note already spent.')
       if (note.state === 'pending') return fail('pending')
+      const sig = certify(spend.q, note.amountMsat, {h: note.h})
       return send({
         tag: 'withdrawRequest',
         callback: `${origin}/w/cb`,
+        // echoed as it came, so a wallet can copy it straight into a note
+        // URL or the callback
         k1: opts.echoWrongK1 ? 'f'.repeat(64) : k1,
         minWithdrawable: 0,
         maxWithdrawable: note.amountMsat + opts.lieAboutValue,
@@ -929,34 +1053,73 @@ export const createMockMint = async (options = {}) => {
                 : `${origin}/.well-known/lnurlp/${opts.username}`
             }
           : {}),
-        mintPubkey: pubkey
+        mintPubkey: pubkey,
+        ...(sig ? {sig} : {})
       })
     }
 
     // ---- the mutating callback ----
     if (url.pathname === '/w/cb') {
-      const k1s = q.getAll('k1').map(s => s.toLowerCase())
+      const k1s = q.getAll('k1').map(s => s.trim())
       const pr = q.get('pr')
       const amountRaw = q.get('amount')
-      const h = q.get('h')
-      const h2 = q.get('h2')
+      // p1/p2, or h/h2, their older names
+      const p1 = q.get('p1') ?? q.get('h')
+      const p2 = q.get('p2') ?? q.get('h2')
 
       if (k1s.length === 0) return fail('Missing k1.')
       if (opts.acceptsOversizedMerge && k1s.length > 20) return send({status: 'OK'})
       if (opts.mergeCap > 0 && k1s.length > opts.mergeCap) return fail('too many k1')
-      // a repeated k1 would count one note's value twice into the output -
-      // refused atomically, as the reference mint does
-      if (new Set(k1s).size !== k1s.length) return fail('Invalid or already spent k1.')
+      const spends = k1s.map(spendOf)
+      if (spends.some(spend => spend === null)) return fail('Invalid or already spent k1.')
+      const inputs = spends.map(spend => spend.q)
+      // One note named twice, in any two spellings, would count its value
+      // twice into the output - refused atomically, as the reference does.
+      if (new Set(inputs).size !== inputs.length) return fail('Invalid or already spent k1.')
       if (pr && k1s.length > 1) return fail('pr must not be combined with multiple k1.')
       if (pr && amountRaw) return fail('pr must not be combined with amount.')
+
+      // The notes to credit, checked before anything is resolved so a bad
+      // one never burns anything. opts.acceptsMissingH2 (or its newer name)
+      // is the misbehaviour where a SERVICE fills in the change note itself
+      // rather than refusing: whoever runs the mint is then a prior holder
+      // of half the split.
+      let out1 = null
+      let out2 = null
+      if (!pr) {
+        out1 = outputOf(p1)
+        if (!out1) return fail('missing p1')
+        if (amountRaw !== null) {
+          out2 = outputOf(p2)
+          if (!out2 && p2 !== null) return fail('missing p2')
+          if (!out2) {
+            if (!opts.acceptsMissingH2 && !opts.acceptsMissingP2) return fail('missing p2')
+            out2 = bearer(randomBytes(32)).q
+          }
+        }
+      }
+
+      // Every spend is verified against its note, burned or not, so a
+      // retried burn can still be recognised as one.
+      const found = []
+      for (const [i, spend] of spends.entries()) {
+        const note = notes.get(spend.q)
+        if (!note) return fail('Invalid or already spent k1.')
+        const verdict = opens(spend, note)
+        if (!verdict.ok) return fail(verdict.specific ? verdict.reason : 'Invalid or already spent k1.')
+        found.push({q: inputs[i], note})
+      }
 
       // The retry branch, before anything is refused for a burned input.
       // This path is a READ: it burns nothing, mints nothing and moves no
       // balance, so it does not go through finish() either. The exact
-      // signatures are part of the recorded success, including which
+      // certificates are part of the recorded success, including which
       // published key produced them during a deliberate key rotation.
+      const identity = opts.replayMatchesStrings
+        ? swapIdentity(k1s, p1, p2, amountRaw)
+        : swapIdentity(inputs, out1, out2, amountRaw)
       if (opts.retriedMutation === 'replay' && !pr) {
-        const outputs = swaps.get(swapIdentity(k1s, h, h2, amountRaw))
+        const outputs = swaps.get(identity)
         if (outputs) {
           const replay = {status: 'OK'}
           if (outputs[0].sig) replay.sig = outputs[0].sig
@@ -971,14 +1134,9 @@ export const createMockMint = async (options = {}) => {
         }
       }
 
-      const found = []
-      for (const k1 of k1s) {
-        if (!/^[0-9a-f]{64}$/.test(k1)) return fail('Invalid or already spent k1.')
-        const note = notes.get(noteId(k1))
-        if (!note) return fail('Invalid or already spent k1.')
+      for (const {note} of found) {
         if (note.state === 'burned') return fail('Invalid or already spent k1.')
         if (note.state === 'pending') return fail('pending')
-        found.push({k1, note})
       }
       const total = found.reduce((sum, f) => sum + f.note.amountMsat, 0)
 
@@ -996,14 +1154,13 @@ export const createMockMint = async (options = {}) => {
 
       // melt
       if (pr) {
-        const {k1, note} = found[0]
+        const {note} = found[0]
         note.state = 'pending'
         note.pendingSince = Date.now()
         const body = {status: 'OK'}
-        // The melt's own payment preimage, which is NOT the note secret and
+        // The melt's own payment preimage, which is NOT the note's spend and
         // must never be conflated with it: by the time a melt proof exists
-        // the note that funded it is already burned, so unlike a freshly
-        // minted note's preimage this one is not bearer material.
+        // the note that funded it is already burned.
         const meltPreimage = bytesToHex(randomBytes(32))
         if (opts.verify) {
           const paymentHash = noteId(meltPreimage)
@@ -1031,26 +1188,16 @@ export const createMockMint = async (options = {}) => {
         return finish(body)
       }
 
-      if (!h) return fail('missing h')
-      // opts.acceptsMissingH2: the misbehaviour where a SERVICE fills in the
-      // change note's secret itself rather than refusing. Whoever runs the
-      // mint is then a prior holder of half the split.
-      if (amountRaw !== null && !h2 && !opts.acceptsMissingH2) return fail('missing h2')
-      if (!/^[0-9a-f]{64}$/.test(h)) return fail('missing h')
-      if (h2 && !/^[0-9a-f]{64}$/.test(h2)) return fail('missing h2')
-      // One id cannot carry two notes, and an id already in use - as a note
-      // in any state, as a mint invoice's payment hash, or as the output a
-      // bound quote is waiting to credit - must never be minted over: the
-      // invoice case points a future payer's money at a stranger's note
-      // (its /verify serves the preimage that IS the k1 of whatever sits
-      // under that id), and a burned note's id has a preimage every
-      // previous holder still knows. Refused with the same reason as any
-      // dead k1, so a probe learns nothing about which ids exist.
-      if (h2 && h2 === h) return fail('Invalid or already spent k1.')
-      for (const outputId of h2 ? [h, h2] : [h]) {
-        if (outputIdInUse(outputId)) {
-          return fail('Invalid or already spent k1.')
-        }
+      // One Q cannot carry two notes, and a Q already in use - as a note in
+      // any state, as a mint invoice's fallback note, or as the output a
+      // bound quote is waiting to credit - must never be minted over: a
+      // burned note's spend is known to every previous holder, and an
+      // outstanding one's to whoever holds it now. LUD-25 fixes the reason,
+      // so a WALLET transferring to someone's next key knows to try the one
+      // after.
+      if (out2 && out2 === out1) return fail('p1 and p2 name the same note.')
+      for (const output of out2 ? [out1, out2] : [out1]) {
+        if (outputInUse(output)) return fail(opts.alreadyInUseReason)
       }
 
       // split
@@ -1080,11 +1227,11 @@ export const createMockMint = async (options = {}) => {
         }
         if (change < 1) return fail('insufficient value')
         for (const {note} of found) note.state = 'burned'
-        const sig = mintNote(h, amount)
-        const sig2 = mintNote(h2, change)
-        swaps.set(swapIdentity(k1s, h, h2, amountRaw), [
-          {id: h, amountMsat: amount, sig},
-          {id: h2, amountMsat: change, sig: sig2}
+        const sig = mintNote(out1, amount, {h: hOf(p1)})
+        const sig2 = mintNote(out2, change, {h: hOf(p2)})
+        swaps.set(identity, [
+          {q: out1, amountMsat: amount, sig},
+          {q: out2, amountMsat: change, sig: sig2}
         ])
         const body = {status: 'OK'}
         if (sig) body.sig = sig
@@ -1102,10 +1249,8 @@ export const createMockMint = async (options = {}) => {
       // merge of one - refund exactly 0.
       const refund = (k1s.length - 1) * opts.baseFeeMsat
       for (const {note} of found) note.state = 'burned'
-      const sig = mintNote(h, total + refund)
-      swaps.set(swapIdentity(k1s, h, h2, amountRaw), [
-        {id: h, amountMsat: total + refund, sig}
-      ])
+      const sig = mintNote(out1, total + refund, {h: hOf(p1)})
+      swaps.set(identity, [{q: out1, amountMsat: total + refund, sig}])
       const body = {status: 'OK'}
       if (sig) body.sig = sig
       if (opts.serverGeneratedSecrets) body.k1 = 'a'.repeat(64)
@@ -1171,6 +1316,7 @@ if (isEntryPoint()) {
   console.log(`mock mint listening on ${mint.url}`)
   console.log(`  lightning address: ${flags.username ?? 'mint'}@127.0.0.1:${mint.port}`)
   console.log(`  a 21 sat note:     lnurlw://127.0.0.1:${mint.port}/w?k1=${k1}&amount=21000`)
+  console.log(`  its output key:    ${encodeCp1(bearer(sha256(hexToBytes(k1))).q)}`)
   console.log(`  mint pubkey:       ${mint.state.pubkey}`)
   console.log('\nnothing here is payable - this mint invents its invoices')
 }

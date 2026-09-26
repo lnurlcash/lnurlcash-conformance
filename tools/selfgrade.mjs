@@ -8,6 +8,7 @@ import {bech32} from '@scure/base'
 import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {createMockMint} from '../mock-mint/index.mjs'
+import {bearerNote, bearerSpend, encodeCp1} from '../runner/spend.mjs'
 import {
   createReport,
   gradeBoundMint,
@@ -35,10 +36,22 @@ const grade = async (mockOptions, {previousPubkeys, payPath, registeredAddress} 
     // work rather than waving everything through.
     const published = previousPubkeys ?? pay?.mintAddress?.previousPubkeys
     if (Array.isArray(published)) options.previousPubkeys = published
-    await gradeNote(`${mint.url}/w?k1=${k1}&amount=21000`, report, options)
+    const finished = await gradeNote(`${mint.url}/w?k1=${k1}&amount=21000`, report, options)
+    // Where the value ended up, asked while the mock is still up: every
+    // run, compliant or not, must end holding a spend of all of it.
+    if (finished) report.final = await (await fetch(finished.noteUrl)).json()
     return report
   } finally {
     await mint.close()
+  }
+}
+
+// The grader spends the note it is given and must bring every msat home,
+// whatever the mint gets wrong. Each fixture here starts at 21000 msat and
+// charges nothing a rotate, split and merge do not refund.
+const conserved = (report, what) => {
+  if (report.final?.maxWithdrawable !== 21_000) {
+    die(`${what}: the grader ended holding ${JSON.stringify(report.final)} rather than a spend of all 21000 msat`)
   }
 }
 
@@ -57,34 +70,40 @@ if (good.failed > 0) {
   }
   process.exit(1)
 }
-console.log(`ok   compliant mock passes (${good.results.length} checks)`)
+conserved(good, 'a compliant mint')
+console.log(`ok   compliant mock passes (${good.results.length} checks), and the grader ends holding all 21000 msat`)
 
 // A held melt must never look spent before settlement, and a failed melt
-// restores the same value. Both lookup forms observe the retained state.
+// restores the same value. Every lookup form observes the retained state:
+// the spend, the note's hex h, its cp1, and h, p's older name.
 const lifecycleMint = await createMockMint({hashLookup: true, meltNeverSettles: true})
 try {
   const k1 = bytesToHex(randomBytes(32))
   const h = bytesToHex(sha256(hexToBytes(k1)))
+  const cp1 = encodeCp1(bearerNote(hexToBytes(h)).outputKey)
   lifecycleMint.state.creditNote(k1, 3000)
   const lookup = query => fetch(`${lifecycleMint.url}/w?${query}`).then(r => r.json())
-  const live = await lookup(`h=${h}`)
-  assert.equal(live.maxWithdrawable, 3000)
-  assert.equal('k1' in live, false)
+  const forms = [`p=${h}`, `p=${cp1}`, `h=${h}`, `k1=${k1}`, `k1=${bearerSpend(hexToBytes(k1))}`]
+  for (const query of forms.slice(0, 3)) {
+    const live = await lookup(query)
+    assert.equal(live.maxWithdrawable, 3000)
+    assert.equal('k1' in live, false)
+  }
   const melt = () => fetch(`${lifecycleMint.url}/w/cb?k1=${k1}&pr=mock-invoice`).then(r => r.json())
   assert.equal((await melt()).status, 'OK')
-  for (const query of [`h=${h}`, `k1=${k1}`]) {
+  for (const query of forms) {
     assert.deepEqual(await lookup(query), {status: 'ERROR', reason: 'pending'})
   }
   lifecycleMint.state.failMelt(k1)
-  assert.equal((await lookup(`h=${h}`)).maxWithdrawable, 3000)
+  assert.equal((await lookup(`p=${cp1}`)).maxWithdrawable, 3000)
   assert.equal((await melt()).status, 'OK')
   lifecycleMint.state.settleMelt(k1)
-  for (const query of [`h=${h}`, `k1=${k1}`]) {
+  for (const query of forms) {
     assert.deepEqual(await lookup(query), {status: 'ERROR', reason: 'Note already spent.'})
   }
-  assert.deepEqual(await lookup(`h=${bytesToHex(randomBytes(32))}`), {status: 'ERROR', reason: 'Unknown note.'})
+  assert.deepEqual(await lookup(`p=${bytesToHex(randomBytes(32))}`), {status: 'ERROR', reason: 'Unknown note.'})
   assert.equal(lifecycleMint.state.noteState(k1), 'burned')
-  console.log('ok   hash lookups follow live, pending, restored and retained spent states')
+  console.log('ok   lookups by spend, h and cp1 follow live, pending, restored and retained spent states')
 } finally {
   await lifecycleMint.close()
 }
@@ -188,12 +207,12 @@ console.log('ok   crediting more than the formula still caught')
 const caughtBy = (report, name) =>
   report.results.some(r => r.status === 'fail' && r.name === name)
 
-const looseH2 = await grade({acceptsMissingH2: true, baseFeeMsat: 1000, feePpm: 1000})
-if (!caughtBy(looseH2, 'refuses a split with no h2')) {
-  console.error('a mint generating the change secret itself PASSED - the grader is blind')
+const looseP2 = await grade({acceptsMissingP2: true, baseFeeMsat: 1000, feePpm: 1000})
+if (!caughtBy(looseP2, 'refuses a split with no p2')) {
+  console.error('a mint generating the change note itself PASSED - the grader is blind')
   process.exit(1)
 }
-console.log('ok   split with no h2 caught')
+console.log('ok   split with no p2 caught')
 
 const looseFee = await grade({splitIgnoresBaseFee: true, baseFeeMsat: 1000, feePpm: 1000})
 if (!caughtBy(looseFee, 'refuses a split whose change cannot cover the base fee')) {
@@ -216,8 +235,8 @@ console.log('ok   pre-settlement verify leak caught')
 
 const MINT_INFO_CHECK = 'publishes a mint address (experimental, optional)'
 const LIABILITIES_CHECK = 'publishes liabilities (optional)'
-const SIGNATURE_CHECK = 'a legacy hash mutation signature verifies when present'
-const PART2_CHECK = 'certifies a cp1 note it issues (Part 2)'
+const SIGNATURE_CHECK = 'certifies a bearer output over hex(Q)'
+const EVERY_CERTIFICATE = 'every certificate verifies over hex(Q) and the note value'
 
 // a real npub, decoded rather than pattern-matched by the grader
 const npub = bech32.encode('npub', bech32.toWords(new Uint8Array(32).fill(2)), 200)
@@ -312,18 +331,41 @@ if (statusOf(unpublished, SIGNATURE_CHECK) !== 'fail') {
 }
 console.log('ok   a signature under an unpublished key still caught')
 
-// A plain-hash Part 1 output is conforming without the optional legacy raw
-// signature. The current reference wallet accepts that successful mutation.
+// Certifying is a SHOULD (luds 6e865b1): a mint issuing no certificates
+// at all warns, and never fails.
 const unsigned = await grade({signatures: false})
-if (statusOf(unsigned, SIGNATURE_CHECK) !== 'pass' || !/unsigned legacy Part 1 output accepted/.test(detailOf(unsigned, SIGNATURE_CHECK))) {
-  die(`an unsigned plain-hash output did not pass cleanly: ${statusOf(unsigned, SIGNATURE_CHECK)} ${detailOf(unsigned, SIGNATURE_CHECK)}`)
+for (const name of [SIGNATURE_CHECK, EVERY_CERTIFICATE]) {
+  if (statusOf(unsigned, name) !== 'warn' || !/SHOULD/.test(detailOf(unsigned, name))) {
+    die(`an uncertified output did not warn on "${name}": ${statusOf(unsigned, name)} ${detailOf(unsigned, name)}`)
+  }
 }
-if (unsigned.failed > 0) die('a mint issuing unsigned plain notes FAILED the grade')
-console.log('ok   an unsigned legacy Part 1 mutation passes cleanly')
-if (statusOf(good, PART2_CHECK) !== 'warn' || !/Part 2 not offered/.test(detailOf(good, PART2_CHECK))) {
-  die(`a Part 1 mint refusing a cp1 output did not warn: ${statusOf(good, PART2_CHECK)} ${detailOf(good, PART2_CHECK)}`)
+if (unsigned.failed > 0) die('a mint issuing no certificates FAILED the grade - certifying is a SHOULD')
+conserved(unsigned, 'a mint issuing no certificates')
+console.log('ok   a mint issuing no certificates warns, and never fails')
+
+// ...but a certificate that is there must be over hex(Q). One over a bearer
+// note's h is the pre-taproot message, and a wallet checking it offline
+// rejects a good note.
+const overH = await grade({certificateOverH: true})
+for (const name of [SIGNATURE_CHECK, 'a certificate on the informational GET verifies over hex(Q)', EVERY_CERTIFICATE]) {
+  if (!caughtBy(overH, name)) die(`a certificate over h rather than hex(Q) was not caught by "${name}"`)
 }
-console.log('ok   a mint without Part 2 warns on the certificate check and never fails')
+if (!/pre-taproot/.test(detailOf(overH, SIGNATURE_CHECK))) {
+  die(`the report does not name the certificate over h for what it is: ${detailOf(overH, SIGNATURE_CHECK)}`)
+}
+conserved(overH, 'a mint certifying over h')
+console.log('ok   a certificate over h rather than hex(Q) caught, and named')
+
+// The key path, which the compliant mock serves: a cp1 is credited, a ck1
+// bound to its domain spends it, and the certificates cover it too.
+for (const name of [
+  'credits a key-path note named by its cp1',
+  'spends a key-path note by a ck1 bound to its own domain',
+  EVERY_CERTIFICATE
+]) {
+  if (statusOf(good, name) !== 'pass') die(`the compliant mock did not pass "${name}": ${detailOf(good, name)}`)
+}
+console.log('ok   the compliant mock credits and spends a key-path note, certified throughout')
 
 // ---- the retried mutation ----------------------------------------------
 //
@@ -365,7 +407,11 @@ if (statusOf(replaying, RETRY_CHECK) !== 'pass') {
 if (statusOf(replaying, REPLAYED_BURN) !== 'pass') {
   die(`replaying retries opened a double-spend: ${detailOf(replaying, REPLAYED_BURN)}`)
 }
-console.log('ok   a mint replaying a retried mutation passes, and a real double-spend is still refused')
+conserved(replaying, 'a fee-advertising mint')
+if (!/respelt/.test(detailOf(replaying, RETRY_CHECK))) {
+  die(`the retry report does not say respelt retries were tried: ${detailOf(replaying, RETRY_CHECK)}`)
+}
+console.log('ok   a mint replaying a retried mutation passes, respelt too, and a real double-spend is still refused')
 
 // ---- naming the note you are buying ------------------------------------
 //
@@ -694,60 +740,57 @@ console.log('ok   the two spellings of one output hash name one note')
 
 // ---- Checking a note without exposing it ----
 //
-// LUD-25 lets a SERVICE answer the informational GET by `?h=sha256(k1)`, so
-// a wallet can look a note up without putting the live secret in a query
-// string every proxy between it and the mint will log. Optional, so a mint
-// that does not offer it must not fail - but one that offers it wrongly
-// must be caught, because a wallet asking by hash is trusting the answer.
-const HASH_CHECK = 'answers a note lookup by hash without the secret (optional)'
+// LUD-25 has a SERVICE answer the informational GET by `?p=` - a cp1, or a
+// bearer note's hex h - so a wallet can look a note up without putting its
+// spend in a query string every proxy between it and the mint will log. A
+// MUST since the draft renamed `h` to `p`, so a mint not offering it fails;
+// and one that offers it wrongly must be caught, because a wallet asking by
+// p is trusting the answer.
+const LOOKUP_CHECK = 'answers a note lookup by p without the spend'
+const SPENT_CHECK = 'reports a spent note distinguishably from an unknown one'
 
-const silentOnHash = await grade({hashLookup: false})
-if (statusOf(silentOnHash, HASH_CHECK) === 'fail') {
-  die('a mint not offering the hash lookup FAILED - the check is not optional')
+const silentOnLookup = await grade({hashLookup: false})
+if (!caughtBy(silentOnLookup, LOOKUP_CHECK)) {
+  die('a mint refusing every lookup by p PASSED - LUD-25 makes it a MUST')
 }
+conserved(silentOnLookup, 'a mint refusing lookups by p')
 
-const byHash = await grade({hashLookup: true})
-if (byHash.failed > 0) {
-  for (const r of byHash.results.filter(r => r.status === 'fail')) {
+const byLookup = await grade({hashLookup: true})
+if (byLookup.failed > 0) {
+  for (const r of byLookup.results.filter(r => r.status === 'fail')) {
     console.error(`  FAIL ${r.name} - ${r.detail}`)
   }
-  die('a mint answering by hash correctly FAILED grading')
+  die('a mint answering by p correctly FAILED grading')
 }
-if (statusOf(byHash, HASH_CHECK) !== 'pass') {
-  die(`a compliant hash lookup was not graded as offered: ${statusOf(byHash, HASH_CHECK)}`)
+// Both spellings are asked for: the cp1 every note has, and the hex h of a
+// bearer note.
+if (!/by cp1 and by hex h/.test(detailOf(byLookup, LOOKUP_CHECK))) {
+  die(`a compliant lookup was not graded in both spellings: ${detailOf(byLookup, LOOKUP_CHECK)}`)
 }
-// Both spellings of "did not fail" are a pass here, so the detail is what
-// separates a mint that answers by hash from one that never offered it.
-if (!detailOf(byHash, HASH_CHECK).includes('by hash')) {
-  die(`a compliant hash lookup was graded but not named: ${detailOf(byHash, HASH_CHECK)}`)
-}
-if (!detailOf(silentOnHash, HASH_CHECK).includes('not offered')) {
-  die(`a mint not offering the lookup was not reported as such: ${detailOf(silentOnHash, HASH_CHECK)}`)
-}
-console.log('ok   a mint answering a lookup by hash passes, and one not offering it is not graded down')
+console.log('ok   a mint answering a lookup by cp1 and by hex h passes, and one refusing it fails')
 
-// The response carries no k1. A wallet querying by hash already holds the
-// secret - the field buys nothing, and a mint that fills it in is putting
-// the note back on the wire the lookup existed to keep off it.
+// The response carries no k1. A wallet querying by p already holds the
+// spend - the field buys nothing, and a mint that fills it in is putting
+// the note back on the wire the lookup existed to keep it off.
 const leaks = await grade({hashLookup: 'echoesK1'})
-if (!caughtBy(leaks, HASH_CHECK)) {
-  die('a mint echoing the secret back on a hash lookup PASSED - the grader is blind')
+if (!caughtBy(leaks, LOOKUP_CHECK)) {
+  die('a mint echoing a k1 back on a lookup by p PASSED - the grader is blind')
 }
-console.log('ok   a hash lookup that echoes the secret caught')
+console.log('ok   a lookup by p that echoes a k1 caught')
 
-// An h it never registered must get the answer an unknown k1 gets. A mint
+// A note it never registered must get the answer an unknown k1 gets. A mint
 // answering anyway tells a wallet a note exists where none does.
 const invents = await grade({hashLookup: 'answersUnknown'})
-if (!caughtBy(invents, HASH_CHECK)) {
-  die('a mint answering for a hash it never registered PASSED - the grader is blind')
+if (!caughtBy(invents, LOOKUP_CHECK)) {
+  die('a mint answering for a note it never registered PASSED - the grader is blind')
 }
-console.log('ok   a hash lookup that answers for an unregistered hash caught')
+console.log('ok   a lookup by p that answers for an unregistered note caught')
 
 const hidesSpent = await grade({hashLookup: 'hidesSpent'})
-if (!caughtBy(hidesSpent, 'reports a spent hash distinguishably from an unknown hash')) {
-  die('a hash lookup hiding a spent hash as unknown PASSED - the grader is blind')
+if (!caughtBy(hidesSpent, SPENT_CHECK)) {
+  die('a lookup hiding a spent note as unknown PASSED - the grader is blind')
 }
-console.log('ok   a hash lookup hiding a retained spent note caught')
+console.log('ok   a lookup by p hiding a retained spent note caught')
 
 // Keep the old fixture name accepted as a compatible alias, but stop
 // describing the intended spent response as a privacy violation.
@@ -755,10 +798,63 @@ const revealsSpent = await grade({hashLookup: 'revealsSpent'})
 if (revealsSpent.failed > 0) die('the legacy revealsSpent alias failed the revised contract')
 
 const acceptsBoth = await grade({hashLookup: 'acceptsBoth'})
-if (!caughtBy(acceptsBoth, HASH_CHECK)) {
-  die('a hash lookup accepting k1 and h together PASSED - the grader is blind')
+if (!caughtBy(acceptsBoth, LOOKUP_CHECK)) {
+  die('a lookup accepting both k1 and p PASSED - the grader is blind')
 }
-console.log('ok   a hash lookup accepting both k1 and h caught')
+console.log('ok   a lookup accepting both k1 and p caught')
+
+// ---- the unified taproot model -----------------------------------------
+//
+// Every note is a taproot output key Q (luds 6e865b1). Each rule below is
+// one a mint could plausibly skip, and each must be caught by its own
+// check - with the grader still bringing every msat home, since a mint
+// that gets a spending rule wrong is exactly the mint that would lose the
+// note under grade.
+const taproot = [
+  [{leafVersionUnchecked: true}, ['refuses a leaf version other than 0xc0'], 'a leaf at version 0xc2 accepted'],
+  [{opSuccessUnchecked: true}, ['refuses a leaf carrying an OP_SUCCESS opcode'], 'an OP_SUCCESS leaf accepted'],
+  [{ignoresTimeClaims: 'blockHeight'}, ['refuses a block-height locktime'], 'a block-height locktime accepted'],
+  [{ignoresTimeClaims: 'future'}, ['refuses a locktime still in the future'], 'a future locktime accepted'],
+  [{ignoresTimeClaims: 'blockCount'}, ['refuses a block-count relative lock'], 'a block-count relative lock accepted'],
+  [{ignoresTimeClaims: 'relative'}, ['refuses a relative lock that has not yet run'], 'an unelapsed relative lock accepted'],
+  [{refusesLocktimes: true}, ['accepts a locktime already past'], 'every non-zero locktime refused, a past one included'],
+  [
+    {unverifiedCk1: true},
+    ['refuses a ck1 bound to another domain', 'the informational GET refuses a spend that does not verify'],
+    'a ck1 accepted without checking its signature'
+  ],
+  [
+    {infoSkipsVerification: true},
+    ['the informational GET refuses a spend that does not verify', 'refuses a leaf version other than 0xc0'],
+    'an informational GET that looks up Q without verifying the spend'
+  ],
+  [{replayMatchesStrings: true}, ['replays a retried mutation rather than refusing it'], 'a retry matched on strings, not notes'],
+  [
+    {alreadyInUseReason: 'Output already in use.'},
+    ['refuses a p1 naming a burned note, as "already in use"'],
+    'a p1 collision refused with the wrong reason'
+  ],
+  [
+    {refusesCp1Outputs: true},
+    ['credits a key-path note named by its cp1', "a bearer note's full cw1 is the same spend as its preimage"],
+    'a mint that takes no cp1'
+  ],
+  [
+    {acceptsOffCurveCp1: true},
+    ['requires comment-bound minting and honours the mintToHash extension'],
+    'a cp1 off the curve accepted as a mint comment'
+  ]
+]
+for (const [fixture, names, what] of taproot) {
+  const report = await grade(fixture)
+  for (const name of names) {
+    if (!caughtBy(report, name)) {
+      die(`${what} (${JSON.stringify(fixture)}) was not caught by "${name}": ${statusOf(report, name)} ${detailOf(report, name)}`)
+    }
+  }
+  conserved(report, what)
+  console.log(`ok   ${what} caught, and the note brought home`)
+}
 
 // ---- the merge cap ----
 //

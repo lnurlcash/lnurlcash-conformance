@@ -1,7 +1,7 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "LUD-25's own published \"Test Vectors\" section (25.md), transcribed here so every implementation checks itself against the exact numbers the spec document publishes, not just this project's own internally-generated fixtures. Vectors 1 and 2 reuse BIP-32's own published test vector 1 and 2 seeds deliberately, and deliberately land on opposite branch-key parities (vector 1 odd, vector 2 even) so both halves of the sk_i formula are exercised. t and Q are shown for each note alongside pk/sk so every intermediate step, not just the final hex, is independently checkable.",
+  "description": "LUD-25's own published \"Test Vectors\" section (25.md, lnurl/luds 6e865b1), reproduced here from the primitives so every implementation checks itself against the exact numbers the spec document publishes, not just this project's own fixtures; the selfcheck compares every value with the spec text itself. Vectors 1 and 2 reuse BIP-32's own published test vector 1 and 2 seeds and land on opposite branch-key parities (vector 1 odd, vector 2 even), so both halves of the sk_i formula are exercised; t and Q are shown for each note alongside pk/sk. Vector 2's register/unregister proofs sign sha256(\"LNURLcash:<action>:<domain>:<username>\"), bound to the vector's own domain. Vector 3 is a key-path spend (ck1) of vector 1's pk_0 at mint.example: the prevout, every BIP-341 SigMsg field by name, the sighash, the BIP-340 signature with an all-zero aux_rand, and the serialised canonical spend transaction with its witness. Vector 4 is the mint's cs1 certificate over (hex(Q), amount) under a fixed key. Vector 5 is a bearer note: its preimage (the k1 short form), h (the cp1 short form), the OP_SHA256 <h> OP_EQUAL leaf, its tapleaf hash, the NUMS internal key H, the tweak, Q, the control block, cp1, the full cw1, and a cs1 for it under vector 4's key.",
   "vector1": {
     "seedHex": "000102030405060708090a0b0c0d0e0f",
     "domain": "mint.example",
@@ -98,26 +98,47 @@
     "addressProofs": [
       {
         "action": "register",
+        "domain": "cash.example.com",
         "username": "alice",
-        "message": "LNURLcash:register:alice",
-        "digest": "07511b102748f3a3614676386cf9ece7a5fcf11576df21d154bafbaeed77e7ae",
-        "signature": "baf04336aad76953b437725a6f0b03d295da8792b4d9d36affb8a5d9913df1d5750ed161a8c389f96441711d55306c13a3c2362d3542453f7c10f428f1721461"
+        "message": "LNURLcash:register:cash.example.com:alice",
+        "digest": "be730f1fc4a81feea4bc0464d9f6adff04dfe652687e39cba30eac9caa73fcdd",
+        "signature": "9d96780fe55f602a9e238a4b2640a9f8ca939cacbbcde109cfd6ba94a6f9d46ff4aaf56ba1e4e72696f7c0e8833445bd194bd06155a133cf524eb587d52e8d22"
       },
       {
         "action": "unregister",
+        "domain": "cash.example.com",
         "username": "alice",
-        "message": "LNURLcash:unregister:alice",
-        "digest": "a420c6e3107fb17638baf3b73d4f74f04312f331a4726f6e563a7d6aa3a5bba0",
-        "signature": "8d7527d0474528770e5c8ac68cc3dbb6841c9e924f78f7d5187d77514c829f781de2a28d3bf9eec9f2ac5439664d215eec3915c95b05c1d6cc31cab3c946f068"
+        "message": "LNURLcash:unregister:cash.example.com:alice",
+        "digest": "dc12e80f7d0486fab791c743688e54bcc759111722d80dfa5fa70586a7d9d9d9",
+        "signature": "7250ab2403333eb5ed73f7a212ac4f35b58f426fe5c2acb8b2194a112881332bfbeebeba0bc4615bcf361bc125d5a4149ddbe4b6ea3b755b711fefd8bba58728"
       }
     ]
   },
   "vector3": {
     "secretKey": "944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f",
-    "pubkeyXOnly": "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
-    "digest": "49a9bb7cae28a0c1f77bc7fac7693456b1cc149f83c413acfd938dc95ea21cf5",
-    "ownershipSignature": "a83def8861b558c6f04ed877e5e8dcdf675c871f5c4b3383c1723b2329658a40451002bda2a824be84284147eff3f572968504c2f44a6629d6de8cfbd4e3960a",
-    "ck1": "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc62s0003psm2kxx7p8dsal9arwd7e6usu04cjens0qhywer99jc5sz9zqptmg4gyjlgg2zpglhl8atjj6zsfsh5ffnzn4k73naafcukpgdezzqx"
+    "Q": "aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
+    "cp1": "cp14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6qh2fkky",
+    "domain": "mint.example",
+    "prevoutTxid": "d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b2",
+    "spentScriptPubKey": "5120aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634",
+    "sigMsgFields": {
+      "hash_type": "00",
+      "nVersion": "02000000",
+      "nLockTime": "00000000",
+      "sha_prevouts": "30b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024",
+      "sha_amounts": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "sha_scriptpubkeys": "ddd2d8771df7fb07a13626816ef020a553559bdcd01734d1259655430f6b91fa",
+      "sha_sequences": "ad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e",
+      "sha_outputs": "3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d",
+      "spend_type": "00",
+      "input_index": "00000000"
+    },
+    "sigMsg": "00020000000000000030b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfcddd2d8771df7fb07a13626816ef020a553559bdcd01734d1259655430f6b91faad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d0000000000",
+    "sighash": "b8933a42090297a1f80d7f1fc0023ec1aa2ab36a7df332520f0dacf07f617943",
+    "auxRand": "0000000000000000000000000000000000000000000000000000000000000000",
+    "signature": "83bbe1fe044d3d15cd1c18b484168c37f921864a9f85e9251f8457b576abd66b211b70b97fb3d63856ae271e4b3e3cf95da8e8b7769fefc309d8dc4989120e8e",
+    "spendTransaction": "02000000000101d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b20000000000ffffffff01000000000000000000014083bbe1fe044d3d15cd1c18b484168c37f921864a9f85e9251f8457b576abd66b211b70b97fb3d63856ae271e4b3e3cf95da8e8b7769fefc309d8dc4989120e8e00000000",
+    "ck1": "ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6g8wlplczy60g4e5wp3dyyz6xr07fpse9flp0fy50cg4a4w64av6eprdctjlan6cu9dt38re9nu08etk5w3dmknlhuxzwcm3ycjysw3c9dpmpy"
   },
   "vector4": {
     "mintSeedLabel": "LUD-25 test vector mint node",
@@ -141,5 +162,26 @@
         "cs1": "cs210u1khrv8hg4zuy9qx7gsg9wqrhn6epeehx23wkqp7exwhlwdwy6wans083h7ckz2qkxw399v22ugkw49sz8tcn6p6e5w3tepdzv2junscsqwvvr03"
       }
     ]
+  },
+  "vector5": {
+    "preimage": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "h": "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd",
+    "leaf": "a820630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd87",
+    "tapleafHash": "edffc9fa683d8844ded0ba5ec4215d5940ae436b0675257c1344bcb082516b50",
+    "H": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "t": "5649b0259110c0c11426819ea5a40b53e5a9a2b8c6fb3d6c43217df73b326364",
+    "Q": "d18b619687343df2fc7a47e1daf25260b909bb563fb4b4b11e59e2bd64880982",
+    "controlBlock": "c050929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "cp1": "cp16x9kr958xs7l9lr6glsa4ujjvzusnw6k876tfvg7t83t6eygpxpq6we0xc",
+    "cw1": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8c6x6a4c",
+    "mintPubkey": "035acdbd57663f858be6d61ec4bfcbc99492699010f1451e30a6550f26295e813d",
+    "certificate": {
+      "amountMsat": 1000,
+      "message": "LNURLcash:1000:d18b619687343df2fc7a47e1daf25260b909bb563fb4b4b11e59e2bd64880982",
+      "digest": "e44e0e215367429a8a503ee0095e070cfb215b8e8b3af523b75e54138e75ee84",
+      "signature": "c74d78b8c9ebd0a11a5afacaf1fed061da8ced7d6625e6809b624ddf68f16ab47df5cd830886bf7d1f1eaa88b9badaca242be6e038adec7b38c51a392d234a7800",
+      "cs1": "cs10n1caxh3wxfa0g2zxj6lt90rlksv8dgemtavcj7dqymvfxa7683d268mawdsvygd0maru024z9ehtdv5fptumsr3t0v0vuv2x3e953557qq5c70z5"
+    },
+    "certifiedNoteUrl": "lnurlw://mint.example/w?k1=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&sig=cs10n1caxh3wxfa0g2zxj6lt90rlksv8dgemtavcj7dqymvfxa7683d268mawdsvygd0maru024z9ehtdv5fptumsr3t0v0vuv2x3e953557qq5c70z5"
   }
 }

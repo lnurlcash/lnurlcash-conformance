@@ -10,12 +10,38 @@ import {readdirSync, readFileSync} from 'node:fs'
 import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {bech32, bech32m, base64urlnopad} from '@scure/base'
-import {sha256} from '@noble/hashes/sha2.js'
+import {sha256, sha512} from '@noble/hashes/sha2.js'
 import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {hmac} from '@noble/hashes/hmac.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {mnemonicToSeedSync, validateMnemonic} from '@scure/bip39'
 import {wordlist} from '@scure/bip39/wordlists/english.js'
+// The grader's own taproot reading, independent of the generator's: every
+// spend value below is recomputed with it, and it in turn is held to the
+// numbers 25.md publishes.
+import {
+  bearerNote,
+  bearerSpend,
+  decodeCp1,
+  decodeNoteRef,
+  decodeSpend,
+  encodeCk1,
+  encodeCp1,
+  encodeCw1,
+  keyPathSighash,
+  keyPathSpend,
+  NUMS_H,
+  outputKeyOf,
+  scriptPathSighash,
+  scriptTree,
+  spendDomainOf,
+  spendPrevout,
+  spendSigMsg,
+  tapBranchHash,
+  tapLeafHash,
+  taprootTweak,
+  tweakSecretKey
+} from '../runner/spend.mjs'
 
 const VECTORS = join(dirname(fileURLToPath(import.meta.url)), '..', 'vectors')
 const load = name => JSON.parse(readFileSync(join(VECTORS, name), 'utf8'))
@@ -1150,13 +1176,17 @@ const recoverX = (signature, digest) => {
   return secp256k1.recoverPublicKey(recIdFirst, digest, {prehash: false}).slice(1)
 }
 
-check('part2: the ownership message is sha256-hashed before signing', () => {
-  assert(part2.conventions.ownershipMessage === 'LNURLcash', 'ownershipMessage')
-  assert(
-    part2.conventions.ownershipMessageEncoding ===
-      'UTF-8 bytes, sha256-hashed to a 32-byte digest before signing (2026-09-16, luds#6de59b2)',
-    'ownershipMessageEncoding'
-  )
+// A ck1 signs the key-path sighash of the canonical spend transaction for
+// one domain, and nothing else: the fixed "LNURLcash" message it signed
+// before luds 6e865b1 must be gone from the conventions.
+check('part2: every branch is bound to its host without the port', () => {
+  assert(part2.conventions.ownershipMessage === undefined, 'ownershipMessage is still a convention')
+  assert(/TapSighash/.test(part2.conventions.ck1Signs), 'ck1Signs does not name the sighash')
+  for (const b of part2.branches) {
+    assert(b.domain === spendDomainOf(`http://${b.host}`), `${b.host}: domain ${b.domain}`)
+    assert(!b.domain.includes(':'), `${b.host}: the domain carries a port`)
+  }
+  assert(part2.branches.some(b => b.host !== b.domain), 'no branch host carries a port, so the stripping goes untested')
 })
 
 check('part2: every cx1 is its branch key and chain code', () => {
@@ -1194,14 +1224,24 @@ check('part2: a watcher holding only the cx1 derives every note key', () => {
   }
 })
 
-check('part2: every ck1 embeds its note key and a valid Schnorr ownership signature', () => {
-  const message = sha256(utf8ToBytes(part2.conventions.ownershipMessage))
+// Some other domain the branch is not at, to prove the signature is bound.
+const elsewhere = domain => (domain === 'moneyer.dev' ? 'mint.example' : 'moneyer.dev')
+
+check("part2: every ck1 signs its domain's key-path sighash and verifies nowhere else", () => {
   for (const b of part2.branches) {
     for (const n of b.notes) {
+      const pk = hexToBytes(n.notePubkey)
+      const sighash = keyPathSighash(pk, b.domain)
+      assert(bytesToHex(sighash) === n.sighash, `${b.host} #${n.index}: sighash`)
       const ck1 = decode2('ck', n.ck1, 96)
       assert(ck1 && bytesToHex(ck1.subarray(0, 32)) === n.notePubkey, `${b.host} #${n.index}: ck1 key`)
-      assert(bytesToHex(ck1.subarray(32)) === n.ownershipSignature, `${b.host} #${n.index}: ck1 signature`)
-      assert(schnorr.verify(ck1.subarray(32), message, ck1.subarray(0, 32)), `${b.host} #${n.index}: Schnorr proof`)
+      assert(bytesToHex(ck1.subarray(32)) === n.keyPathSignature, `${b.host} #${n.index}: ck1 signature`)
+      assert(schnorr.verify(ck1.subarray(32), sighash, pk), `${b.host} #${n.index}: does not verify at ${b.domain}`)
+      assert(
+        !schnorr.verify(ck1.subarray(32), keyPathSighash(pk, elsewhere(b.domain)), pk),
+        `${b.host} #${n.index}: verifies at ${elsewhere(b.domain)} too`
+      )
+      assert(keyPathSpend(hexToBytes(n.noteSecretKey), b.domain) === n.ck1, `${b.host} #${n.index}: not the zero-aux ck1`)
     }
   }
 })
@@ -1222,19 +1262,34 @@ check('part2: every certificate is the mint key over its message', () => {
   }
 })
 
-check('part2: every address proof is action- and username-bound to index zero', () => {
+check('part2: every address proof is action-, domain- and username-bound to index zero', () => {
   for (const proof of part2.addressProofs) {
     assert(['register', 'unregister'].includes(proof.action), `${proof.action}: action`)
-    assert(proof.message === `LNURLcash:${proof.action}:${proof.username}`, `${proof.action}: message`)
+    assert(
+      proof.message === `LNURLcash:${proof.action}:${proof.domain}:${proof.username}`,
+      `${proof.action}: message`
+    )
+    assert(bytesToHex(sha256(utf8ToBytes(proof.message))) === proof.digest, `${proof.action}: digest`)
     const signature = hexToBytes(proof.signature)
     assert(signature.length === 64, `${proof.action}: signature length`)
     assert(
       schnorr.verify(signature, sha256(utf8ToBytes(proof.message)), hexToBytes(proof.indexZeroPubkey)),
       `${proof.action}: verifies against index zero`
     )
+    // The pre-265759f message, with no domain, must not verify.
+    assert(
+      !schnorr.verify(signature, sha256(utf8ToBytes(`LNURLcash:${proof.action}:${proof.username}`)), hexToBytes(proof.indexZeroPubkey)),
+      `${proof.action}: verifies without the domain`
+    )
   }
-  assert(part2.addressProofs[0].signature !== part2.addressProofs[1].signature, 'action separation')
-  assert(part2.addressProofs[0].signature !== part2.addressProofs[2].signature, 'username separation')
+  const [register, unregister, bob, elsewhereProof] = part2.addressProofs
+  assert(register.signature !== unregister.signature, 'action separation')
+  assert(register.signature !== bob.signature, 'username separation')
+  assert(
+    register.username === elsewhereProof.username && register.domain !== elsewhereProof.domain &&
+      register.signature !== elsewhereProof.signature,
+    'domain separation'
+  )
 })
 
 check('part2: the valid strings decode and the invalid ones do not, for the reason given', () => {
@@ -1265,7 +1320,6 @@ check('nostr-seed: marked as an extension, not LUD-25', () => {
 
 check('nostr-seed: every seed, branch and note recomputes', () => {
   const tag = sha256(utf8ToBytes('LNURLcash/derive'))
-  const message = sha256(utf8ToBytes(part2.conventions.ownershipMessage))
   for (const c of nostrSeed.cases) {
     const identity = hexToBytes(c.identity)
     assert(bytesToHex(hmac(sha256, identity, utf8ToBytes(nostrSeed.label))) === c.seed, `${c.host}: seed`)
@@ -1273,6 +1327,7 @@ check('nostr-seed: every seed, branch and note recomputes', () => {
       bytesToHex(secp256k1.Point.BASE.multiply(toNum(identity)).toBytes(true).slice(1)) === c.identityPubkey,
       `${c.host}: identityPubkey`
     )
+    assert(c.domain === spendDomainOf(`http://${c.host}`), `${c.host}: domain ${c.domain}`)
     const node = hexToBytes(c.addressNode)
     const P = secp256k1.Point.BASE.multiply(toNum(node.subarray(0, 32)))
     const x = P.toBytes(true).slice(1)
@@ -1283,25 +1338,596 @@ check('nostr-seed: every seed, branch and note recomputes', () => {
       const i = new Uint8Array(4)
       new DataView(i.buffer).setUint32(0, n.index, false)
       const t = toNum(sha256(cat(tag, tag, x, node.subarray(32), i)))
-      const pk = bytesToHex(lifted.add(secp256k1.Point.BASE.multiply(t)).toBytes(true).slice(1))
-      assert(pk === n.notePubkey, `${c.host} #${n.index}: watch-only pk`)
+      const pk = lifted.add(secp256k1.Point.BASE.multiply(t)).toBytes(true).slice(1)
+      assert(bytesToHex(pk) === n.notePubkey, `${c.host} #${n.index}: watch-only pk`)
+      const sighash = keyPathSighash(pk, c.domain)
+      assert(bytesToHex(sighash) === n.sighash, `${c.host} #${n.index}: sighash`)
       const ck1 = decode2('ck', n.ck1, 96)
       assert(ck1 && bytesToHex(ck1.subarray(0, 32)) === n.notePubkey, `${c.host} #${n.index}: ck1 key`)
-      assert(schnorr.verify(ck1.subarray(32), message, ck1.subarray(0, 32)), `${c.host} #${n.index}: ck1 proof`)
+      assert(bytesToHex(ck1.subarray(32)) === n.keyPathSignature, `${c.host} #${n.index}: ck1 signature`)
+      assert(schnorr.verify(ck1.subarray(32), sighash, pk), `${c.host} #${n.index}: ck1 does not verify at ${c.domain}`)
+      assert(
+        !schnorr.verify(ck1.subarray(32), keyPathSighash(pk, elsewhere(c.domain)), pk),
+        `${c.host} #${n.index}: ck1 verifies at ${elsewhere(c.domain)} too`
+      )
     }
+  }
+})
+
+// ---- LUD-25's own test vectors ----
+//
+// spec-vectors.json is produced by the generator from the primitives. Two
+// independent checks hold it to the spec: every value is compared with the
+// hex 25.md itself prints (transcribed below from lnurl/luds 6e865b1, the
+// one place in this repo those numbers are typed rather than computed), and
+// every value is recomputed with the grader's own primitives and code here.
+
+const SPEC_TEXT = {
+  vector1: {
+    seedHex: '000102030405060708090a0b0c0d0e0f',
+    domain: 'mint.example',
+    cashHashingKey: '45a46de715668a4250ddb7420e71f8cb2a165047095edda920c0bfeb7c4ab7a6',
+    domainIndices: [2728808236, 3900943163, 3604736224, 1452184550],
+    branchPrivateKey: '7bbab40e4a022ea909cfee28eb1c7a9f56cf746feea94ff73f155a14f2c57d1e',
+    branchPubkeyCompressed: '03b783d2930dc053a971f019054ca43e7c9de50e0769de872dd1ddde5d0bf4c9d1',
+    branchPubkeyXOnly: 'b783d2930dc053a971f019054ca43e7c9de50e0769de872dd1ddde5d0bf4c9d1',
+    chainCode: 'ab91cc11aea395ea6b62292a6147f51ef4150ebea04e745137b68719e238f904',
+    branchParity: 'odd',
+    cx1: 'cx1k7pa9ycdcpf6ju0sryz5efp70jw72rs8d80gwtw3mh096zl5e8g6hywvzxh28902dd3zj2npgl63aaq4p6l2qnn52ymmdpceugu0jpqes280t',
+    notes: [
+      {
+        index: 0,
+        t: '10054a4025dc5678a26e16087703ac1af6be92dab9cc20f10c5a5ae0ffbd057c',
+        Q: '02aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
+        pk: 'aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
+        sk: '944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f',
+        cp1: 'cp14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6qh2fkky'
+      },
+      {
+        index: 1,
+        t: '08c401f6e9646a046291700ec99fa5181f46b241cb4667cd1aa7b86ed30fde19',
+        Q: '02f0c1ea9aede945b9cf84f3bf8df27ac65154a937e4d10cb8a5865df0583b1083',
+        pk: 'f0c1ea9aede945b9cf84f3bf8df27ac65154a937e4d10cb8a5865df0583b1083',
+        sk: '8d094de89f623b5b58c181e5de832a7783261ab88be5b8119b64bce6b080a23c',
+        cp1: 'cp17rq74xhda9zmnnuy7wlcmun6ceg4f2fhungsew99sewlqkpmzzpsf28ex8'
+      },
+      {
+        index: 2,
+        t: 'b17b1b45fb64a2d70009c968f965790e11a6b9879041eb9730fda21ca199181f',
+        Q: '03c1e51bc2b8ad1c6ecfe382fe201c322506e2783a2e4d3eae0da47fece2eab078',
+        pk: 'c1e51bc2b8ad1c6ecfe382fe201c322506e2783a2e4d3eae0da47fece2eab078',
+        sk: '35c06737b162742df639db400e48fe6ebad74517a1989b9ff1e84807aed39b01',
+        cp1: 'cp1c8j3hs4c45wxanlrstlzq8pjy5rwy7p69exnatsd53l7ech2kpuqsypsv2'
+      },
+      {
+        index: 5,
+        t: '468c1cdcf8fe1194f33d2b4c543c9a6000423bddc9b8a83f17c3ace9b0796568',
+        Q: '02c2b6a6d230d3ca51cc680bf84948c416eab70109542a0cf4fd1fbebbd647891a',
+        pk: 'c2b6a6d230d3ca51cc680bf84948c416eab70109542a0cf4fd1fbebbd647891a',
+        sk: 'cad168ceaefbe2ebe96d3d2369201fbf6421a4548a57f8839880b1618dea298b',
+        cp1: 'cp1c2m2d53s6099rnrgp0uyjjxyzm4twqgf2s4qea8ar7lth4j83ydqcznzj6'
+      }
+    ]
+  },
+  vector2: {
+    seedHex:
+      'fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542',
+    domain: 'cash.example.com',
+    cashHashingKey: '7d6d06012307b130432c5ab845fc746f72d4703a91981a6c012a420b83176dd8',
+    domainIndices: [2886871684, 4226627351, 2748717696, 1002847463],
+    branchPrivateKey: '6f1d381ccdda9a69f966b492b19de687930c19b19e7f8d581088402d6a3b7818',
+    branchPubkeyCompressed: '0264885a9cab93ec051761b8a0b80e1854a61865878d58f72a365dfd640850f675',
+    branchPubkeyXOnly: '64885a9cab93ec051761b8a0b80e1854a61865878d58f72a365dfd640850f675',
+    chainCode: '6b95795f9807ada85c8ca50ec93c921483a183abfed4a3b4abe6b95c89880306',
+    branchParity: 'even',
+    cx1: 'cx1vjy9489tj0kq29mphzstsrsc2jnpsev834v0w23kth7kgzzs7e6kh9tet7vq0tdgtjx22rkf8jfpfqapsw4la49rkj47dw2u3xyqxpspgvxpa',
+    notes: [
+      {
+        index: 0,
+        t: '4d010c0ae5b4e0def5d0eb651d5e08de7fc36aef5703231480372b24688d2711',
+        Q: '0223bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130',
+        pk: '23bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130',
+        sk: 'bc1e4427b38f7b48ef379ff7cefbef6612cf84a0f582b06c90bf6b51d2c89f29',
+        cp1: 'cp1ywljdk2rxkm9ap9c8qltp296ajxr9chtc4s6yp9rs6ahyz6v6ycqvtd8z5'
+      },
+      {
+        index: 1,
+        t: '370d05e7dca3f107e7ec061de1ea81a51f2a7f5756330317d1a662fdfd35f618',
+        Q: '03b1ab49e8ca397385ccb6d17d611bf8afc75390513bdcdfe3d760e0bb9860e0aa',
+        pk: 'b1ab49e8ca397385ccb6d17d611bf8afc75390513bdcdfe3d760e0bb9860e0aa',
+        sk: 'a62a3e04aa7e8b71e152bab09388682cb2369908f4b2906fe22ea32b67716e30',
+        cp1: 'cp1kx45n6x289ectn9k697kzxlc4lr48yz380wdlc7hvrsthxrquz4qtpysaz'
+      },
+      {
+        index: 2,
+        t: '3d978b10770f8566e6630d978f46a79cb2d237ab0f6168123154dc83c3dc1392',
+        Q: '039cf00b60589f863cedd2773b42341e6f5102d6bd23d04559a3103d50611b2ada',
+        pk: '9cf00b60589f863cedd2773b42341e6f5102d6bd23d04559a3103d50611b2ada',
+        sk: 'acb4c32d44ea1fd0dfc9c22a40e48e2445de515cade0f56a41dd1cb12e178baa',
+        cp1: 'cp1nncqkczcn7rremwjwua5ydq7dags944ay0gy2kdrzq74qcgm9tdq37e4dd'
+      }
+    ],
+    addressProofs: [
+      {
+        action: 'register',
+        domain: 'cash.example.com',
+        username: 'alice',
+        message: 'LNURLcash:register:cash.example.com:alice',
+        digest: 'be730f1fc4a81feea4bc0464d9f6adff04dfe652687e39cba30eac9caa73fcdd',
+        signature:
+          '9d96780fe55f602a9e238a4b2640a9f8ca939cacbbcde109cfd6ba94a6f9d46ff4aaf56ba1e4e72696f7c0e8833445bd194bd06155a133cf524eb587d52e8d22'
+      },
+      {
+        action: 'unregister',
+        domain: 'cash.example.com',
+        username: 'alice',
+        message: 'LNURLcash:unregister:cash.example.com:alice',
+        digest: 'dc12e80f7d0486fab791c743688e54bcc759111722d80dfa5fa70586a7d9d9d9',
+        signature:
+          '7250ab2403333eb5ed73f7a212ac4f35b58f426fe5c2acb8b2194a112881332bfbeebeba0bc4615bcf361bc125d5a4149ddbe4b6ea3b755b711fefd8bba58728'
+      }
+    ]
+  },
+  vector3: {
+    sk: '944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f',
+    Q: 'aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
+    cp1: 'cp14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6qh2fkky',
+    domain: 'mint.example',
+    prevoutTxid: 'd5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b2',
+    spentScriptPubKey: '5120aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
+    sigMsgFields: {
+      hash_type: '00',
+      nVersion: '02000000',
+      nLockTime: '00000000',
+      sha_prevouts: '30b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024',
+      sha_amounts: 'af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc',
+      sha_scriptpubkeys: 'ddd2d8771df7fb07a13626816ef020a553559bdcd01734d1259655430f6b91fa',
+      sha_sequences: 'ad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e',
+      sha_outputs: '3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d',
+      spend_type: '00',
+      input_index: '00000000'
+    },
+    sigMsg:
+      '00020000000000000030b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfcddd2d8771df7fb07a13626816ef020a553559bdcd01734d1259655430f6b91faad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d0000000000',
+    sighash: 'b8933a42090297a1f80d7f1fc0023ec1aa2ab36a7df332520f0dacf07f617943',
+    auxRand: '0000000000000000000000000000000000000000000000000000000000000000',
+    signature:
+      '83bbe1fe044d3d15cd1c18b484168c37f921864a9f85e9251f8457b576abd66b211b70b97fb3d63856ae271e4b3e3cf95da8e8b7769fefc309d8dc4989120e8e',
+    spendTransaction:
+      '02000000000101d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b20000000000ffffffff01000000000000000000014083bbe1fe044d3d15cd1c18b484168c37f921864a9f85e9251f8457b576abd66b211b70b97fb3d63856ae271e4b3e3cf95da8e8b7769fefc309d8dc4989120e8e00000000',
+    ck1: 'ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6g8wlplczy60g4e5wp3dyyz6xr07fpse9flp0fy50cg4a4w64av6eprdctjlan6cu9dt38re9nu08etk5w3dmknlhuxzwcm3ycjysw3c9dpmpy'
+  },
+  vector4: {
+    mintPrivateKey: 'a8358061952ee158b42ffe1607c00adda3e63098247f837f08a4ef9492b4f798',
+    mintPubkey: '035acdbd57663f858be6d61ec4bfcbc99492699010f1451e30a6550f26295e813d',
+    notePubkey: 'aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
+    certificates: [
+      {
+        amountMsat: 1000,
+        message: 'LNURLcash:1000:aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
+        digest: '30894ad113df18b1e00a27015ed62e8b94a87498c8da7997ddac48e4cd7bb20f',
+        signature:
+          '41a69c2e826555b1c5c099b3166e8d50cc3bbba3ccb9b87c377e96ae070d532c3b6230194ae97d322d663fb38266abd26f3553c62a7d5a528ce9c72d3838fffc01',
+        cs1: 'cs10n1gxnfct5zv42mr3wqnxe3vm5d2rxrhwarejumslph06t2upcd2vkrkc3sr99wjlfj94nrlvuzv64ayme420rz5l2622xwn3ed8qu0llqpeg9n5x'
+      },
+      {
+        amountMsat: 21000000,
+        message: 'LNURLcash:21000000:aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
+        digest: '6186fd2c1c258a6c0a3627e895efbc3d0988325c4f36f0050b52b4c4751ab13d',
+        signature:
+          'b5c6c3dd151708501bc8820ae00ef3d6439cdcca8bac00fb2675fee6b89a7767079e37f62c2502c6744a56295c459d52c0475e27a0eb34745790b44c54b9386200',
+        cs1: 'cs210u1khrv8hg4zuy9qx7gsg9wqrhn6epeehx23wkqp7exwhlwdwy6wans083h7ckz2qkxw399v22ugkw49sz8tcn6p6e5w3tepdzv2junscsqwvvr03'
+      }
+    ]
+  },
+  vector5: {
+    preimage: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
+    h: '630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd',
+    leaf: 'a820630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd87',
+    tapleafHash: 'edffc9fa683d8844ded0ba5ec4215d5940ae436b0675257c1344bcb082516b50',
+    H: '50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0',
+    t: '5649b0259110c0c11426819ea5a40b53e5a9a2b8c6fb3d6c43217df73b326364',
+    Q: 'd18b619687343df2fc7a47e1daf25260b909bb563fb4b4b11e59e2bd64880982',
+    controlBlock: 'c050929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0',
+    cp1: 'cp16x9kr958xs7l9lr6glsa4ujjvzusnw6k876tfvg7t83t6eygpxpq6we0xc',
+    cw1: 'cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8c6x6a4c',
+    certificate: {
+      amountMsat: 1000,
+      message: 'LNURLcash:1000:d18b619687343df2fc7a47e1daf25260b909bb563fb4b4b11e59e2bd64880982',
+      digest: 'e44e0e215367429a8a503ee0095e070cfb215b8e8b3af523b75e54138e75ee84',
+      signature:
+        'c74d78b8c9ebd0a11a5afacaf1fed061da8ced7d6625e6809b624ddf68f16ab47df5cd830886bf7d1f1eaa88b9badaca242be6e038adec7b38c51a392d234a7800',
+      cs1: 'cs10n1caxh3wxfa0g2zxj6lt90rlksv8dgemtavcj7dqymvfxa7683d268mawdsvygd0maru024z9ehtdv5fptumsr3t0v0vuv2x3e953557qq5c70z5'
+    },
+    certifiedNoteUrl:
+      'lnurlw://mint.example/w?k1=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&sig=cs10n1caxh3wxfa0g2zxj6lt90rlksv8dgemtavcj7dqymvfxa7683d268mawdsvygd0maru024z9ehtdv5fptumsr3t0v0vuv2x3e953557qq5c70z5'
+  }
+}
+
+const specVectors = load('spec-vectors.json')
+
+// Every field 25.md prints must be in the file with the same value; the
+// file may carry more (intermediate values the spec leaves implicit).
+const sameAsSpec = (label, fromFile, fromSpec) => {
+  if (Array.isArray(fromSpec)) {
+    assert(Array.isArray(fromFile) && fromFile.length === fromSpec.length, `${label}: length`)
+    fromSpec.forEach((value, i) => sameAsSpec(`${label}[${i}]`, fromFile[i], value))
+  } else if (fromSpec !== null && typeof fromSpec === 'object') {
+    assert(fromFile !== null && typeof fromFile === 'object', `${label}: missing`)
+    for (const key of Object.keys(fromSpec)) sameAsSpec(`${label}.${key}`, fromFile[key], fromSpec[key])
+  } else {
+    assert(fromFile === fromSpec, `${label}: ${JSON.stringify(fromFile)}, 25.md says ${JSON.stringify(fromSpec)}`)
+  }
+}
+
+check('spec-vectors: vector 1 is 25.md\'s own', () => {
+  sameAsSpec('vector1', specVectors.vector1, SPEC_TEXT.vector1)
+})
+check('spec-vectors: vector 2 is 25.md\'s own, domain-bound proofs included', () => {
+  sameAsSpec('vector2', specVectors.vector2, SPEC_TEXT.vector2)
+})
+check('spec-vectors: vector 3 is 25.md\'s own', () => {
+  const {sk, ...rest} = SPEC_TEXT.vector3
+  sameAsSpec('vector3', specVectors.vector3, {secretKey: sk, ...rest})
+})
+check('spec-vectors: vector 4 is 25.md\'s own', () => {
+  sameAsSpec('vector4', specVectors.vector4, SPEC_TEXT.vector4)
+})
+check('spec-vectors: vector 5 is 25.md\'s own', () => {
+  sameAsSpec('vector5', specVectors.vector5, SPEC_TEXT.vector5)
+})
+
+// BIP-32 CKDpriv, written again here so vectors 1 and 2 are re-derived by
+// code the generator never ran.
+const ckd = (node, index) => {
+  const data =
+    index >= 0x80000000
+      ? cat(Uint8Array.of(0), node.key)
+      : secp256k1.Point.BASE.multiply(toNum(node.key)).toBytes(true)
+  const i = new Uint8Array(4)
+  new DataView(i.buffer).setUint32(0, index, false)
+  const I = hmac(sha512, node.chainCode, cat(data, i))
+  const key = (toNum(I.subarray(0, 32)) + toNum(node.key)) % N2
+  return {key: hexToBytes(key.toString(16).padStart(64, '0')), chainCode: I.slice(32)}
+}
+
+check('spec-vectors: vectors 1 and 2 re-derive from their seeds', () => {
+  for (const name of ['vector1', 'vector2']) {
+    const v = SPEC_TEXT[name]
+    const I = hmac(sha512, utf8ToBytes('Bitcoin seed'), hexToBytes(v.seedHex))
+    const root = ckd({key: I.slice(0, 32), chainCode: I.slice(32)}, 0x80000000 + 139)
+    const hashingKey = ckd(root, 0).key
+    assert(bytesToHex(hashingKey) === v.cashHashingKey, `${name}: cashHashingKey`)
+    const material = hmac(sha256, hashingKey, utf8ToBytes(v.domain))
+    const view = new DataView(material.buffer, material.byteOffset, material.byteLength)
+    const indices = [0, 4, 8, 12].map(offset => view.getUint32(offset, false))
+    assert(indices.join() === v.domainIndices.join(), `${name}: domain indices`)
+    const branch = indices.reduce(ckd, root)
+    assert(bytesToHex(branch.key) === v.branchPrivateKey, `${name}: p`)
+    assert(bytesToHex(branch.chainCode) === v.chainCode, `${name}: chaincode`)
+    const P = secp256k1.Point.BASE.multiply(toNum(branch.key))
+    assert(bytesToHex(P.toBytes(true)) === v.branchPubkeyCompressed, `${name}: P`)
+    assert((P.y % 2n === 0n ? 'even' : 'odd') === v.branchParity, `${name}: parity`)
+    const Px = P.toBytes(true).slice(1)
+    assert(bytesToHex(Px) === v.branchPubkeyXOnly, `${name}: P x-only`)
+    assert(bech32m.encode('cx', bech32m.toWords(cat(Px, branch.chainCode)), false) === v.cx1, `${name}: cx1`)
+    const tag = sha256(utf8ToBytes('LNURLcash/derive'))
+    for (const n of v.notes) {
+      const i = new Uint8Array(4)
+      new DataView(i.buffer).setUint32(0, n.index, false)
+      const t = toNum(sha256(cat(tag, tag, Px, branch.chainCode, i))) % N2
+      assert(t.toString(16).padStart(64, '0') === n.t, `${name} #${n.index}: t`)
+      const Q = secp256k1.Point.fromBytes(cat(Uint8Array.of(0x02), Px)).add(secp256k1.Point.BASE.multiply(t))
+      assert(bytesToHex(Q.toBytes(true)) === n.Q, `${name} #${n.index}: Q`)
+      assert(bytesToHex(Q.toBytes(true).slice(1)) === n.pk, `${name} #${n.index}: pk`)
+      const p = toNum(branch.key)
+      const sk = ((P.y % 2n === 0n ? p : N2 - p) + t) % N2
+      assert(sk.toString(16).padStart(64, '0') === n.sk, `${name} #${n.index}: sk`)
+      assert(encodeCp1(hexToBytes(n.pk)) === n.cp1, `${name} #${n.index}: cp1`)
+    }
+  }
+})
+
+check("spec-vectors: vector 2's proofs verify under pk_0 and bind their domain", () => {
+  const v = SPEC_TEXT.vector2
+  const pk0 = hexToBytes(v.notes[0].pk)
+  for (const proof of v.addressProofs) {
+    assert(bytesToHex(sha256(utf8ToBytes(proof.message))) === proof.digest, `${proof.action}: digest`)
+    assert(schnorr.verify(hexToBytes(proof.signature), hexToBytes(proof.digest), pk0), `${proof.action}: does not verify`)
+    for (const other of ['LNURLcash:' + proof.action + ':alice', `LNURLcash:${proof.action}:mint.example:alice`]) {
+      assert(!schnorr.verify(hexToBytes(proof.signature), sha256(utf8ToBytes(other)), pk0), `${proof.action}: verifies as ${other}`)
+    }
+  }
+})
+
+// The canonical spend transaction with its witness, serialised by hand
+// here rather than by anything the generator or the grader uses.
+const le32 = n => {
+  const out = new Uint8Array(4)
+  new DataView(out.buffer).setUint32(0, n, true)
+  return out
+}
+const canonicalTx = (domain, locktime, sequence, stack) =>
+  cat(
+    le32(2),
+    Uint8Array.of(0, 1, 1),
+    spendPrevout(domain),
+    le32(0),
+    Uint8Array.of(0),
+    le32(sequence),
+    Uint8Array.of(1),
+    new Uint8Array(8),
+    Uint8Array.of(0, stack.length),
+    ...stack.flatMap(item => [Uint8Array.of(item.length), item]),
+    le32(locktime)
+  )
+
+check('spec-vectors: vector 3 recomputes, from the prevout to the serialised spend', () => {
+  const v = SPEC_TEXT.vector3
+  const Q = hexToBytes(v.Q)
+  assert(bytesToHex(schnorr.getPublicKey(hexToBytes(v.sk))) === v.Q, 'Q is not sk·G')
+  assert(bytesToHex(spendPrevout(v.domain)) === v.prevoutTxid, 'prevout')
+  const sigMsg = spendSigMsg({outputKey: Q, domain: v.domain, locktime: 0, sequence: 0xffffffff})
+  assert(sigMsg.length === 174, `SigMsg is ${sigMsg.length} bytes`)
+  assert(bytesToHex(sigMsg) === v.sigMsg, 'SigMsg')
+  assert(Object.values(v.sigMsgFields).join('') === v.sigMsg, 'the named fields do not concatenate to SigMsg')
+  const sighash = keyPathSighash(Q, v.domain)
+  assert(bytesToHex(sighash) === v.sighash, 'sighash')
+  assert(bytesToHex(schnorr.sign(sighash, hexToBytes(v.sk), new Uint8Array(32))) === v.signature, 'zero-aux signature')
+  assert(schnorr.verify(hexToBytes(v.signature), sighash, Q), 'signature')
+  assert(bytesToHex(canonicalTx(v.domain, 0, 0xffffffff, [hexToBytes(v.signature)])) === v.spendTransaction, 'spend transaction')
+  assert(encodeCk1(Q, hexToBytes(v.signature)) === v.ck1, 'ck1')
+  assert(!schnorr.verify(hexToBytes(v.signature), keyPathSighash(Q, 'mint.example.com'), Q), 'verifies at another domain')
+})
+
+check("spec-vectors: vector 4's certificates recover to its mintPubkey", () => {
+  const v = SPEC_TEXT.vector4
+  assert(bytesToHex(secp256k1.getPublicKey(hexToBytes(v.mintPrivateKey), true)) === v.mintPubkey, 'mint key pair')
+  assert(bytesToHex(sha256(utf8ToBytes(specVectors.vector4.mintSeedLabel))) === v.mintPrivateKey, 'mint seed label')
+  for (const c of v.certificates) {
+    assert(c.message === `LNURLcash:${c.amountMsat}:${v.notePubkey}`, `${c.amountMsat}: message`)
+    assert(bytesToHex(lsmDigest(c.message)) === c.digest, `${c.amountMsat}: digest`)
+    const decoded = decodeCertificate(c.cs1)
+    assert(decoded && decoded.amountMsat === c.amountMsat, `${c.amountMsat}: cs1 amount`)
+    assert(bytesToHex(decoded.signature) === c.signature, `${c.amountMsat}: cs1 signature`)
+    assert(bytesToHex(recoverX(decoded.signature, hexToBytes(c.digest))) === v.mintPubkey.slice(2), `${c.amountMsat}: recovers`)
+  }
+})
+
+check('spec-vectors: vector 5 recomputes, and its certificate is over hex(Q)', () => {
+  const v = SPEC_TEXT.vector5
+  const preimage = hexToBytes(v.preimage)
+  assert(bytesToHex(sha256(preimage)) === v.h, 'h')
+  const note = bearerNote(hexToBytes(v.h))
+  assert(bytesToHex(note.leaf) === v.leaf, 'leaf')
+  assert(bytesToHex(tapLeafHash(note.leaf)) === v.tapleafHash, 'tapleaf hash')
+  assert(bytesToHex(NUMS_H) === v.H, 'H')
+  const tweaked = taprootTweak(NUMS_H, tapLeafHash(note.leaf))
+  assert(tweaked.tweak.toString(16).padStart(64, '0') === v.t, 't')
+  assert(bytesToHex(note.outputKey) === v.Q, 'Q')
+  assert(bytesToHex(note.controlBlock) === v.controlBlock, 'control block')
+  assert(encodeCp1(note.outputKey) === v.cp1, 'cp1')
+  assert(bearerSpend(preimage) === v.cw1, 'cw1')
+  assert(bytesToHex(decodeSpend(v.cw1).outputKey) === v.Q, 'the cw1 opens another Q')
+  assert(bytesToHex(decodeSpend(v.preimage).outputKey) === v.Q, 'the preimage opens another Q')
+  assert(decodeNoteRef(v.h) === v.Q && decodeNoteRef(v.cp1) === v.Q, 'the short forms name another note')
+  const c = v.certificate
+  assert(c.message === `LNURLcash:${c.amountMsat}:${v.Q}`, 'certificate message')
+  assert(bytesToHex(lsmDigest(c.message)) === c.digest, 'certificate digest')
+  const decoded = decodeCertificate(c.cs1)
+  assert(decoded && decoded.amountMsat === c.amountMsat && bytesToHex(decoded.signature) === c.signature, 'cs1')
+  assert(
+    bytesToHex(recoverX(decoded.signature, hexToBytes(c.digest))) === SPEC_TEXT.vector4.mintPubkey.slice(2),
+    "does not recover to vector 4's mintPubkey"
+  )
+  const url = new URL(v.certifiedNoteUrl.replace(/^lnurlw:/, 'https:'))
+  assert(url.searchParams.get('k1') === v.preimage && url.searchParams.get('sig') === c.cs1, 'certified note URL')
+})
+
+// ---- spends ----
+
+const spends = load('spends.json')
+
+// The two rules consensus leaves to the SERVICE, written here on their own
+// from 25.md's text rather than copied from any implementation.
+const OP_SUCCESS_RANGES = [[80, 80], [98, 98], [126, 129], [131, 134], [137, 138], [141, 142], [149, 153], [187, 254]]
+const isOpSuccess = op => OP_SUCCESS_RANGES.some(([lo, hi]) => op >= lo && op <= hi)
+const judgeLeaf = (version, script) => {
+  if ((version & 0xfe) !== 0xc0) return {verdict: 'refused', reason: 'unknown tapleaf version'}
+  let i = 0
+  while (i < script.length) {
+    const op = script[i++]
+    let pushed = 0
+    if (op >= 0x01 && op <= 0x4b) pushed = op
+    else if (op === 0x4c) pushed = 1 + (script[i] ?? 0)
+    else if (op === 0x4d) pushed = 2 + ((script[i] ?? 0) | ((script[i + 1] ?? 0) << 8))
+    else if (op === 0x4e) pushed = 4 + new DataView(cat(script.slice(i, i + 4), new Uint8Array(4)).buffer).getUint32(0, true)
+    else if (isOpSuccess(op)) return {verdict: 'refused', reason: 'OP_SUCCESS'}
+    i += pushed
+  }
+  return {verdict: 'allowed', reason: null}
+}
+const judgeTime = ({locktime, sequence, now, lockedAt}) => {
+  if (locktime !== 0 && (locktime < 500_000_000 || locktime > now)) return 'reject'
+  if (sequence >= 2 ** 31) return 'accept'
+  if (Math.floor(sequence / 2 ** 22) % 2 === 0) return 'reject'
+  return now - lockedAt >= (sequence % 2 ** 16) * 512 ? 'accept' : 'reject'
+}
+
+check('spends: every bearer note recomputes from its preimage', () => {
+  for (const b of spends.bearers) {
+    const preimage = hexToBytes(b.preimage)
+    assert(bytesToHex(sha256(preimage)) === b.h, `${b.name}: h`)
+    const note = bearerNote(hexToBytes(b.h))
+    assert(bytesToHex(note.leaf) === b.leaf, `${b.name}: leaf`)
+    assert(bytesToHex(tapLeafHash(note.leaf)) === b.tapleafHash, `${b.name}: tapleaf hash`)
+    const tweaked = taprootTweak(NUMS_H, tapLeafHash(note.leaf))
+    assert(tweaked.tweak.toString(16).padStart(64, '0') === b.tweak, `${b.name}: tweak`)
+    assert(bytesToHex(tweaked.outputKey) === b.Q && tweaked.parity === b.parity, `${b.name}: Q and parity`)
+    assert(bytesToHex(note.controlBlock) === b.controlBlock, `${b.name}: control block`)
+    assert((hexToBytes(b.controlBlock)[0] & 1) === b.parity, `${b.name}: parity bit`)
+    assert(bytesToHex(outputKeyOf(note.leaf, note.controlBlock)) === b.Q, `${b.name}: control block commits to Q`)
+    assert(encodeCp1(hexToBytes(b.Q)) === b.cp1, `${b.name}: cp1`)
+    assert(bearerSpend(preimage) === b.cw1, `${b.name}: cw1`)
+  }
+  assert(spends.bearers.some(b => b.parity === 1) && spends.bearers.some(b => b.parity === 0), 'both parities')
+})
+
+check("spends: every domain is its URL's lowercase hostname", () => {
+  for (const d of spends.domains) assert(spendDomainOf(d.url.replace(/^lnurlw:/, 'https:')) === d.domain, d.url)
+})
+
+check('spends: every key-path ck1 verifies at its own domain and no other', () => {
+  const k = spends.keyPath
+  const Q = hexToBytes(k.Q)
+  assert(bytesToHex(schnorr.getPublicKey(hexToBytes(k.secretKey))) === k.Q && encodeCp1(Q) === k.cp1, 'key')
+  const byDomain = new Map()
+  for (const s of k.spends) {
+    assert(s.normalisedDomain === s.domain.toLowerCase(), `${s.domain}: normalised`)
+    assert(bytesToHex(spendPrevout(s.normalisedDomain)) === s.prevoutTxid, `${s.domain}: prevout`)
+    const sighash = keyPathSighash(Q, s.normalisedDomain)
+    assert(bytesToHex(sighash) === s.sighash, `${s.domain}: sighash`)
+    assert(schnorr.verify(hexToBytes(s.signature), sighash, Q), `${s.domain}: signature`)
+    assert(encodeCk1(Q, hexToBytes(s.signature)) === s.ck1, `${s.domain}: ck1`)
+    assert(keyPathSpend(hexToBytes(k.secretKey), s.normalisedDomain) === s.ck1, `${s.domain}: not the zero-aux ck1`)
+    byDomain.set(s.domain, s)
+  }
+  assert(byDomain.get('mint.example').ck1 === SPEC_TEXT.vector3.ck1, "mint.example's ck1 is not test vector 3's")
+  assert(byDomain.get('MINT.EXAMPLE').ck1 === byDomain.get('mint.example').ck1, 'case changed the ck1')
+  for (const c of k.crossDomain) {
+    const signature = hexToBytes(byDomain.get(c.signedFor).signature)
+    const verifies = schnorr.verify(signature, keyPathSighash(Q, c.verifiedAt.toLowerCase()), Q)
+    assert(verifies === c.valid, `${c.signedFor} at ${c.verifiedAt}: ${verifies}`)
+  }
+})
+
+check("spends: the tree's Q, control blocks and cw1s recompute, and each leaf gets its verdict", () => {
+  const tree = spends.tree
+  const internalKey = hexToBytes(tree.internalKey)
+  assert(bytesToHex(schnorr.getPublicKey(hexToBytes(tree.internalSecretKey))) === tree.internalKey, 'internal key')
+  const leaves = tree.leaves.map(l => ({script: hexToBytes(l.script), version: l.version}))
+  const hashes = leaves.map(l => tapLeafHash(l.script, l.version))
+  hashes.forEach((h, i) => assert(bytesToHex(h) === tree.leaves[i].tapleafHash, `leaf ${i}: tapleaf hash`))
+  assert(bytesToHex(tapBranchHash(tapBranchHash(hashes[0], hashes[1]), hashes[2])) === tree.merkleRoot, 'merkle root')
+  const built = scriptTree(internalKey, leaves)
+  assert(bytesToHex(built.outputKey) === tree.Q, 'Q')
+  assert(built.tweak.toString(16).padStart(64, '0') === tree.tweak, 'tweak')
+  assert(encodeCp1(built.outputKey) === tree.cp1, 'cp1')
+  tree.leaves.forEach((leaf, i) => {
+    assert(bytesToHex(built.controlBlock(i)) === leaf.controlBlock, `leaf ${i}: control block`)
+    assert(built.spend(i, leaf.witness.map(hexToBytes)) === leaf.cw1, `leaf ${i}: cw1`)
+    assert(bytesToHex(decodeSpend(leaf.cw1).outputKey) === tree.Q, `leaf ${i}: the cw1 opens another Q`)
+    const judged = judgeLeaf(leaf.version, hexToBytes(leaf.script))
+    if (leaf.verdict === 'accept') {
+      assert(judged.verdict === 'allowed', `leaf ${i}: refused by ${judged.reason}`)
+      const script = hexToBytes(leaf.script)
+      assert(bytesToHex(sha256(hexToBytes(leaf.witness[0]))) === bytesToHex(script.subarray(2, 34)), `leaf ${i}: the witness does not open the hashlock`)
+    } else {
+      assert(judged.verdict === 'refused' && judged.reason === leaf.reason, `leaf ${i}: ${judged.verdict} (${judged.reason}), expected ${leaf.reason}`)
+    }
+  })
+})
+
+check("spends: the tree's key path signs for the tweaked Q", () => {
+  const tree = spends.tree
+  const k = tree.keyPath
+  const tweaked = tweakSecretKey(hexToBytes(tree.internalSecretKey), BigInt(`0x${tree.tweak}`))
+  assert(bytesToHex(tweaked) === k.tweakedSecretKey, 'tweaked secret key')
+  assert(bytesToHex(schnorr.getPublicKey(tweaked)) === tree.Q, 'tweaked key is not Q')
+  const Q = hexToBytes(tree.Q)
+  const sighash = keyPathSighash(Q, k.domain)
+  assert(bytesToHex(sighash) === k.sighash, 'sighash')
+  assert(schnorr.verify(hexToBytes(k.signature), sighash, Q), 'signature')
+  assert(encodeCk1(Q, hexToBytes(k.signature)) === k.ck1, 'ck1')
+})
+
+check("spends: the CHECKSIG leaf's signatures verify over its script-path sighash", () => {
+  const c = spends.checksig
+  const key = hexToBytes(c.pubkey)
+  assert(bytesToHex(schnorr.getPublicKey(hexToBytes(c.secretKey))) === c.pubkey, 'key')
+  const leaf = hexToBytes(c.leaf)
+  assert(bytesToHex(leaf) === '20' + c.pubkey + 'ac', 'leaf is not <key> OP_CHECKSIG')
+  const tweaked = taprootTweak(NUMS_H, tapLeafHash(leaf))
+  assert(bytesToHex(tweaked.outputKey) === c.Q, 'Q')
+  assert(bytesToHex(outputKeyOf(leaf, hexToBytes(c.controlBlock))) === c.Q, 'control block')
+  const Q = hexToBytes(c.Q)
+  for (const s of c.spends) {
+    const sigMsg = spendSigMsg({outputKey: Q, domain: c.domain, locktime: s.locktime, sequence: s.sequence, leafScript: leaf})
+    assert(sigMsg.length === 211 && bytesToHex(sigMsg) === s.sigMsg, `${s.locktime}: SigMsg`)
+    const sighash = scriptPathSighash(Q, c.domain, leaf, s.locktime, s.sequence)
+    assert(bytesToHex(sighash) === s.sighash, `${s.locktime}: sighash`)
+    assert(schnorr.verify(hexToBytes(s.signature), sighash, key), `${s.locktime}: signature`)
+    assert(!schnorr.verify(hexToBytes(s.signature), keyPathSighash(Q, c.domain), key), `${s.locktime}: signs the key path`)
+    const cw1 = encodeCw1({locktime: s.locktime, sequence: s.sequence, script: leaf, controlBlock: hexToBytes(c.controlBlock), witness: [hexToBytes(s.signature)]})
+    assert(cw1 === s.cw1, `${s.locktime}: cw1`)
+    const decoded = decodeSpend(s.cw1)
+    assert(decoded.locktime === s.locktime && decoded.sequence === s.sequence, `${s.locktime}: the claimed time`)
+  }
+  assert(c.spends[0].sighash !== c.spends[1].sighash, 'the claimed time is not signed')
+})
+
+check('spends: every time claim gets its verdict from an independent reading of the rules', () => {
+  for (const t of spends.timeClaims) {
+    assert(judgeTime(t) === t.verdict, `${t.name}: ${judgeTime(t)}, expected ${t.verdict}`)
+    assert(typeof t.why === 'string' && t.why.length > 0, `${t.name}: no reason given`)
+  }
+  for (const verdict of ['accept', 'reject']) {
+    assert(spends.timeClaims.some(t => t.verdict === verdict), `no ${verdict} case`)
+  }
+  assert(spends.conventions.timeClaims.locktimeThreshold === 500_000_000, 'threshold')
+})
+
+check('spends: every leaf-policy case gets its verdict from an independent scanner', () => {
+  for (const l of spends.leafPolicy) {
+    const judged = judgeLeaf(l.version, hexToBytes(l.script))
+    assert(judged.verdict === l.verdict, `${l.name}: ${judged.verdict}, expected ${l.verdict}`)
+  }
+})
+
+check('spends: no malformed cw1 decodes to a note', () => {
+  for (const m of spends.malformedCw1) {
+    assert(decodeSpend(m.value) === null, `${m.name} decoded`)
+    assert(typeof m.why === 'string' && m.why.length > 0, `${m.name}: no reason given`)
+  }
+})
+
+check('spends: no off-curve cp1 decodes', () => {
+  for (const c of spends.invalidCp1) {
+    let onCurve = true
+    try {
+      secp256k1.Point.fromBytes(cat(Uint8Array.of(0x03), hexToBytes(c.x)))
+    } catch {
+      onCurve = false
+    }
+    assert(!onCurve, `${c.x} is on the curve`)
+    assert(decode2('cp', c.cp1, 32) !== null, `${c.x}: the cp1 itself is malformed, so it proves nothing`)
+    assert(decodeCp1(c.cp1) === null && decodeNoteRef(c.cp1) === null, `${c.x}: decoded`)
+  }
+})
+
+check('spends: each short form names the same note as its long form', () => {
+  for (const f of spends.shortForms) {
+    assert(decodeNoteRef(f.cp1Slot.hex) === f.Q && decodeNoteRef(f.cp1Slot.sameAs) === f.Q, `${f.Q}: cp1 slot`)
+    assert(bytesToHex(decodeSpend(f.k1Slot.hex).outputKey) === f.Q, `${f.Q}: preimage`)
+    assert(bytesToHex(decodeSpend(f.k1Slot.sameAs).outputKey) === f.Q, `${f.Q}: cw1`)
+    assert(bearerSpend(hexToBytes(f.k1Slot.hex)) === f.k1Slot.sameAs, `${f.Q}: the preimage is not that cw1`)
   }
 })
 
 // ---- the runner ----
 
-const {ownershipProof} = await import('../runner/index.mjs')
-check("the runner's own ck1 signs the digest the vectors sign", () => {
-  const secretKey = hexToBytes('11'.repeat(32))
-  const words = bech32m.fromWords(bech32m.decode(ownershipProof(secretKey), false).words)
-  const proof = Uint8Array.from(words)
-  assert(proof.length === 96, 'ck1 payload is 96 bytes')
-  assert(bytesToHex(proof.subarray(0, 32)) === bytesToHex(schnorr.getPublicKey(secretKey)), 'ck1 key')
-  assert(schnorr.verify(proof.subarray(32), sha256(utf8ToBytes('LNURLcash')), proof.subarray(0, 32)), 'signs sha256("LNURLcash")')
+check("the runner's own ck1 is test vector 3's, and binds its domain", () => {
+  const sk0 = hexToBytes(SPEC_TEXT.vector3.sk)
+  const ck1 = keyPathSpend(sk0, 'mint.example')
+  assert(ck1 === SPEC_TEXT.vector3.ck1, 'keyPathSpend(sk_0, "mint.example") is not vector 3\'s ck1')
+  const proof = decode2('ck', ck1, 96)
+  assert(proof, 'the runner ck1 does not decode')
+  const pk = proof.subarray(0, 32)
+  assert(!schnorr.verify(proof.subarray(32), keyPathSighash(pk, 'moneyer.dev'), pk), 'verifies at another domain')
+  assert(
+    !schnorr.verify(proof.subarray(32), sha256(utf8ToBytes('LNURLcash')), pk),
+    'still signs the retired fixed message'
+  )
 })
 
 console.log(

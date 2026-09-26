@@ -4,6 +4,124 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## 0.14.0 - unreleased
+
+**LUD-25's unified taproot model** (luds `6e865b1`, "unified taproot
+verification"). Every note is now a BIP-341 output key `Q`, named `cp1<Q>`,
+and every spend opens it by its key path (`ck1`) or a leaf of its script
+tree (`cw1`), with every signature over the sighash of one canonical,
+never-broadcast transaction whose prevout is bound to the mint's domain. A
+bearer note is the one-leaf hashlock case: its 64-hex preimage and its hex
+`h` are short forms, so the Part 1 wire keeps working unchanged, but the
+note is keyed by `Q` and certified over `hex(Q)`. A mint graded clean by
+0.13.x will fail several checks here; that is the spec moving, not the
+grader.
+
+Vectors:
+
+- `spec-vectors.json` follows 25.md's published vectors exactly. Vector 2's
+  address proofs sign `sha256("LNURLcash:<action>:<domain>:<username>")`;
+  vector 3 is now the key-path `ck1`, with the prevout, every `SigMsg`
+  field, the sighash and the serialised canonical spend transaction;
+  vector 5 is new, a bearer note from preimage to `cw1` and its `cs1`.
+  Vectors 1 and 4 are unchanged. The selfcheck now holds every value to a
+  literal transcribed from 25.md, and recomputes each independently.
+- New `spends.json`: bearer notes of both parities, one key's `ck1` across
+  several domains (and the cross-domain spends that must not verify), a
+  three-leaf script tree with each leaf's control block, `cw1` and verdict
+  plus a key-path spend of the tweaked key, a `CHECKSIG` leaf's
+  script-path sighash, time-claim cases, leaf-policy cases (an `OP_SUCCESS`
+  byte inside pushed data is data), malformed `cw1`s, off-curve `cp1`s and
+  the short-form equivalences.
+- `part2.json` and `nostr-seed.json`: every `ck1` now signs the key-path
+  sighash for its host's domain (lowercase, no port), so each branch or case
+  gains `domain`, and each note gains `sighash` and `keyPathSignature` in
+  place of `ownershipSignature`. The address proofs gain `domain` and sign
+  the domain-bound message. `conventions` drops the fixed ownership message.
+  Consumers reading `ownershipSignature` break loudly, which is intended:
+  it no longer means what it did.
+- `part2.json`'s `noteTweak` says `t` is reduced mod n, as 25.md requires,
+  where it said `t >= n` is unusable. No vector reaches n, so no value
+  changes. The mock mint's auto-mint reduces rather than skipping the index.
+
+Grader, `gradeNote`:
+
+- The note given may be any spend of it: a 64-hex preimage, a `ck1` or a
+  `cw1`. Mutations name their outputs as `p1`/`p2` rather than `h`/`h2`,
+  and lookups use `?p=`.
+- `answers a note lookup by p without the spend` replaces the optional
+  hash lookup, and now fails a mint that refuses it: LUD-25 makes `?p=` a
+  MUST. It asks by the note's `cp1` and, for a bearer note, its hex `h`.
+- `certifies a bearer output over hex(Q)` replaces `a legacy hash mutation
+  signature verifies when present`. A missing certificate warns (a SHOULD);
+  one that does not verify over `hex(Q)` fails, and one over the bearer
+  note's `h` is named as the pre-taproot message.
+- `a certificate on the informational GET verifies over hex(Q)` replaces
+  `keeps signatures off the informational endpoint`: a `sig` there must be
+  a `cs1` for exactly the queried note.
+- `refuses a p1 naming a burned note, as "already in use"` replaces
+  `refuses an output hash that already names a note`, asks by `cp1` and by
+  hex `h`, and fails any reason but exactly `already in use`.
+- `refuses a duplicated k1` also sends one note as its preimage and its
+  full `cw1`; `refuses a split whose p1 equals p2` also names one note as its
+  `h` and its `cp1`; `refuses a replayed burn` also tries the full `cw1`.
+- `replays a retried mutation rather than refusing it` also retries a
+  completed rotate naming its note by the full `cw1` instead of the
+  preimage, and its output by `cp1` instead of `h`. Both must replay with
+  the same certificate: LUD-25 matches retries on decoded `Q`s.
+- New, on a three-leaf script tree the grader funds by a bearer note's full
+  `cw1` and holds itself (MUST, fail): `a bearer note's full cw1 is the
+  same spend as its preimage`, `refuses a leaf version other than 0xc0`,
+  `refuses a leaf carrying an OP_SUCCESS opcode`, `refuses a block-height
+  locktime`, `refuses a locktime still in the future`, `refuses a
+  block-count relative lock`, `refuses a relative lock that has not yet
+  run` and `accepts a locktime already past`. Each refusal is tried at the
+  informational GET as well as the callback.
+- New, on a key-path note (MUST, fail): `credits a key-path note named by
+  its cp1`, `the informational GET refuses a spend that does not verify`,
+  `refuses a ck1 bound to another domain` and `spends a key-path note by a
+  ck1 bound to its own domain`. They replace `certifies a cp1 note it
+  issues (Part 2)`, which warned when a mint took no `cp1`; LUD-25 no
+  longer has an optional part, so that now fails.
+- New: `every certificate verifies over hex(Q) and the note value`, over
+  every `cs1` the run collected. A wrong one fails; missing ones warn.
+- Value is conserved on every path. A refusal is confirmed to have left the
+  value in place, a misbehaving mint's output is adopted rather than lost,
+  and the script tree has two ways home (its hashlock leaf, then its key
+  path). The grader's `ck1`s sign the domain-bound sighash for the note
+  URL's own hostname; the deprecated fixed-message `ck1` is tried only as a
+  last rescue of the value, and never graded.
+- `gradeNote` resolves to `{finalSecret, noteUrl}`, as it always did in
+  practice; the declarations now say so.
+
+Grader, `gradeMint`: the comment check also requires a `cp1<Q>` comment to
+be invoiced, and a `cp1` whose key is not a curve point to be refused before
+any invoice exists. That rule is probed only here: as a `p1` it would
+destroy the note under grade on a mint that got it wrong.
+
+API: `ownershipProof(secretKey)` is gone. `keyPathSpend(secretKey, domain)`
+replaces it, since a `ck1` without a domain no longer means anything.
+
+Mock mint: keys notes by `hex(Q)` and verifies every spend in full (a `ck1`
+against the hostname it was reached at, or `--domains`; a `cw1` by the leaf
+and time rules, then the script, of which it evaluates only a bearer
+hashlock). It certifies every note with a `cs1` over `hex(Q)`, answers
+`?p=` (`?h=` still read), reads `p1`/`p2` (and `h`/`h2`), and refuses a
+collision as `already in use`. `creditNote` takes any spend; `creditOutput`
+takes a `cp1` or hex `h`. New misbehaviours, each caught by the self-grade
+with the value brought home: `leafVersionUnchecked`, `opSuccessUnchecked`,
+`ignoresTimeClaims` (all rules or named ones), `refusesLocktimes`,
+`unverifiedCk1`, `infoSkipsVerification`, `replayMatchesStrings`,
+`alreadyInUseReason`, `certificateOverH`, `refusesCp1Outputs`,
+`acceptsOffCurveCp1`; `acceptsMissingP2` is the new name of
+`acceptsMissingH2`. The optional bound-mint receipt keeps signing its `h`.
+
+Not yet brought over: `signature.json`, `callbacks.json`,
+`retried-mutation.json` and the other Part 1 wire vectors still describe the
+`h`/`h2` spelling and the certificate over `h`. The wire they describe still
+works through the short forms, but their certificate cases are the
+pre-taproot message.
+
 ## 0.13.1 - 2026-09-16
 
 - The grader's own `ck1` (the one the Part 2 certification check spends
