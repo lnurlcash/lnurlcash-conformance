@@ -1,7 +1,7 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. An amount-bearing cs1 carries that same declared amount itself, so the current reference wallet omits the duplicate `amount` query parameter and reads it from `sig`. A SERVICE returning a rotate, split or merge to a cp1 output MUST include that certificate in `sig` (and `sig2` for the second split output). A legacy hash output may instead carry the reference mint's raw Part 1 signature when a signer is available; it never carries cs1.",
+  "description": "A note is an ordinary LUD-03 withdrawRequest URL whose k1 IS the asset. `amount` alongside it is only a claim by whoever encoded the note - the authoritative value is always maxWithdrawable from an informational GET. An amount-bearing cs1 carries that same declared amount itself, so the current reference wallet omits the duplicate `amount` query parameter and reads it from `c`. A SERVICE returning a rotate, split or merge to a cp1 output MUST include that certificate in `c` (and `c2` for the second split output). A legacy hash output may instead carry the reference mint's raw Part 1 signature when a signer is available; it never carries cs1. The parameter was `sig` before lnurl/luds 50d740a: a WALLET MAY still read a certificate from a `sig` it finds on an older note URL, but writes only `c`, and drops a stale `sig` along with a stale `c` whenever the k1 changes.",
   "parse": [
     {
       "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000",
@@ -17,17 +17,24 @@
       "why": "k1 is bytes, not text: normalise to lowercase so the same secret in two casings is one note"
     },
     {
-      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000&sig=ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000&c=ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
       "k1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "declaredAmountMsat": 21000,
       "signature": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
     },
     {
-      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&sig=cs210n14dvflf6u89wxrhp52zgu22ds0cdgegxh4d36p52z6cxydm5r200hq7y3rfrj8d32jpjuguptzhq7zy9l9mjzw4kzwfm9ahku82r58mcpr3lz8j",
+      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&c=cs210n1f5txhr3ay38cty8zga95stka2t3q8exz6jzu4f7ewj9ryz62jz3rcww92gmwsqr78scv0sv37sf7627tkgl3xl9wvtn6gvhmcgsyypqqjyw5r9",
       "k1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "declaredAmountMsat": 21000,
-      "signature": "cs210n14dvflf6u89wxrhp52zgu22ds0cdgegxh4d36p52z6cxydm5r200hq7y3rfrj8d32jpjuguptzhq7zy9l9mjzw4kzwfm9ahku82r58mcpr3lz8j",
+      "signature": "cs210n1f5txhr3ay38cty8zga95stka2t3q8exz6jzu4f7ewj9ryz62jz3rcww92gmwsqr78scv0sv37sf7627tkgl3xl9wvtn6gvhmcgsyypqqjyw5r9",
       "why": "an amount-bearing cs1 carries the declared amount without a duplicate amount query parameter"
+    },
+    {
+      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&sig=cs210n1f5txhr3ay38cty8zga95stka2t3q8exz6jzu4f7ewj9ryz62jz3rcww92gmwsqr78scv0sv37sf7627tkgl3xl9wvtn6gvhmcgsyypqqjyw5r9",
+      "k1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "declaredAmountMsat": 21000,
+      "signature": "cs210n1f5txhr3ay38cty8zga95stka2t3q8exz6jzu4f7ewj9ryz62jz3rcww92gmwsqr78scv0sv37sf7627tkgl3xl9wvtn6gvhmcgsyypqqjyw5r9",
+      "why": "a note URL written before lnurl/luds 50d740a carries its certificate as sig; a WALLET may still read it there"
     },
     {
       "url": "https://mint.example/w",
@@ -72,7 +79,7 @@
   ],
   "withNewK1": [
     {
-      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000&sig=ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000&c=ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
       "k1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "amountMsat": 5000,
       "signature": null,
@@ -80,24 +87,32 @@
       "why": "a stale signature must be dropped: it no longer matches the new secret"
     },
     {
+      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&sig=cs210n1f5txhr3ay38cty8zga95stka2t3q8exz6jzu4f7ewj9ryz62jz3rcww92gmwsqr78scv0sv37sf7627tkgl3xl9wvtn6gvhmcgsyypqqjyw5r9",
+      "k1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "amountMsat": 5000,
+      "signature": null,
+      "expect": "https://mint.example/w?k1=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&amount=5000",
+      "why": "a stale certificate under the pre-50d740a name sig is dropped too"
+    },
+    {
       "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000",
       "k1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "amountMsat": 5000,
       "signature": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-      "expect": "https://mint.example/w?k1=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&amount=5000&sig=cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      "expect": "https://mint.example/w?k1=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&amount=5000&c=cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
     },
     {
       "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000",
       "k1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "amountMsat": 21000,
-      "signature": "cs210n14dvflf6u89wxrhp52zgu22ds0cdgegxh4d36p52z6cxydm5r200hq7y3rfrj8d32jpjuguptzhq7zy9l9mjzw4kzwfm9ahku82r58mcpr3lz8j",
-      "expect": "https://mint.example/w?k1=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&sig=cs210n14dvflf6u89wxrhp52zgu22ds0cdgegxh4d36p52z6cxydm5r200hq7y3rfrj8d32jpjuguptzhq7zy9l9mjzw4kzwfm9ahku82r58mcpr3lz8j",
+      "signature": "cs210n1f5txhr3ay38cty8zga95stka2t3q8exz6jzu4f7ewj9ryz62jz3rcww92gmwsqr78scv0sv37sf7627tkgl3xl9wvtn6gvhmcgsyypqqjyw5r9",
+      "expect": "https://mint.example/w?k1=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&c=cs210n1f5txhr3ay38cty8zga95stka2t3q8exz6jzu4f7ewj9ryz62jz3rcww92gmwsqr78scv0sv37sf7627tkgl3xl9wvtn6gvhmcgsyypqqjyw5r9",
       "why": "the cs1 already carries amount_msat, so the current reference wallet omits the duplicate amount parameter"
     }
   ],
   "withoutK1": [
     {
-      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000&sig=ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+      "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000&c=ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
       "amountMsat": 5000,
       "signature": null,
       "expect": "https://mint.example/w?amount=5000",
@@ -106,8 +121,8 @@
     {
       "url": "https://mint.example/w?k1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amount=21000",
       "amountMsat": 21000,
-      "signature": "cs210n14dvflf6u89wxrhp52zgu22ds0cdgegxh4d36p52z6cxydm5r200hq7y3rfrj8d32jpjuguptzhq7zy9l9mjzw4kzwfm9ahku82r58mcpr3lz8j",
-      "expect": "https://mint.example/w?sig=cs210n14dvflf6u89wxrhp52zgu22ds0cdgegxh4d36p52z6cxydm5r200hq7y3rfrj8d32jpjuguptzhq7zy9l9mjzw4kzwfm9ahku82r58mcpr3lz8j",
+      "signature": "cs210n1f5txhr3ay38cty8zga95stka2t3q8exz6jzu4f7ewj9ryz62jz3rcww92gmwsqr78scv0sv37sf7627tkgl3xl9wvtn6gvhmcgsyypqqjyw5r9",
+      "expect": "https://mint.example/w?c=cs210n1f5txhr3ay38cty8zga95stka2t3q8exz6jzu4f7ewj9ryz62jz3rcww92gmwsqr78scv0sv37sf7627tkgl3xl9wvtn6gvhmcgsyypqqjyw5r9",
       "why": "a secret-free mirror also avoids duplicating the amount already encoded in cs1"
     }
   ]

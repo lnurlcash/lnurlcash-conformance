@@ -27,12 +27,12 @@ if (positional.length === 0 && !noteArg) {
   lnurlcash-conform <mint> --note=<url> --pr=<invoice>  same, paid amount from the invoice
   lnurlcash-conform <mint> --note=<url> --preimage=<hex> + the bound-mint checks
   lnurlcash-conform <mint> --note=<url> --spend         + the full mutating checks
-  lnurlcash-conform <address> --address              grade a Part 2 registered address
+  lnurlcash-conform <address> --address              grade a cx1-registered address
 
 <mint> may be a Lightning Address (mint@example.com), a bare domain, or a
 payRequest URL.
 
---address says the target is a LUD-25 Part 2 Lightning Address with a cx1
+--address says the target is a LUD-25 auto-mint Lightning Address with a cx1
 registered against it, not a mint payLink. Such an address mints on the next
 unused key of its own branch, so a comment naming no output is the ordinary
 free text LUD-12 invites and must not fail the payment; without this flag the
@@ -58,8 +58,11 @@ yourself: --note then carries YOUR secret, and the check confirms the note is
 really there and that the preimage opens nothing. Also read-only.
 
 The --spend checks SPEND: they burn the note given and leave its value in a
-fresh note printed at the end. Use a small note, and pass --spend to
-confirm you meant it.`)
+fresh note printed at the end. The note's k1 may be any spend of it: a
+bearer note's 64-hex preimage, a ck1 or a cw1. Along the way the value
+passes through a script-tree note and a key-path note the runner holds,
+and every refusal it probes for is confirmed to have left the value where
+it was. Use a small note, and pass --spend to confirm you meant it.`)
   process.exit(2)
 }
 

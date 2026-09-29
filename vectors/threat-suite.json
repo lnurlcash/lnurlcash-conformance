@@ -224,7 +224,7 @@
       "adversary": "an attacker who self-signs a note and supplies their own key",
       "steps": [
         "a recipient who has never interacted with this mint receives a note",
-        "it has no mintPubkey on record, so it cannot verify the note's sig offline",
+        "it has no mintPubkey on record, so it cannot verify the note's certificate offline",
         "embedding the pubkey in the note URL proves nothing - an attacker self-signs and supplies their own key"
       ],
       "currentBehavior": "no offline verification on first contact - a spec-level gap, no endpoint to hit",

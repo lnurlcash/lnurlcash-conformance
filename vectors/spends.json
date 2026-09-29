@@ -1,0 +1,609 @@
+{
+  "version": 1,
+  "spec": "LUD-25 draft (lnurl/luds#301)",
+  "description": "Spending a LUD-25 note (lnurl/luds 6e865b1, \"unified taproot verification\"; keys per 50d740a). Every note is a BIP-341 output key Q; a ck1 opens it by the key path and a cw1 by one leaf of its script tree, and every signature in either signs the BIP-341 sighash of input 0 of the canonical spend transaction for the mint's domain. bearers: bearer notes (NUMS internal key, one OP_SHA256 <h> OP_EQUAL leaf) with every intermediate value. keyPath: one key's ck1 at several domains, and crossDomain pairs that must not verify. tree: the three-leaf note the grader rotates a funded note into, with each leaf's cw1 and the verdict LUD-25's leaf policy gives it, and the key path of the tweaked key. checksig: a <key> OP_CHECKSIG leaf with its script-path SigMsg and sighash at two claimed times. timeClaims, leafPolicy: the two SERVICE-side rules consensus does not decide, each case with the verdict and why. malformedCw1 and invalidCp1 must not decode to a note. shortForms: a 64-hex value names the same note, or makes the same spend, as its long form. Expected verdicts are written by hand; tools/selfcheck.mjs recomputes every one.",
+  "conventions": {
+    "domain": "the SERVICE's full domain name, lowercased, never its scheme or port: new URL(noteUrl).hostname.toLowerCase()",
+    "canonicalSpendTransaction": "nVersion 2; vin[0] prevout (tagged_hash(\"LNURLcash/mint\", domain), 0), empty scriptSig, nSequence as claimed; vout[0] value 0, empty scriptPubKey; nLockTime as claimed; spent output (OP_1 <Q>, 0). Serialised with its witness in spec-vectors.json vector3.spendTransaction",
+    "sigMsg": "hash_type 0x00 || nVersion u32le 2 || nLockTime u32le || sha256(prevout txid || u32le 0) || sha256(i64le 0) || sha256(0x22 || 0x51 0x20 || Q) || sha256(u32le nSequence) || sha256(i64le 0 || 0x00) || spend_type (0x00 key path, 0x02 script path) || input_index u32le 0, then for a script path tapleaf_hash(leaf) || 0x00 || 0xffffffff",
+    "sighash": "tagged_hash(\"TapSighash\", 0x00 || SigMsg)",
+    "keyPath": "ck1 = Q (32) || BIP-340 signature (64) over the key-path sighash with locktime 0 and sequence 0xffffffff; SIGHASH_DEFAULT only; any other payload length is refused",
+    "cw1Payload": "u32 locktime || u32 sequence || (u16 len || item)* over the script, the control block, then the witness items bottom of stack first; integers big-endian; the prefixes must consume the payload exactly, and a script and control block are mandatory",
+    "leafPolicy": {
+      "leafVersion": "control_block[0] & 0xfe must be 0xc0",
+      "opSuccess": [
+        80,
+        98,
+        "126-129",
+        "131-134",
+        137,
+        138,
+        141,
+        142,
+        "149-153",
+        "187-254"
+      ],
+      "scan": "opcodes outside pushed data only: 0x01-0x4b push that many bytes, OP_PUSHDATA1/2/4 (0x4c/0x4d/0x4e) push a 1/2/4-byte little-endian length"
+    },
+    "timeClaims": {
+      "locktimeThreshold": 500000000,
+      "locktime": "non-zero: refused below the threshold (a block height), refused above the mint clock",
+      "sequenceDisableFlag": 2147483648,
+      "sequenceTypeFlag": 4194304,
+      "sequenceValueMask": 65535,
+      "granularitySeconds": 512,
+      "sequence": "bit 31 set: no relative lock. Otherwise bit 22 must be set (else a block count, refused), and (sequence & 0xffff) * 512 seconds must have passed since the mint credited the note (lockedAt)"
+    }
+  },
+  "nums": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+  "bearers": [
+    {
+      "name": "test vector 5's preimage (even Q)",
+      "preimage": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "h": "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd",
+      "leaf": "a820630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd87",
+      "tapleafHash": "edffc9fa683d8844ded0ba5ec4215d5940ae436b0675257c1344bcb082516b50",
+      "tweak": "5649b0259110c0c11426819ea5a40b53e5a9a2b8c6fb3d6c43217df73b326364",
+      "Q": "d18b619687343df2fc7a47e1daf25260b909bb563fb4b4b11e59e2bd64880982",
+      "parity": 0,
+      "controlBlock": "c050929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+      "cp1": "cp16x9kr958xs7l9lr6glsa4ujjvzusnw6k876tfvg7t83t6eygpxpq6we0xc",
+      "cw1": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8c6x6a4c"
+    },
+    {
+      "name": "an odd-y Q, so the control block starts 0xc1",
+      "preimage": "6f6834c2f7720c2db19881fed1b868f307f3b60c56c78b15464a6c48df88c61f",
+      "h": "6f30d86fa40b8906fdc12a099cf10fabfa6a70d77fca95366241cd6f5166837f",
+      "leaf": "a8206f30d86fa40b8906fdc12a099cf10fabfa6a70d77fca95366241cd6f5166837f87",
+      "tapleafHash": "4a46b3ee68f5facce2f0a944df4b24891253c33c571867869a57e69c3eb0fb6a",
+      "tweak": "87afb84b60c51b842c4957e37e4e4f21cc4f13b37ee2b14e1306782f6f4511ee",
+      "Q": "0643ffe216647d9df3dbf30f1802fc00dad69d27dfd8910d1159f67a7b78a123",
+      "parity": 1,
+      "controlBlock": "c150929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+      "cp1": "cp1qepllcskv37emu7m7v83sqhuqrddd8f8mlvfzrg3t8m857mc5y3sslhnwl",
+      "cw1": "cw1qqqqqq8lllll7qpr4qsx7vxcd7jqhzgxlhqj5zvu7y86h7n2wrthlj54xe3yrnt029ngxlu8qqsuz5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsx76p5ctmhyrpdkxvgrlk3hp50xplnkcx9d3utz4ry5mzgm7yvv8cm33tdf"
+    },
+    {
+      "name": "all 0xff",
+      "preimage": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "h": "af9613760f72635fbdb44a5a0a63c39f12af30f950a6ee5c971be188e89c4051",
+      "leaf": "a820af9613760f72635fbdb44a5a0a63c39f12af30f950a6ee5c971be188e89c405187",
+      "tapleafHash": "70c4b1ee319e4109885f30f7b92b41698813d3e6069cdea16c630602c25f2722",
+      "tweak": "4732a3816713fc88bb491f4cd7128566f9285227a061e54e155208663db5fc4f",
+      "Q": "99c9de8e196c018224ce9b0dc00c8308a88e752490fefb018ec4294dd3bd2cb7",
+      "parity": 1,
+      "controlBlock": "c150929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+      "cp1": "cp1n8yaarsedsqcyfxwnvxuqryrpz5guafyjrl0kqvwcs55m5aa9jmsv50ur8",
+      "cw1": "cw1qqqqqq8lllll7qpr4qs2l9snwc8hyc6lhk6y5ks2v0pe7y40xru4pfhwtjt3hcvgazwyq5v8qqsuz5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqs0llllllllllllllllllllllllllllllllllllllllllllllllllcflrgxz"
+    }
+  ],
+  "keyPath": {
+    "secretKey": "3616b02290a133da73e758a54dbff1bf6439b4067a820cb51ca873fa4a13a96a",
+    "Q": "690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f",
+    "cp1": "cp1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0sxpcl6z",
+    "spends": [
+      {
+        "domain": "mint.example",
+        "normalisedDomain": "mint.example",
+        "prevoutTxid": "d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b2",
+        "sighash": "e97bb6831a916ff83919046f50a39c18ab98bf43079cf68cd364d251f7de527f",
+        "signature": "fc3491f1c6bca73dcd76b38fc6b7a82aef0f1fa67212ceb7d7f64dbc41c8bfe77e0db6077624bf117badb65efe0445e382ac9f4cd582f7a5cc366c7aeb4580d4",
+        "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0lcdy378rtefeae4mt8r7xk75z4mc0r7n8yykwkltlvndug8ytlem7pkmqwa3yhughhtdktmlqg30rs2kf7nx4stm6tnpkd3awk3vq6smm20wz"
+      },
+      {
+        "domain": "moneyer.dev",
+        "normalisedDomain": "moneyer.dev",
+        "prevoutTxid": "ae16063204c1a365755906e7165cf7a5f33e012d22dbdf3ec88b0dca6807cb52",
+        "sighash": "a6f90ce1b91e37b6a56c7b0e2eb993d72c6c3af7286adb3a0732370af6222630",
+        "signature": "504c87ceccd41ed6fc7355db27177a53abc6c63956ee142fe6fe30a6c4d9057be70f732a96d57e7151518be8a4db60ba3c9f800817f50b2af4f502660853a9ef",
+        "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x04qny8emxdg8kkl3e4tke8zaa9827xccu4dms59ln0uv9xcnvs27l8paej49k40ec4z5vtazjdkc968j0cqzqh759j4a84qfnqs5afau8gtwcn"
+      },
+      {
+        "domain": "localhost",
+        "normalisedDomain": "localhost",
+        "prevoutTxid": "7f3fb78a2a908ccbfc19eecde64323281beb73e1e854f7dc86080bf6bd465011",
+        "sighash": "0024ec475867aefbd2f48d7e2b7cfde467cfb439f68edefa90c643e332b4eac6",
+        "signature": "c3d3a6bf02f4bc911dcb299e2c44c573da858a794838544f141e2abacfc4936879d2f1f59ef84bb4ecdf0e4239656c6f23bdcda0e0717975aad5092ba1eace74",
+        "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0u85axhup0f0y3rh9jn83vgnzh8k593fu5swz5fu2pu246elzfx6re6tclt8hcfw6wehcwgguk2mr0yw7umg8qw9uht2k4py46r6kwws77er5x"
+      },
+      {
+        "domain": "127.0.0.1",
+        "normalisedDomain": "127.0.0.1",
+        "prevoutTxid": "46f0d72281276fe202d3b3392605c682d42951de262abec71e14a343f95b517a",
+        "sighash": "e14d8be0e0e1ecf1b4a1b5e4fcfad158182fd21aaeb48b34f20168646afc0840",
+        "signature": "eaf3baabc178d4e951cb6aa3a83aed398dfed48eb2aa29257a237546a6bb06e25820b769b1e2c16a12bcb95f8e864223837004c8b753d338b6db4fc30952ceca",
+        "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x074ua640qh348f289k4gag8tknnr076j8t923fy4azxa2x56asdcjcyzmknv0zc94p909et78gvs3rsdcqfj9h20fn3dkmflpsj5kwegra4zzg"
+      },
+      {
+        "domain": "MINT.EXAMPLE",
+        "normalisedDomain": "mint.example",
+        "prevoutTxid": "d5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b2",
+        "sighash": "e97bb6831a916ff83919046f50a39c18ab98bf43079cf68cd364d251f7de527f",
+        "signature": "fc3491f1c6bca73dcd76b38fc6b7a82aef0f1fa67212ceb7d7f64dbc41c8bfe77e0db6077624bf117badb65efe0445e382ac9f4cd582f7a5cc366c7aeb4580d4",
+        "ck1": "ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0lcdy378rtefeae4mt8r7xk75z4mc0r7n8yykwkltlvndug8ytlem7pkmqwa3yhughhtdktmlqg30rs2kf7nx4stm6tnpkd3awk3vq6smm20wz"
+      }
+    ],
+    "crossDomain": [
+      {
+        "signedFor": "mint.example",
+        "verifiedAt": "moneyer.dev",
+        "valid": false,
+        "why": "another mint"
+      },
+      {
+        "signedFor": "mint.example",
+        "verifiedAt": "mint.example.com",
+        "valid": false,
+        "why": "a longer name is a different domain"
+      },
+      {
+        "signedFor": "localhost",
+        "verifiedAt": "127.0.0.1",
+        "valid": false,
+        "why": "the same machine under another name is another domain"
+      },
+      {
+        "signedFor": "mint.example",
+        "verifiedAt": "MINT.EXAMPLE",
+        "valid": true,
+        "why": "domains are compared lowercased"
+      }
+    ]
+  },
+  "domains": [
+    {
+      "url": "https://mint.example/w?k1=00",
+      "domain": "mint.example"
+    },
+    {
+      "url": "https://Mint.Example/w",
+      "domain": "mint.example"
+    },
+    {
+      "url": "http://127.0.0.1:8899/w",
+      "domain": "127.0.0.1"
+    },
+    {
+      "url": "https://localhost:3338/w",
+      "domain": "localhost"
+    },
+    {
+      "url": "lnurlw://moneyer.dev/w?k1=00",
+      "domain": "moneyer.dev"
+    }
+  ],
+  "tree": {
+    "internalSecretKey": "410db310123f8fb929d5b07f805a834657b1e2b0e3e9580a984698b4385bdbf4",
+    "internalKey": "118249948afd38648895f6baffb7f9718f65c62e75532c927860cd0361f39e56",
+    "shape": "root = branch(branch(leaves[0], leaves[1]), leaves[2])",
+    "merkleRoot": "f0c9c900fbff0d11f55c473c6ef81380c724360f28511ed73a44c8c55d3fa7ad",
+    "tweak": "a2e2910ad4d4baf578229a3543b66396729022d70016d9f6cd9a2f98af20ff55",
+    "Q": "ce1b6f5d2804ec2b13a323ee5d67edb5eed88f4914516c24b38a3b32b011c3e6",
+    "parity": 1,
+    "cp1": "cp1ecdk7hfgqnkzkyary0h96eldkhhd3r6fz3gkcf9n3gan9vq3c0nq26eqpk",
+    "leaves": [
+      {
+        "version": 192,
+        "script": "a820b9b07dd4e7718454476f04edeb935022ae4f4d90934ab7ce913ff20c8baeb39987",
+        "tapleafHash": "13b5b65257957a3b8c7bf99ca0e53fa6b74e5d9bead2086dbac2f6d496b1a6f9",
+        "controlBlock": "c1118249948afd38648895f6baffb7f9718f65c62e75532c927860cd0361f39e564d9566be81e6b132f4ad61fe4e8c8fdafd3fcb46e683b88501e63d6d2f8d60920c96b7fe7ada32573014f21b132bf92a17415fe03bbdd1a682fbf3fd41ead238",
+        "witness": [
+          "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        ],
+        "cw1": "cw1qqqqqq8lllll7qpr4qstnvra6nnhrpz5gahsfm0tjdgz9tj0fkgfxj4he6gnlusv3wht8xv8qpsuzyvzfx2g4lfcvjyfta46l7mljuv0vhrzua2n9jf8scxdqdsl88jkfk2kd05pu6cn9a9dv8lyary0mt7nlj6xu6pm3pgpuc7k6tudvzfqe94hlead5vjhxq20yxcn90uj596ptlsrh0w356p0hulag84dywqqyq9q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5zs2pg9q5vtnnzx",
+        "verdict": "accept",
+        "reason": null
+      },
+      {
+        "version": 194,
+        "script": "a820f0e38b830ebd8a506615ecd154330ec07ff6bf5030447b44e297db1d4b7514ac87",
+        "tapleafHash": "4d9566be81e6b132f4ad61fe4e8c8fdafd3fcb46e683b88501e63d6d2f8d6092",
+        "controlBlock": "c3118249948afd38648895f6baffb7f9718f65c62e75532c927860cd0361f39e5613b5b65257957a3b8c7bf99ca0e53fa6b74e5d9bead2086dbac2f6d496b1a6f90c96b7fe7ada32573014f21b132bf92a17415fe03bbdd1a682fbf3fd41ead238",
+        "witness": [
+          "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+        ],
+        "cw1": "cw1qqqqqq8lllll7qpr4qs0pcutsv8tmzjsvc27e525xv8vqllkhagrq3rmgn3f0kcafd63fty8qpsuxyvzfx2g4lfcvjyfta46l7mljuv0vhrzua2n9jf8scxdqdsl88jkzw6mv5jhj4arhrrmlxw2pefl56m5uhvmatfqsmd6ctmdf9435muse94hlead5vjhxq20yxcn90uj596ptlsrh0w356p0hulag84dywqqyq9skzctpv9skzctpv9skzctpv9skzctpv9skzctpv9skzctpv9skvg6rht",
+        "verdict": "reject",
+        "reason": "unknown tapleaf version"
+      },
+      {
+        "version": 192,
+        "script": "a820308c1cf897a05c3584d7186e30bb80ba686ce171f54cb380b20fab93799f73418750",
+        "tapleafHash": "0c96b7fe7ada32573014f21b132bf92a17415fe03bbdd1a682fbf3fd41ead238",
+        "controlBlock": "c1118249948afd38648895f6baffb7f9718f65c62e75532c927860cd0361f39e56b85a5428ec5409c324c9b3da9ab864af63e706eab5e1478f6fa9adcde4cbfa7b",
+        "witness": [
+          "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+        ],
+        "cw1": "cw1qqqqqq8lllll7qpy4qsrprqulzt6qhp4snt3sm3shwqt56rvu9cl2n9nszeql2un0x0hxsv82qqyrsg3sfyefzha8pjg390khtlm07t33ajuvtn42vkfy7rqe5pkruu726u954pga32qnseyexea4x4cvjhk8ecxa267z3u0d756mn0ye0a8kqpqpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqn77tvn",
+        "verdict": "reject",
+        "reason": "OP_SUCCESS"
+      }
+    ],
+    "keyPath": {
+      "domain": "mint.example",
+      "tweakedSecretKey": "e3f0441ae7144aaea1f84ab4c410e6dcca420587e400320165e0c84ce77cdb49",
+      "sighash": "eec30dcb565af5fd32398e7daa141e0de061727ff477a6cabb3a7f6c68760d30",
+      "signature": "ccbce2bfd267627fc14f6197363efb7ef36aab82d4ffeaaab0666c34fa68af3eac625564c13ca896003e518543d6c02cf1689b121ff7b3361c2ed2b806540732",
+      "ck1": "ck1ecdk7hfgqnkzkyary0h96eldkhhd3r6fz3gkcf9n3gan9vq3c0nve08zhlfxwcnlc98kr9ek8mahaum24wpdfll242cxvmp5lf52704vvf2kfsfu4ztqq0j3s4padspv795fkysl77env8pw62uqv4q8xgsveyn6"
+    }
+  },
+  "checksig": {
+    "secretKey": "ea00ad804f671b9ff0188e0f6b179bb4bccb8231993377302d6c19666a127db1",
+    "pubkey": "e6241b6c78ecc12d4cc02e392e249abb3ceb10bf9123046f2aed54c2ace75069",
+    "leaf": "20e6241b6c78ecc12d4cc02e392e249abb3ceb10bf9123046f2aed54c2ace75069ac",
+    "controlBlock": "c150929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "Q": "748dceec23b9b155d431d6341ae22389437323163f07fa05f17cacefeb39b16e",
+    "cp1": "cp1wjxuamprhxc4t4p36c6p4c3r39phxgck8url5p030jkwl6eek9hq38utqp",
+    "domain": "mint.example",
+    "spends": [
+      {
+        "locktime": 0,
+        "sequence": 4294967295,
+        "sigMsg": "00020000000000000030b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc1f069fd424e44661f5e3301d6c33ba7a79af831a027ca2a2a7c5c29d0c0ec524ad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d02000000009229309bbf68bd98a0a5e52ada81d3aee5547033b7ef5c5e612844b70521bfcd00ffffffff",
+        "sighash": "2c9bbe574bae7c2077b961b573a14ebf82786cefddc92e8f665be4eb730107b6",
+        "signature": "d263a4561162bc56b06377510d0904c96b68fac186d838b0293db500e21a28470e61e3c8afee5b6d571ce7009fe74fc18f5c15188a569fc64909eeeb90666a3b",
+        "cw1": "cw1qqqqqq8lllll7qpzyrnzgxmv0rkvzt2vcqhrjt3yn2ane6csh7gjxpr09tk4fs4vuagxntqqy8q4py5mwnq6qj25k795kcp4a9a9upu2tg8j3myk64rmlm56e6qr4sqqgrfx8fzkz93tc44svdm4zrgfqnykk686cxrdsw9s9y7m2q8zrg5ywrnpu0y2lmjmd4t3eecqnln5lsv0ts233zjknlryjz0wawgxv63my4ys5x"
+      },
+      {
+        "locktime": 1700000000,
+        "sequence": 4294967294,
+        "sigMsg": "000200000000f1536530b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc1f069fd424e44661f5e3301d6c33ba7a79af831a027ca2a2a7c5c29d0c0ec524b4248c210a2905b94345e1a8414d0e12efcfb2f4f0f2397159a71283397a0ccd3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d02000000009229309bbf68bd98a0a5e52ada81d3aee5547033b7ef5c5e612844b70521bfcd00ffffffff",
+        "sighash": "4f946b0b89e14ca1deda9d4d1f8e39f13c084c0745fa34a93b3a5275f30416cf",
+        "signature": "30e226d44d1d236034b38ff3c68047897b823da217c794135547ddf86d00fc6d85252b809fd59080c18e9d96af6d599246ca90a283365df4a37f09a34325c1b9",
+        "cw1": "cw1v4flzq8llllluqpzyrnzgxmv0rkvzt2vcqhrjt3yn2ane6csh7gjxpr09tk4fs4vuagxntqqy8q4py5mwnq6qj25k795kcp4a9a9upu2tg8j3myk64rmlm56e6qr4sqqgqcwyfk5f5wjxcp5kw8l835qg7yhhq3a5gtu09qn24ram7rdqr7xmpf99wqfl4vssrqca8vk4ak4nyjxe2g29qekth62xlcf5dpjtsdegm5j2w"
+      }
+    ]
+  },
+  "timeClaims": [
+    {
+      "name": "no claim at all",
+      "locktime": 0,
+      "sequence": 4294967295,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "accept",
+      "why": "locktime 0 and a final sequence claim nothing"
+    },
+    {
+      "name": "a block height",
+      "locktime": 800000,
+      "sequence": 4294967294,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "reject",
+      "why": "below 500,000,000 an nLockTime is a block height, which has no meaning without a chain"
+    },
+    {
+      "name": "one below the threshold",
+      "locktime": 499999999,
+      "sequence": 4294967294,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "reject",
+      "why": "still a block height"
+    },
+    {
+      "name": "the threshold itself",
+      "locktime": 500000000,
+      "sequence": 4294967294,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "accept",
+      "why": "at least 500,000,000 is a Unix time, and this one is long past"
+    },
+    {
+      "name": "a Unix time in the past",
+      "locktime": 1799999999,
+      "sequence": 4294967294,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "accept",
+      "why": "already reached by the mint clock"
+    },
+    {
+      "name": "exactly now",
+      "locktime": 1800000000,
+      "sequence": 4294967294,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "accept",
+      "why": "not in the future"
+    },
+    {
+      "name": "one second in the future",
+      "locktime": 1800000001,
+      "sequence": 4294967294,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "reject",
+      "why": "a locktime the mint clock has not reached"
+    },
+    {
+      "name": "the largest locktime",
+      "locktime": 4294967295,
+      "sequence": 4294967294,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "reject",
+      "why": "far in the future"
+    },
+    {
+      "name": "a future locktime under a final sequence",
+      "locktime": 1800000001,
+      "sequence": 4294967295,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "reject",
+      "why": "LUD-25 judges any non-zero nLockTime, even where a final sequence would switch it off on chain"
+    },
+    {
+      "name": "a block-count relative lock",
+      "locktime": 0,
+      "sequence": 10,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "reject",
+      "why": "bit 31 clear enables a relative lock, and without the time flag (bit 22) it counts blocks"
+    },
+    {
+      "name": "a relative lock of zero blocks",
+      "locktime": 0,
+      "sequence": 0,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "reject",
+      "why": "still an enabled block-count lock, however short"
+    },
+    {
+      "name": "a relative time lock not yet elapsed",
+      "locktime": 0,
+      "sequence": 4194305,
+      "now": 1800000000,
+      "lockedAt": 1799999489,
+      "verdict": "reject",
+      "why": "one 512-second unit from when the mint credited the note, one second short"
+    },
+    {
+      "name": "a relative time lock exactly elapsed",
+      "locktime": 0,
+      "sequence": 4194305,
+      "now": 1800000000,
+      "lockedAt": 1799999488,
+      "verdict": "accept",
+      "why": "one 512-second unit has passed since the mint credited the note"
+    },
+    {
+      "name": "the largest relative time lock",
+      "locktime": 0,
+      "sequence": 4259839,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "reject",
+      "why": "65535 units is over a year"
+    },
+    {
+      "name": "bits outside the BIP-68 mask",
+      "locktime": 0,
+      "sequence": 4259841,
+      "now": 1800000000,
+      "lockedAt": 1799999488,
+      "verdict": "accept",
+      "why": "only the low 16 bits count units; bits 16 to 21 are ignored, as BIP-68 ignores them"
+    },
+    {
+      "name": "the disable bit set over a block count",
+      "locktime": 0,
+      "sequence": 2147483658,
+      "now": 1800000000,
+      "lockedAt": 1799913600,
+      "verdict": "accept",
+      "why": "bit 31 set switches the relative lock off entirely"
+    },
+    {
+      "name": "both claims, both satisfied",
+      "locktime": 1799999999,
+      "sequence": 4194305,
+      "now": 1800000000,
+      "lockedAt": 1799999488,
+      "verdict": "accept",
+      "why": "each rule is checked on its own"
+    }
+  ],
+  "leafPolicy": [
+    {
+      "name": "a bearer hashlock",
+      "version": 192,
+      "script": "a820630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd87",
+      "verdict": "allowed",
+      "why": "the one tapscript leaf version"
+    },
+    {
+      "name": "the same leaf at version 0xc2",
+      "version": 194,
+      "script": "a820630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd87",
+      "verdict": "refused",
+      "why": "an unknown leaf version succeeds unconditionally under consensus"
+    },
+    {
+      "name": "the same leaf at version 0xfe",
+      "version": 254,
+      "script": "a820630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd87",
+      "verdict": "refused",
+      "why": "likewise"
+    },
+    {
+      "name": "OP_SUCCESS80 alone",
+      "version": 192,
+      "script": "50",
+      "verdict": "refused",
+      "why": "0x50 is OP_SUCCESS80 in tapscript"
+    },
+    {
+      "name": "OP_SUCCESS98",
+      "version": 192,
+      "script": "5162",
+      "verdict": "refused",
+      "why": "0x62 (OP_VER in legacy script) is OP_SUCCESS98"
+    },
+    {
+      "name": "OP_SUCCESS187",
+      "version": 192,
+      "script": "bb",
+      "verdict": "refused",
+      "why": "the first of the 187-254 run"
+    },
+    {
+      "name": "OP_SUCCESS254",
+      "version": 192,
+      "script": "51fe",
+      "verdict": "refused",
+      "why": "the last of it"
+    },
+    {
+      "name": "0xff is not an OP_SUCCESS",
+      "version": 192,
+      "script": "51ff",
+      "verdict": "allowed",
+      "why": "OP_INVALIDOPCODE fails under consensus but is no upgrade hook, so the leaf policy has nothing to say"
+    },
+    {
+      "name": "0x50 inside a direct push",
+      "version": 192,
+      "script": "015051",
+      "verdict": "allowed",
+      "why": "pushed data is data, not an opcode"
+    },
+    {
+      "name": "0x50 and 0x62 inside OP_PUSHDATA1",
+      "version": 192,
+      "script": "4c02506251",
+      "verdict": "allowed",
+      "why": "OP_PUSHDATA1 carries a one-byte length"
+    },
+    {
+      "name": "0xbb and 0xfe inside OP_PUSHDATA2",
+      "version": 192,
+      "script": "4d0200bbfe51",
+      "verdict": "allowed",
+      "why": "OP_PUSHDATA2 carries a two-byte little-endian length"
+    },
+    {
+      "name": "0x50 inside OP_PUSHDATA4",
+      "version": 192,
+      "script": "4e010000005051",
+      "verdict": "allowed",
+      "why": "OP_PUSHDATA4 carries a four-byte little-endian length"
+    },
+    {
+      "name": "OP_SUCCESS after pushed data",
+      "version": 192,
+      "script": "015150",
+      "verdict": "refused",
+      "why": "the scan resumes after the push"
+    }
+  ],
+  "malformedCw1": [
+    {
+      "name": "a trailing byte after the last item",
+      "value": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8cqsmjqpm",
+      "why": "the length prefixes must consume the payload exactly"
+    },
+    {
+      "name": "the last item one byte short",
+      "value": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u5dhg59",
+      "why": "a length prefix claims more bytes than remain"
+    },
+    {
+      "name": "a length prefix cut in half",
+      "value": "cw1qqqqqq8lllll7qqnuss9c",
+      "why": "one byte where two are needed"
+    },
+    {
+      "name": "the script alone",
+      "value": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv86a4f6y",
+      "why": "no control block"
+    },
+    {
+      "name": "the header alone",
+      "value": "cw1qqqqqq8lllll7ec0h39",
+      "why": "no script and no control block"
+    },
+    {
+      "name": "shorter than the header",
+      "value": "cw1qqqqqq8llllsfyw4xk",
+      "why": "not even a locktime and a sequence"
+    },
+    {
+      "name": "a control block of 32 bytes",
+      "value": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqs9py5mwnq6qj25k795kcp4a9a9upu2tg8j3myk64rmlm56e6qr4sq7796h9",
+      "why": "a control block is 33 + 32m bytes"
+    },
+    {
+      "name": "a control block of 34 bytes",
+      "value": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qq3vq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqwjk3tw",
+      "why": "a control block is 33 + 32m bytes"
+    },
+    {
+      "name": "the wrong parity bit",
+      "value": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuz5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8ckg8xfx",
+      "why": "the control block names the other Q parity, so it commits to no key"
+    },
+    {
+      "name": "a ck human-readable part",
+      "value": "ck1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8cr2adxt",
+      "why": "a cw1 payload under the ck prefix"
+    },
+    {
+      "name": "a bech32 checksum",
+      "value": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8c0623s6",
+      "why": "bech32, not bech32m"
+    }
+  ],
+  "invalidCp1": [
+    {
+      "x": "0000000000000000000000000000000000000000000000000000000000000005",
+      "cp1": "cp1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzskf987z",
+      "why": "x = 5 is not the x coordinate of any secp256k1 point"
+    },
+    {
+      "x": "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+      "cp1": "cp1llllllllllllllllllllllllllllllllllllllllllllallllshs3jl4yz",
+      "why": "x = p is outside the field"
+    }
+  ],
+  "shortForms": [
+    {
+      "Q": "d18b619687343df2fc7a47e1daf25260b909bb563fb4b4b11e59e2bd64880982",
+      "cp1Slot": {
+        "hex": "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd",
+        "sameAs": "cp16x9kr958xs7l9lr6glsa4ujjvzusnw6k876tfvg7t83t6eygpxpq6we0xc"
+      },
+      "k1Slot": {
+        "hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "sameAs": "cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8c6x6a4c"
+      }
+    },
+    {
+      "Q": "0643ffe216647d9df3dbf30f1802fc00dad69d27dfd8910d1159f67a7b78a123",
+      "cp1Slot": {
+        "hex": "6f30d86fa40b8906fdc12a099cf10fabfa6a70d77fca95366241cd6f5166837f",
+        "sameAs": "cp1qepllcskv37emu7m7v83sqhuqrddd8f8mlvfzrg3t8m857mc5y3sslhnwl"
+      },
+      "k1Slot": {
+        "hex": "6f6834c2f7720c2db19881fed1b868f307f3b60c56c78b15464a6c48df88c61f",
+        "sameAs": "cw1qqqqqq8lllll7qpr4qsx7vxcd7jqhzgxlhqj5zvu7y86h7n2wrthlj54xe3yrnt029ngxlu8qqsuz5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsx76p5ctmhyrpdkxvgrlk3hp50xplnkcx9d3utz4ry5mzgm7yvv8cm33tdf"
+      }
+    },
+    {
+      "Q": "99c9de8e196c018224ce9b0dc00c8308a88e752490fefb018ec4294dd3bd2cb7",
+      "cp1Slot": {
+        "hex": "af9613760f72635fbdb44a5a0a63c39f12af30f950a6ee5c971be188e89c4051",
+        "sameAs": "cp1n8yaarsedsqcyfxwnvxuqryrpz5guafyjrl0kqvwcs55m5aa9jmsv50ur8"
+      },
+      "k1Slot": {
+        "hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "sameAs": "cw1qqqqqq8lllll7qpr4qs2l9snwc8hyc6lhk6y5ks2v0pe7y40xru4pfhwtjt3hcvgazwyq5v8qqsuz5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqs0llllllllllllllllllllllllllllllllllllllllllllllllllcflrgxz"
+      }
+    }
+  ]
+}

@@ -42,9 +42,15 @@ export interface Report {
 
 export declare const createReport: () => Report
 
+/**
+ * The ck1 that spends the key-path note x(sk·G) at `domain` (the mint's
+ * lowercase hostname, no port): Q || a BIP-340 signature, with an all-zero
+ * aux_rand, over the key-path sighash of LUD-25's canonical spend
+ * transaction for that domain.
+ */
+export declare const keyPathSpend: (secretKey: Uint8Array, domain: string) => string
+
 /** an `lnurlw://` or `lnurlp://` URL as its https equivalent, per LUD-17 */
-/** A Part 2 note's ck1: x-only key || BIP-340 signature over sha256("LNURLcash"). */
-export declare const ownershipProof: (secretKey: Uint8Array) => string
 export declare const fromLud17: (value: string) => string
 
 /** a lightning address or LNURL as the payRequest URL to fetch */
@@ -66,7 +72,7 @@ export interface InternalTransferHint {
   chainCode: Uint8Array
 }
 
-/** the `text/xpub` branch and next-index hint out of registered-address metadata */
+/** the `text/cpub` branch and next purpose-2 index hint out of registered-address metadata */
 export declare const parseInternalTransferHint: (
   metadata: string
 ) => InternalTransferHint | null
@@ -76,7 +82,7 @@ export declare const gradeMint: (
   payUrl: string,
   report: Report,
   options?: {
-    /** Grade as a LUD-25 Part 2 registered Lightning Address rather than a
+    /** Grade as a LUD-25 cx1-registered Lightning Address rather than a
      * mint payLink: it mints on the next unused key of its own branch, so a
      * comment naming no output is free text and must not fail the payment.
      * Declared, not detected - an unsafe preimage-keyed fallback looks
@@ -112,14 +118,20 @@ export declare const gradeBoundMint: (
 
 /**
  * SPENDS. Burns the note it is given and leaves the value in a fresh one.
+ * The note URL's k1 may be any spend of it: a bearer note's 64-hex
+ * preimage, a ck1 or a cw1.
  *
  * `mintFee` absent means unknown, and the conservation checks are bounded
  * rather than exact; null means known fee-free. `previousPubkeys` are keys
  * the mint has signed under before, so a note issued before a rotation is
  * not graded as a bad signature.
+ *
+ * Resolves to where the value ended up: the spend the grader holds and a
+ * note URL carrying it. Undefined only when the first informational GET
+ * failed, in which case nothing was spent.
  */
 export declare const gradeNote: (
   noteUrl: string,
   report: Report,
   options?: {mintFee?: MintFee | null; previousPubkeys?: string[]}
-) => Promise<void>
+) => Promise<{finalSecret: string; noteUrl: string} | undefined>
