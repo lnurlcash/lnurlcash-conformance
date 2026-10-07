@@ -706,10 +706,16 @@ console.log('ok   a bound mint credits the wallet\'s own hash, and the preimage 
       settled.pr !== quote.pr ||
       settled.mint?.h !== quote.mint.h ||
       settled.mint?.amount !== quote.mint.amount ||
-      typeof settled.mint?.sig !== 'string'
+      !/^cs\d*[munp]?1[0-9a-z]+$/.test(settled.mint?.sig ?? '')
     ) {
-      die('the receipt mock did not bind and sign the settled response')
+      die('the receipt mock did not bind and sign the settled response with a cs1')
     }
+    // A note named by cp1 gets that cp1 echoed, never the bare hex of Q.
+    const cp1 = encodeCp1(bearerNote(randomBytes(32)).outputKey)
+    const cpQuote = await (
+      await fetch(`${mint.url}/p/cb?amount=21000&comment=${cp1}`)
+    ).json()
+    if (cpQuote.mint?.h !== cp1) die('the receipt mock did not echo the cp1 it was sent')
   } finally {
     await mint.close()
   }

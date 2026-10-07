@@ -485,45 +485,6 @@ check('the worked settlement recomputes from its own secrets', () => {
   assert(s.commentOnly.preimageIsAValidK1 === false, 'the preimage opens a comment-only note')
 })
 
-check('the optional bound receipt is tied to the quote and authenticates the note', () => {
-  const {receipt, settlement} = mintToHash
-  const quote = receipt.quote
-  const pending = receipt.unsettled
-  const settled = receipt.settled
-  assert(receipt.optional === true, 'the additive receipt is not marked optional')
-  assert(receipt.keyEstablishment.payRequest.mintPubkey === sig.mintPubkey, 'the receipt key is unavailable before payment')
-  assert(quote.mintToHash === true, 'the receipt quote is not explicitly bound')
-  assert(quote.mint.h === settlement.h, 'the quote commits a different h')
-  assert(Number.isSafeInteger(quote.mint.amount) && quote.mint.amount > 0, 'the quote amount is not positive integer msat')
-  assert(quote.mint.sig === undefined, 'the quote is already signed before settlement')
-  assert(pending.settled === false && pending.mint.sig === undefined, 'an unsettled response carries a signature')
-  assert(settled.settled === true, 'the settled fixture is not settled')
-  assert(settled.pr === quote.pr, 'verify names a different invoice')
-  assert(settled.mint.h === quote.mint.h, 'verify changes h')
-  assert(settled.mint.amount === quote.mint.amount, 'verify changes the net amount')
-
-  const bytes = hexToBytes(settled.mint.sig)
-  assert(bytes.length === 65, 'the receipt signature is not recoverable')
-  const digest = digestOf(settlement.walletSecret, settled.mint.amount)
-  const leading = new Uint8Array([bytes[64], ...bytes.subarray(0, 64)])
-  let recovered = null
-  for (const candidate of [leading, bytes]) {
-    try {
-      recovered = bytesToHex(secp256k1.recoverPublicKey(candidate, digest, {prehash: false}))
-      if (recovered === sig.mintPubkey) break
-    } catch {
-      // try the other recoverable-signature ordering
-    }
-  }
-  assert(recovered === sig.mintPubkey, 'the receipt signature does not authenticate the bound note')
-
-  const invalid = new Map(receipt.invalid.map(c => [c.name, c]))
-  assert(invalid.get('quote commits a different h').quote.mint.h !== quote.mint.h, 'no wrong-h case')
-  assert(invalid.get('verify changes the net amount').verify.mint.amount !== quote.mint.amount, 'no wrong-amount case')
-  assert(invalid.get('signature appears before settlement').verify.mint.sig, 'no premature-signature case')
-  assert(invalid.get('settled response has the wrong signature').verify.mint.sig !== settled.mint.sig, 'no bad-signature case')
-})
-
 check('the capability is fixed in all three places, and only the boolean true means yes', () => {
   const field = mintToHash.advertisement.field
   const places = mintToHash.advertisement.places.map(p => p.where)
@@ -1180,6 +1141,60 @@ const recoverX = (signature, digest) => {
   const recIdFirst = cat(signature.subarray(64), signature.subarray(0, 64))
   return secp256k1.recoverPublicKey(recIdFirst, digest, {prehash: false}).slice(1)
 }
+
+check('the optional bound receipt is tied to the quote and authenticates the note', () => {
+  const {receipt, settlement} = mintToHash
+  const quote = receipt.quote
+  const pending = receipt.unsettled
+  const settled = receipt.settled
+  assert(receipt.optional === true, 'the additive receipt is not marked optional')
+  assert(receipt.keyEstablishment.payRequest.mintPubkey === sig.mintPubkey, 'the receipt key is unavailable before payment')
+  assert(quote.mintToHash === true, 'the receipt quote is not explicitly bound')
+  assert(quote.mint.h === settlement.h, 'the quote commits a different h')
+  assert(Number.isSafeInteger(quote.mint.amount) && quote.mint.amount > 0, 'the quote amount is not positive integer msat')
+  assert(quote.mint.sig === undefined, 'the quote is already signed before settlement')
+  assert(pending.settled === false && pending.mint.sig === undefined, 'an unsettled response carries a signature')
+  assert(settled.settled === true, 'the settled fixture is not settled')
+  assert(settled.pr === quote.pr, 'verify names a different invoice')
+  assert(settled.mint.h === quote.mint.h, 'verify changes h')
+  assert(settled.mint.amount === quote.mint.amount, 'verify changes the net amount')
+
+  // sig is the note's ordinary certificate: a cs1 over hex(Q), Q derived from
+  // the name the wallet requested, by the pinned mint key.
+  const qOf = name => decodeNoteRef(name)
+  const certifies = (name, amount, value) => {
+    const decoded = decodeCertificate(value)
+    if (!decoded || decoded.amountMsat !== amount) return false
+    try {
+      return bytesToHex(recoverX(decoded.signature, lsmDigest(`LNURLcash:${amount}:${qOf(name)}`))) === sig.mintPubkey.slice(2)
+    } catch {
+      return false
+    }
+  }
+  const q = bytesToHex(bearerNote(sha256(hexToBytes(settlement.walletSecret))).outputKey)
+  assert(qOf(settlement.h) === q && receipt.certifiedOver.q === q, 'the receipt Q is not the bearer note output key')
+  assert(receipt.certifiedOver.cp1 === encodeCp1(hexToBytes(q)), 'the receipt cp1 is not the encoding of Q')
+  assert(certifies(settled.mint.h, settled.mint.amount, settled.mint.sig), 'the receipt cs1 does not certify hex(Q) at the amount')
+  assert(certifies(receipt.cp1.settled.mint.h, receipt.cp1.settled.mint.amount, receipt.cp1.settled.mint.sig), 'the cp1 receipt cs1 does not certify hex(Q)')
+  assert(receipt.cp1.quote.mint.h === receipt.certifiedOver.cp1 && receipt.cp1.settled.mint.h === receipt.certifiedOver.cp1, 'the cp1 receipt does not echo the cp1')
+  assert(qOf(receipt.cp1.settled.mint.h) === q, 'the cp1 receipt names a different note')
+
+  const invalid = new Map(receipt.invalid.map(c => [c.name, c]))
+  assert(invalid.get('quote commits a different h').quote.mint.h !== quote.mint.h, 'no wrong-h case')
+  assert(invalid.get('verify changes the net amount').verify.mint.amount !== quote.mint.amount, 'no wrong-amount case')
+  assert(invalid.get('signature appears before settlement').verify.mint.sig, 'no premature-signature case')
+  for (const name of [
+    'settled response has the wrong signature',
+    'settled signature is the retired raw-hex form',
+    'settled signature is over h instead of Q',
+    'settled signature carries a different amount'
+  ]) {
+    const bad = invalid.get(name).verify.mint
+    assert(!certifies(bad.h, settled.mint.amount, bad.sig), `${name}: the signature verifies`)
+  }
+  const bare = invalid.get('cp1 receipt echoes the bare hex of Q').quote.mint.h
+  assert(bare === q && bare !== receipt.cp1.quote.mint.h && qOf(bare) !== q, 'no bare-hex-of-Q case')
+})
 
 // A ck1 signs the key-path sighash of the canonical spend transaction for
 // one domain, and nothing else: the fixed "LNURLcash" message it signed

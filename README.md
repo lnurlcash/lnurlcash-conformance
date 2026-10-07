@@ -161,7 +161,7 @@ conforming default explicit. Optional fields stay absent unless requested:
 | `--retriedMutation=replay` | answers a byte-identical repeat of a mutation with the original success. This is the conforming default; use `refuse` only as an adversarial fixture |
 | `--hashLookup=false` | models an older SERVICE with no lookup by `p`, which LUD-25 now makes a MUST |
 | `--mintToHash` | accepts `h` alongside the mandatory identical comment and enables the additive quote/receipt fields. Off by default; baseline comment-bound minting remains on |
-| `--mintReceipt` | with `--mintToHash`, adds the optional quote commitment and signed LUD-21 settlement receipt |
+| `--mintReceipt` | with `--mintToHash`, adds the optional quote commitment and LUD-21 settlement receipt, certified by a `cs1` over `hex(Q)` |
 | `--mintToHashAdvertisedOn=quote` | narrows which of the three places claim it (`payRequest`, `mintAddress`, `quote`); all three by default. Changes only what is claimed, never what the mint does |
 
 As a library, for your own test suite:
