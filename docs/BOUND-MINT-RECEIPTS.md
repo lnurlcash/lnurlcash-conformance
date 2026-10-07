@@ -2,6 +2,10 @@
 
 Status: additive implementation proposal layered on current LUD-25 comment-bound minting.
 
+The receipt's `sig` is the note's ordinary taproot-model certificate (a `cs1`
+over `hex(Q)`). Earlier drafts of this extension signed the raw hex message
+`LNURLcash:<amount>:<h>`; that form is retired.
+
 This document records the wire contract implemented by the ForgeSworn /
 lnurlcash repositories. It does not modify the upstream LUD-25 draft or
 dni's reference repositories.
@@ -40,7 +44,10 @@ A `WALLET` MUST NOT assume the binding from the request alone.
 
 A `SERVICE` MAY additionally offer a bound settlement receipt by returning a
 LUD-21 `verify` URL and `"mint": {"h": string, "amount": number}` on the
-pay callback response. `amount` is the exact net note value in
+pay callback response. `h` repeats the output name in the spelling the
+`WALLET` used: a bearer note's 64 lowercase hex `h` stays hex, and a `cp1`
+stays that `cp1`. It is never the bare hex of a `cp1`'s `Q`, which a wallet
+reads as a bearer `h`. `amount` is the exact net note value in
 millisatoshis after mint fees. The quote MUST NOT contain `mint.sig`.
 `SERVICE` MUST make the verification key available before payment, either as
 the node identity recoverable from the BOLT-11 invoice or as `mintPubkey` on
@@ -55,11 +62,15 @@ the current LUD-25 flow is non-compliant.
 
 Before settlement, the LUD-21 response MAY repeat `mint.h` and `mint.amount`
 but MUST NOT include `mint.sig`. After settlement, it MUST repeat the quote's
-`pr`, `h` and `amount` and add `sig`, the recoverable Offline verification
-signature over the existing message `LNURLcash:<amount>:<h>`. `WALLET` MUST
-require `settled` to be exactly `true`, match all three committed values, and
-verify `sig` against its trusted mint key before treating the bound note as
-confirmed.
+`pr`, `h` and `amount` and add `sig`, the note's ordinary Offline
+verification certificate: the amount-carrying `cs1` over `hex(Q)`, where `Q`
+is the bound note's taproot output key. For a bearer note named by hex `h`,
+`Q` is the output key of its one-leaf hashlock note; for a note named by
+`cp1`, `Q` is the key the `cp1` decodes to. It is signed exactly as every
+other certificate the `SERVICE` issues. `WALLET` MUST require `settled` to be
+exactly `true`, match all three committed values, and verify `sig` as a `cs1`
+over `Q`, derived from the name it requested, against its trusted mint key
+before treating the bound note as confirmed.
 
 ## Proposed additive wire fields
 
@@ -95,7 +106,7 @@ Before settlement, LUD-21 may repeat the commitment:
 }
 ```
 
-Once settled it adds the ordinary LUD-25 note signature:
+Once settled it adds the note's ordinary LUD-25 certificate:
 
 ```json
 {
@@ -106,16 +117,24 @@ Once settled it adds the ordinary LUD-25 note signature:
   "mint": {
     "h": "<64-lowercase-hex>",
     "amount": 21000,
-    "sig": "<recoverable-LUD-25-signature>"
+    "sig": "<cs1-certificate-over-hex(Q)>"
   }
 }
 ```
 
-The signature message is unchanged:
+The certificate signs the same message as every other `cs1`:
 
 ```text
-LNURLcash:<amount>:<h>
+LNURLcash:<amount>:<hex(Q)>
 ```
+
+`mint.h` is the name as the wallet sent it, so a wallet that requested a
+`cp1` sees that `cp1` and one that requested a bearer `h` sees the hex `h`;
+both are certified over the one `hex(Q)`. The reference mock takes either
+spelling in `comment` for a receipt-capable quote and echoes it as sent; a
+`cp1` quote carries no `h` parameter, since `h` is hex only. A
+receipt-capable service that supports only hex `h` leaves `mint` off a
+`cp1`-named quote rather than echoing `Q`.
 
 The payment preimage remains LUD-21 payment proof. It does not open a bound
 note and must never replace the wallet's staged `k1`.
@@ -127,12 +146,14 @@ Before exposing an invoice for payment, a receipt-requiring wallet must:
 1. Persist `k1` (or stage it durably on the sealed signer).
 2. Require `mintToHash` to be exactly boolean `true`.
 3. Require `verify` and `mint` on the quote.
-4. Match `mint.h` to the requested `h` and `mint.amount` to the expected net
-   note value.
+4. Match `mint.h` to the output name it requested and `mint.amount` to the
+   expected net note value.
 5. Refuse a quote that already carries `mint.sig`.
 
 Before confirming the note, it must require `settled: true`, match `pr`, `h`
-and `amount` to the quote, and verify `sig` against the pinned mint key. A
+and `amount` to the quote, and verify `sig` as a `cs1` over `hex(Q)`, with `Q` derived from the name it
+requested and the amount the `cs1` carries equal to `mint.amount`, against
+the pinned mint key. A
 sealed signer can then transition its staged output from `PENDING` to
 `CONFIRMED` without exporting `k1`.
 

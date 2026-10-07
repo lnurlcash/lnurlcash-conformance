@@ -46,8 +46,8 @@ const ser32 = value => {
 const noteId = k1 => bytesToHex(sha256(hexToBytes(k1)))
 
 // The Lightning-signed-message digest over LNURLcash:<amount>:<subject>.
-// For a certificate the subject is hex(Q); the optional bound-mint receipt
-// keeps the h it has always signed.
+// The subject is hex(Q), for every certificate the mock issues, the optional
+// bound-mint receipt's included.
 const sigDigest = (subjectHex, amountMsat) =>
   sha256(
     sha256(
@@ -461,10 +461,9 @@ export const createMockMint = async (options = {}) => {
     return encodeCs1(amountMsat, signWith(sigDigest(subject, amountMsat), key))
   }
 
-  // The optional bound-mint receipt keeps its own signature: raw hex over
-  // LUD-25's earlier message LNURLcash:<amount>:<h> (docs/BOUND-MINT-RECEIPTS.md).
-  const signReceipt = (h, amountMsat) =>
-    opts.signatures ? bytesToHex(signWith(sigDigest(h, amountMsat), priv)) : undefined
+  // The optional bound-mint receipt's sig is the note's ordinary certificate,
+  // the cs1 over hex(Q) (docs/BOUND-MINT-RECEIPTS.md).
+  const signReceipt = (qHex, amountMsat) => certify(qHex, amountMsat)
 
   const mintNote = (qHex, amountMsat, options = {}) => {
     notes.set(qHex, {amountMsat, state: 'outstanding', lockedAt: nowSecs(), ...(options.h ? {h: options.h} : {})})
@@ -813,6 +812,8 @@ export const createMockMint = async (options = {}) => {
       // before the option existed.
       let boundTo = null
       let boundH = null
+      // What the receipt echoes as mint.h: boundH's hex, or a cp1 as sent.
+      let boundName = null
       let echoBound = false
       let requested = null
       if (opts.mintToHash) {
@@ -851,6 +852,7 @@ export const createMockMint = async (options = {}) => {
             if (!opts.mintToHashIgnoresH) {
               boundTo = named
               boundH = sent.toLowerCase()
+              boundName = boundH
             }
           }
         }
@@ -884,13 +886,23 @@ export const createMockMint = async (options = {}) => {
           // only models an extension implementation that ignores or fails
           // to compare h.
           boundTo = named
+          // The output name in the spelling the wallet used: its hex h, or
+          // the cp1 as sent. Never the bare hex of Q, which a wallet reads
+          // as a bearer h.
           boundH = hex
+          boundName = hex ?? sent.trim().toLowerCase()
+          // A cp1 cannot ride in the additive hex `h`, so a receipt-capable
+          // mint takes the comment alone as the binding for it.
+          if (!hex && opts.mintToHash && opts.mintReceipt && !opts.mintToHashIgnoresH) {
+            echoBound = mintToHashPlaces.has('quote')
+          }
           namedByComment = true
         } else if (opts.registeredAddress) {
           // The next unused key on the branch. Claimed as the quote is
           // issued, so two free-text quotes never name one output.
           boundTo = nextRegisteredOutput()
           boundH = null
+          boundName = null
           namedByComment = true
         } else if (
           !opts.commentFallsBack &&
@@ -912,6 +924,7 @@ export const createMockMint = async (options = {}) => {
       if (boundTo) {
         invoice.boundTo = boundTo
         invoice.boundH = boundH
+        invoice.boundName = boundName
         boundOutputs.set(boundTo, paymentHash)
       }
       invoices.set(paymentHash, invoice)
@@ -930,12 +943,12 @@ export const createMockMint = async (options = {}) => {
       if (echoBound) body.mintToHash = true
       if (
         echoBound &&
-        boundH &&
+        boundName &&
         opts.mintReceipt &&
         opts.verify &&
         opts.signatures
       ) {
-        body.mint = {h: boundH, amount: net}
+        body.mint = {h: boundName, amount: net}
       }
       return send(body)
     }
@@ -958,12 +971,12 @@ export const createMockMint = async (options = {}) => {
         preimage: invoice.settled || opts.verifyLeaksEarly ? invoice.preimage : null,
         pr: invoice.pr ?? fakeInvoice(invoice.amountMsat, invoice.preimage)
       }
-      if (invoice.boundH && opts.mintReceipt && opts.signatures) {
+      if (invoice.boundName && opts.mintReceipt && opts.signatures) {
         body.mint = {
-          h: invoice.boundH,
+          h: invoice.boundName,
           amount: invoice.amountMsat,
           ...(invoice.settled
-            ? {sig: signReceipt(invoice.boundH, invoice.amountMsat)}
+            ? {sig: signReceipt(invoice.boundTo, invoice.amountMsat)}
             : {})
         }
       }

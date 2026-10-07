@@ -2724,7 +2724,16 @@ const MTH_H = noteId(MTH_SECRET)
 const MTH_PREIMAGE = '06'.repeat(32)
 const MTH_PAYMENT_HASH = noteId(MTH_PREIMAGE)
 const MTH_AMOUNT = 21000
-const MTH_RECEIPT_SIG = bytesToHex(signTrailing(MINT_PRIV, MTH_SECRET, MTH_AMOUNT))
+// The receipt's `sig` is the note's ordinary Offline verification certificate:
+// a cs1 over (hex(Q), amount), Q being the bearer note's taproot output key.
+const MTH_Q = bytesToHex(bearerNoteOf(hexToBytes(MTH_SECRET)).Q)
+const MTH_CP1 = bech32mOf('cp', hexToBytes(MTH_Q))
+const mthCertificate = (qHex, amountMsat, key = MINT_PRIV) =>
+  bech32mOf(
+    `cs${amountSuffix(amountMsat)}`,
+    signRecoverable(key, lightningSignedDigest(`LNURLcash:${amountMsat}:${qHex}`))
+  )
+const MTH_RECEIPT_SIG = mthCertificate(MTH_Q, MTH_AMOUNT)
 
 // Ids that are already spoken for on the mint the cases below run against:
 // one note, one payment hash of an invoice it issued, and one output
@@ -2973,7 +2982,7 @@ const mintToHash = {
   },
   receipt: {
     description:
-      'An optional LUD-21 settlement receipt for a bound quote. This is needed by a sealed signer that generated k1 but will not export it merely so its companion app can probe the withdraw endpoint. The quote commits to the exact output id and net amount before payment. Once settled, verify repeats that commitment and adds the ordinary LUD-25 note signature. No field changes the legacy LUD-21 meaning of preimage: it remains payment proof and still does not open the bound note.',
+      'An optional LUD-21 settlement receipt for a bound quote. This is needed by a sealed signer that generated k1 but will not export it merely so its companion app can probe the withdraw endpoint. The quote commits to the exact output name and net amount before payment. Once settled, verify repeats that commitment and adds the ordinary LUD-25 certificate of that note, a cs1 over hex(Q). No field changes the legacy LUD-21 meaning of preimage: it remains payment proof and still does not open the bound note.',
     optional: true,
     field: 'mint',
     keyEstablishment: {
@@ -2981,9 +2990,32 @@ const mintToHash = {
       payRequest: {commentAllowed: 64, mintToHash: true, mintPubkey: MINT_PUB}
     },
     commitment: {
-      h: 'the normalised output id committed by this quote; 32 bytes as 64 lowercase hex',
+      h: 'the output name, repeated in the spelling the wallet used: a bearer note\'s 64 lowercase hex h stays hex, a cp1 stays that cp1. Never the bare hex of a cp1\'s Q, which a wallet would read as a bearer h',
       amount: 'the exact net note value in millisatoshis after fees',
-      sig: 'absent before settlement; after settlement, the ordinary recoverable LUD-25 signature over LNURLcash:<amount>:<h>'
+      sig: 'absent before settlement; after settlement, the note\'s ordinary LUD-25 Offline verification certificate: the amount-carrying cs1 over hex(Q), signed exactly as every other certificate the mint issues',
+      q: 'not on the wire. The taproot output key the cs1 is over: for a bearer note named by hex h, the output key of the one-leaf hashlock note for h; for a note named by cp1, the key that cp1 decodes to'
+    },
+    certifiedOver: {
+      q: MTH_Q,
+      cp1: MTH_CP1,
+      message: `LNURLcash:${MTH_AMOUNT}:${MTH_Q}`,
+      note: 'the same bearer note named by its h and by its cp1; both spellings are certified over the one hex(Q), and the receipt echoes whichever the wallet sent'
+    },
+    cp1: {
+      quote: {
+        pr: 'lnbc210n1pjqrstuvwxyz',
+        verify: 'https://mint.example/verify/' + MTH_PAYMENT_HASH,
+        mintToHash: true,
+        mint: {h: MTH_CP1, amount: MTH_AMOUNT}
+      },
+      settled: {
+        status: 'OK',
+        settled: true,
+        preimage: MTH_PREIMAGE,
+        pr: 'lnbc210n1pjqrstuvwxyz',
+        mint: {h: MTH_CP1, amount: MTH_AMOUNT, sig: MTH_RECEIPT_SIG}
+      },
+      note: 'a wallet that named the output by cp1 gets that cp1 back in mint.h, and the same cs1 over hex(Q)'
     },
     quote: {
       pr: 'lnbc210n1pjqrstuvwxyz',
@@ -3007,7 +3039,7 @@ const mintToHash = {
     },
     walletRules: [
       'A WALLET that requires a receipt MUST refuse to show or pay an invoice unless quote.mintToHash is exactly true and quote.mint matches the h it requested and the exact amount it expects to receive.',
-      'Before accepting settlement, it MUST match verify.pr to quote.pr, match verify.mint.h and verify.mint.amount to the quote commitment, require settled to be exactly true, and verify mint.sig with the mint public key and its locally held k1.',
+      'Before accepting settlement, it MUST match verify.pr to quote.pr, match verify.mint.h and verify.mint.amount to the quote commitment, require settled to be exactly true, and verify mint.sig as a cs1 over hex(Q), Q derived from the output name it requested, with the pinned mint key and the amount the cs1 carries equal to mint.amount.',
       'A SERVICE MUST NOT return mint.sig before settlement. An unsettled response MAY repeat h and amount so a wallet can diagnose a mismatch, but that repetition is not a receipt.',
       'Absence of quote.mint means the optional receipt is not offered. A software wallet still claims the comment-bound note with its own k1; a sealed signer must use another authenticated confirmation path or decline before payment.'
     ],
@@ -3029,8 +3061,28 @@ const mintToHash = {
       },
       {
         name: 'settled response has the wrong signature',
-        verify: {settled: true, mint: {h: MTH_H, amount: MTH_AMOUNT, sig: '00'.repeat(65)}},
+        verify: {settled: true, mint: {h: MTH_H, amount: MTH_AMOUNT, sig: mthCertificate(MTH_Q, MTH_AMOUNT, OTHER_PRIV)}},
         reason: 'the signer cannot confirm a note the mint has not authenticated'
+      },
+      {
+        name: 'settled signature is the retired raw-hex form',
+        verify: {settled: true, mint: {h: MTH_H, amount: MTH_AMOUNT, sig: bytesToHex(signTrailing(MINT_PRIV, MTH_SECRET, MTH_AMOUNT))}},
+        reason: 'the pre-taproot signature over LNURLcash:<amount>:<h> is not a cs1 and certifies no output key'
+      },
+      {
+        name: 'settled signature is over h instead of Q',
+        verify: {settled: true, mint: {h: MTH_H, amount: MTH_AMOUNT, sig: mthCertificate(MTH_H, MTH_AMOUNT)}},
+        reason: 'a cs1 over the bare hash certifies no taproot output; it must be over hex(Q)'
+      },
+      {
+        name: 'settled signature carries a different amount',
+        verify: {settled: true, mint: {h: MTH_H, amount: MTH_AMOUNT, sig: mthCertificate(MTH_Q, MTH_AMOUNT - 1000)}},
+        reason: 'the cs1 amount must equal mint.amount'
+      },
+      {
+        name: 'cp1 receipt echoes the bare hex of Q',
+        quote: {mintToHash: true, mint: {h: MTH_Q, amount: MTH_AMOUNT}},
+        reason: 'a wallet reads bare hex as a bearer h, which names a different note; a cp1 must be echoed as that cp1'
       }
     ]
   },

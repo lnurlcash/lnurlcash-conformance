@@ -4,6 +4,26 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## Unreleased
+
+**Breaking change to the optional bound-mint receipt** (`docs/BOUND-MINT-RECEIPTS.md`,
+`vectors/mint-to-hash.json`). A settled receipt's `mint.sig` is now the note's
+ordinary LUD-25 Offline verification certificate, the amount-carrying `cs1`
+over `hex(Q)` where `Q` is the bound note's taproot output key, and no longer
+a raw-hex recoverable signature over `LNURLcash:<amount>:<h>`. `mint.h`
+repeats the output name in the spelling the wallet used: a bearer note's hex
+`h` stays hex and a `cp1` stays that `cp1`, never the bare hex of its `Q`. A
+wallet verifies `sig` as a `cs1` over `Q`, derived from the name it
+requested, against its pinned mint key; the old wording that tied
+verification to the wallet's `k1` is gone. The kit (`@lnurlcash/kit` 0.20.x)
+and Moneyer have moved to this form, and the old one predates the taproot
+unification. The mock mint now accepts a `cp1` comment for a bound quote and
+echoes it. The vectors gain a cp1 receipt and invalid cases for the retired
+raw-hex form, a `cs1` over `h` rather than `Q`, a mismatched `cs1` amount and
+a bare-hex-of-`Q` echo. Baseline LUD-25 is unaffected: only mints run with
+`--mintToHash --mintReceipt`, and wallets that opt into the receipt, see a
+difference.
+
 ## 0.15.0 - 2026-09-29
 
 **LUD-25's unified taproot model** (luds `6e865b1`, "unified taproot
