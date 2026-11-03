@@ -48,9 +48,9 @@ for (const c of cases) {
 | `signature.json` | offline verification, both recovery-id orderings, malformed input |
 | `derivation.json` | deterministic note secrets from a BIP39 seed |
 | `cash-derivation.json` | LUD-25's seed-recoverable note secrets under `m/139'`, with BIP-32's own vector 1 |
-| `spec-vectors.json` | LUD-25's own published test vectors 1-5, transcribed: derivation, the domain-bound address proof, a key-path `ck1` with every `SigMsg` field, a mint certificate, and a bearer note from `h` to `cw1` |
+| `spec-vectors.json` | lnurl/luds' own `25-vectors.json` and `26-vectors.json`, rebuilt from the primitives in their exact shape as `lud25` and `lud26`: key-path spends with every `SigMsg` field, domain-bound certificates, a bearer note from `h` to `cw1`, LUD-26 derivation of wallet, change and share notes, and register/update/unregister proofs |
 | `spends.json` | the unified taproot model: bearer notes, `ck1`s across domains, a three-leaf script tree with its control blocks and verdicts, a `CHECKSIG` leaf's script-path sighash, time claims, leaf policy, malformed `cw1`s and the short forms |
-| `part2.json` | key-path notes: `cp1`, the domain-bound `ck1`, amount-bearing `cs1` certificates over `hex(Q)`, `cx1`, the per-note key tweak and address proofs, on the `m/139'/d1..d4` address path |
+| `part2.json` | LUD-26 key-path notes: plain BIP-32 wallet, change and share keys under `S = m/139'/d1..d4`, every note's domain-bound `ck1`, share notes from the 65-byte `cx1` alone, domain-bound `cs1` certificates, register/update/unregister proofs, and the superseded tweak schemes a wallet still sweeps |
 | `bech32.json` | LUD-01 encoding, round trips, corrupted checksums |
 | `url-admission.json` | which URLs may be fetched, and why `data:` must never be |
 | `input-resolution.json` | bech32, LUD-17, Lightning Addresses, bare domains |
@@ -72,7 +72,8 @@ for (const c of cases) {
 Regenerate with `npm run generate`; check them with `npm test`, which
 verifies every digest recomputes, every declared signature really does
 verify, every fee expectation follows from the formula, and every value in
-`spec-vectors.json` is the hex 25.md itself publishes.
+`spec-vectors.json` is the value lnurl/luds publishes (`tools/luds/`, a copy
+of its `25-vectors.json` and `26-vectors.json`).
 
 The upstreamable wire text and compatibility matrix for the optional receipt
 are in [`docs/BOUND-MINT-RECEIPTS.md`](docs/BOUND-MINT-RECEIPTS.md).

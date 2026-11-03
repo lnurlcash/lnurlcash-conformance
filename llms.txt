@@ -13,12 +13,14 @@ vectors/index.json:
 signature.json       offline verification, both recovery-id orderings
 derivation.json      deterministic note secrets from a BIP39 seed
 cash-derivation.json LUD-25 m/139' note secrets, plus BIP-32 vector 1
-spec-vectors.json    25.md's own test vectors 1-5, every value checked against the spec text
+spec-vectors.json    luds' own 25-vectors.json and 26-vectors.json as lud25/lud26, same shape,
+                     every value checked against a copy of the luds files
 spends.json          the taproot model: bearer notes, ck1 per domain, a 3-leaf tree and its
                      verdicts, a CHECKSIG leaf's sighash, time claims, leaf policy, bad cw1s
-part2.json           key-path notes: cp1, ck1=Q||BIP340 sig over the domain-bound sighash,
-                     cs1 over hex(Q), cx1, the note-key tweak per purpose, address proofs;
-                     m/139'/d1..d4; prePurpose = the superseded tweak, for sweeping only
+part2.json           LUD-26 key-path notes: BIP-32 wallet/change/share keys under
+                     S = m/139'/d1..d4, cp1, ck1=Q||BIP340 sig over the domain-bound
+                     sighash, cs1 over domain and hex(Q), 65-byte cx1, register/update/
+                     unregister proofs; legacy = the superseded tweaks, for sweeping only
 bech32.json          LUD-01 encoding
 url-admission.json   which URLs may be fetched (https, or http to loopback/.onion)
 input-resolution.json bech32, LUD-17, Lightning Address, bare domain
@@ -135,12 +137,14 @@ sighash  tagged_hash("TapSighash", 0x00 || SigMsg), SIGHASH_DEFAULT, input 0 of:
          path); spent output (OP_1 <Q>, 0)
 domain   the mint's lowercase hostname: no scheme, no port
 leaves   refuse leaf version != 0xc0 and any OP_SUCCESSx outside pushed data
-derive   t = tagged_hash("LNURLcash/derive", P || chaincode || ser32(purpose) ||
-         ser32(i)) mod n; pk_i = x(lift_x(P) + t·G). purpose 0 = the wallet's
-         own notes (mint, rotate, merge, a split's p1), 1 = a split's change p2,
-         2 = Lightning Address auto-mint and internal transfer. One counter and
-         one recovery gap limit per purpose; one cx1 covers all three. The
-         register/unregister proof signs with purpose 0, index 0
+derive   LUD-26, plain BIP-32: S = m/139'/d1/d2/d3/d4 (LUD-05's steps over the
+         domain, no port); wallet S/a'/0/i (mint, rotate, merge, a split's p1),
+         change S/a'/1/i (a split's p2), share S/a'/2/n' exported as
+         cx1 = bech32m("cx", chainCode || P compressed), its notes
+         S/a'/2/n'/i by CKDpub. sk = the BIP-32 key, Q = x(sk·G). A share's
+         own key signs sha256("LNURLcash:register:<domain>:<username>:<cx1>"),
+         update (by the key on file, over the new cx1) and unregister.
+         The tweak schemes before luds a6c4652 are in part2.json's legacy
 time     nLockTime 0, or a Unix time (>= 500000000) not in the future;
          nSequence with bit 31 set, or bit 22 set and (low 16 bits * 512 s)
          elapsed since the mint credited the note; heights and block counts
@@ -148,7 +152,8 @@ time     nLockTime 0, or a Unix time (>= 500000000) not in the future;
 
 ## Certificates, canonically
 
-message = "LNURLcash:" + amount_msat + ":" + hex(Q)      // every note, bearer too
+message = "LNURLcash:" + domain + ":" + amount_msat + ":" + hex(Q)   // every note
+          (without domain before luds 92abbb3: read as legacy, never issued)
 digest  = sha256(sha256("Lightning Signed Message:" + message))
 sig     = 65 bytes, r || s || recovery_id (wire format)
 cs1     bech32m, hrp "cs" + BOLT-11 amount (cs10n = 1000 msat), over sig
@@ -156,8 +161,8 @@ pubkey  = mintPubkey, 33-byte compressed, hex
 wire    JSON "c" (and "c2" for a split's change) on the informational GET and
         every rotate, split or merge; note URL ...?k1=<spend>&c=<cs1>. These
         were sig, sig2 and &sig= before luds 50d740a
-hint    payRequest metadata ["text/cpub", "cx1...:<i>"], i the purpose-2
-        counter (text/xpub before luds 50d740a)
+fees    "Mint fees: <base_msat>,<ppm>[,<address_fee_msat>]" anywhere in the
+        text/plain entry; values end at whitespace (fees.json)
 
 Recover from digest with NO further hashing (prehash off). Verifiers MUST
 also accept recovery_id || r || s. Library layouts differ:

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "Optional mint fees (LUD-25). A SERVICE advertises what it withholds on minting via an extra [\"text/plain\", \"Mint fees: <base_fee_msat>,<fee_percent_ppm>\"] entry in the payRequest metadata, so a WALLET can warn the payer that the note it ends up holding is worth less than the invoice it paid. A SERVICE that omits the entry is fee-free, not unknown.",
+  "description": "Optional mint fees (LUD-25) and the address fee (LUD-26). A SERVICE advertises what it withholds on minting with a \"Mint fees: <base_fee_msat>,<fee_ppm>\" token anywhere in its text/plain metadata entry, so a WALLET can warn the payer that the note it ends up holding is worth less than the invoice it paid. The values are plain base-10 integers separated by commas and end at whitespace or the end of the entry; \"Mint fees:\" may be followed by spaces. A third value is LUD-26's address fee per Lightning Address registration (addressFeeMsat; null when absent or unparseable, which a WALLET reads as free and so refuses any registration invoice). A SERVICE without the token is fee-free; a token whose first two values do not parse is a fee the WALLET does not know (expect null, unknown: true), and it relies on maxWithdrawable alone.",
   "formula": {
     "apply": "max(0, gross - base_fee_msat - floor(gross * fee_percent_ppm / 1_000_000))",
     "grossUp": "the smallest gross for which apply(gross) == net",
@@ -13,23 +13,33 @@
       "metadata": "[[\"text/plain\",\"a mint\"],[\"text/plain\",\"Mint fees: 1000,2000\"]]",
       "expect": {
         "baseFeeMsat": 1000,
-        "feePpm": 2000
+        "feePpm": 2000,
+        "addressFeeMsat": null
       }
     },
     {
       "metadata": "[[\"text/plain\",\"Mint fees:1000,2000\"]]",
       "expect": {
         "baseFeeMsat": 1000,
-        "feePpm": 2000
+        "feePpm": 2000,
+        "addressFeeMsat": null
       },
       "why": "whitespace after the colon is optional"
     },
     {
-      "metadata": "[[\"text/plain\",\"Mint fees: 1000 , 2000 \"]]",
+      "metadata": "[[\"text/plain\",\"a mint. Mint fees: 1000,2000 and a description\"]]",
       "expect": {
         "baseFeeMsat": 1000,
-        "feePpm": 2000
-      }
+        "feePpm": 2000,
+        "addressFeeMsat": null
+      },
+      "why": "the token is found anywhere in the entry, and its values end at whitespace (luds 92e430f)"
+    },
+    {
+      "metadata": "[[\"text/plain\",\"Mint fees: 1000 , 2000 \"]]",
+      "expect": null,
+      "unknown": true,
+      "why": "values end at whitespace, so this is one value: the token is present but does not parse"
     },
     {
       "metadata": "[[\"text/plain\",\"a mint\"]]",
@@ -44,11 +54,13 @@
     {
       "metadata": "[[\"text/plain\",\"Mint fees: 0,1000000\"]]",
       "expect": null,
+      "unknown": true,
       "why": "a fee of 100% or more can never net anything, and would make a naive gross-up walk hang - refuse it as no valid entry"
     },
     {
       "metadata": "[[\"text/plain\",\"Mint fees: 0,2000000\"]]",
       "expect": null,
+      "unknown": true,
       "why": "above 100%"
     },
     {
@@ -59,26 +71,75 @@
     {
       "metadata": "[[\"text/plain\",\"Mint fees: -1,2000\"]]",
       "expect": null,
+      "unknown": true,
       "why": "negative components are not a valid advertisement"
     },
     {
       "metadata": "[[\"text/plain\",\"Mint fees: 1000\"]]",
       "expect": null,
+      "unknown": true,
       "why": "both components are required"
     },
     {
-      "metadata": "[[\"text/plain\",\"Mint fees: 1000,2000,3000\"]]",
+      "metadata": "[[\"text/plain\",\"Mint fees: 1000,2000,21000\"]]",
+      "expect": {
+        "baseFeeMsat": 1000,
+        "feePpm": 2000,
+        "addressFeeMsat": 21000
+      },
+      "why": "a third value is the LUD-26 address fee"
+    },
+    {
+      "metadata": "[[\"text/plain\",\"Mint fees: 0,0,21000\"]]",
+      "expect": {
+        "baseFeeMsat": 0,
+        "feePpm": 0,
+        "addressFeeMsat": 21000
+      },
+      "why": "an address fee alone, with no mint fee"
+    },
+    {
+      "metadata": "[[\"text/plain\",\"Mint fees: 0,0,0\"]]",
       "expect": null,
-      "why": "exactly two components"
+      "why": "every value zero is identical to no fee"
+    },
+    {
+      "metadata": "[[\"text/plain\",\"Mint fees: 1000,2000,x\"]]",
+      "expect": {
+        "baseFeeMsat": 1000,
+        "feePpm": 2000,
+        "addressFeeMsat": null
+      },
+      "why": "an unparseable third value leaves the mint fee standing and the address fee unadvertised"
+    },
+    {
+      "metadata": "[[\"text/plain\",\"Mint fees: 1000,2000,21000,7\"]]",
+      "expect": {
+        "baseFeeMsat": 1000,
+        "feePpm": 2000,
+        "addressFeeMsat": 21000
+      },
+      "why": "values after the third are defined by no LUD yet and ignored"
+    },
+    {
+      "metadata": "[[\"text/plain\",\"Mint fees: 1000,2000 Address fee: 21000\"]]",
+      "expect": {
+        "baseFeeMsat": 1000,
+        "feePpm": 2000,
+        "addressFeeMsat": null
+      },
+      "why": "the separate \"Address fee:\" token of luds 92abbb3 was folded into Mint fees in 92e430f and is no longer read"
     },
     {
       "metadata": "[[\"text/plain\",\"Mint fees: 99999999999999999999,2000\"]]",
       "expect": null,
+      "unknown": true,
       "why": "digits past 2^53 lose integer precision in most languages - refuse rather than estimate with a mangled fee"
     },
     {
       "metadata": "[[\"text/plain\",\"Mint fees: 1000,99999999999999999999\"]]",
       "expect": null,
+      "unknown": true,
       "why": "the same for the ppm component (a ppm this large fails the 100% rule regardless)"
     },
     {
@@ -98,21 +159,24 @@
       "metadata": "[[\"text/plain\",\"Mint fees: 500,0\"]]",
       "expect": {
         "baseFeeMsat": 500,
-        "feePpm": 0
+        "feePpm": 0,
+        "addressFeeMsat": null
       }
     },
     {
       "metadata": "[[\"text/plain\",\"Mint fees: 0,5000\"]]",
       "expect": {
         "baseFeeMsat": 0,
-        "feePpm": 5000
+        "feePpm": 5000,
+        "addressFeeMsat": null
       }
     },
     {
       "metadata": "[[\"text/plain\",\"Mint fees: 500,0\"],[\"text/plain\",\"Mint fees: 1000,2000\"]]",
       "expect": {
         "baseFeeMsat": 500,
-        "feePpm": 0
+        "feePpm": 0,
+        "addressFeeMsat": null
       },
       "why": "the first valid advertisement wins"
     }

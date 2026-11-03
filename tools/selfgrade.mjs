@@ -236,7 +236,7 @@ console.log('ok   pre-settlement verify leak caught')
 const MINT_INFO_CHECK = 'publishes a mint address (experimental, optional)'
 const LIABILITIES_CHECK = 'publishes liabilities (optional)'
 const SIGNATURE_CHECK = 'certifies a bearer output over hex(Q)'
-const EVERY_CERTIFICATE = 'every certificate verifies over hex(Q) and the note value'
+const EVERY_CERTIFICATE = 'every certificate verifies over the domain, hex(Q) and the note value'
 
 // a real npub, decoded rather than pattern-matched by the grader
 const npub = bech32.encode('npub', bech32.toWords(new Uint8Array(32).fill(2)), 200)
@@ -381,6 +381,18 @@ if (!/pre-taproot/.test(detailOf(overH, SIGNATURE_CHECK))) {
 }
 conserved(overH, 'a mint certifying over h')
 console.log('ok   a certificate over h rather than hex(Q) caught, and named')
+
+// The message before luds 92abbb3 named no domain, so a certificate one mint
+// issued vouched for the same note at any other mint on the same key.
+const noDomain = await grade({certificateWithoutDomain: true})
+for (const name of [SIGNATURE_CHECK, EVERY_CERTIFICATE]) {
+  if (!caughtBy(noDomain, name)) die(`a certificate without the domain was not caught by "${name}"`)
+}
+if (!/without the domain/.test(detailOf(noDomain, SIGNATURE_CHECK))) {
+  die(`the report does not name the certificate without a domain for what it is: ${detailOf(noDomain, SIGNATURE_CHECK)}`)
+}
+conserved(noDomain, 'a mint certifying without the domain')
+console.log('ok   a certificate without the domain caught, and named')
 
 // The key path, which the compliant mock serves: a cp1 is credited, a ck1
 // bound to its domain spends it, and the certificates cover it too.
