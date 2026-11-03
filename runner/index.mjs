@@ -1353,16 +1353,19 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     if (!lookupOffered) throw soft('the lookup by p is not offered')
     for (const [spelling, ref] of originalRefs) {
       const burned = await lookupRef(ref)
+      // LUD-25 fixes the answer for a burned note as exactly "already in
+      // use" (luds 92abbb3): a LUD-26 recovery scan counts that, and only
+      // that, as a used index, so a mint saying anything else hides notes
+      // from a wallet restoring its seed
       assert(
-        burned.status === 'ERROR' && typeof burned.reason === 'string' &&
-          /spent/i.test(burned.reason) && !/unknown|not found/i.test(burned.reason),
-        `a spent note asked for by its ${spelling} must be identified as spent, got ${JSON.stringify(burned)}`
+        burned.status === 'ERROR' && burned.reason === 'already in use',
+        `a spent note asked for by its ${spelling} must be answered "already in use", got ${JSON.stringify(burned)}`
       )
     }
     const unknown = await lookupRef(freshBearer().h)
     assert(
       unknown.status === 'ERROR' && typeof unknown.reason === 'string' &&
-        /unknown|not found/i.test(unknown.reason) && !/spent/i.test(unknown.reason),
+        /unknown|not found/i.test(unknown.reason) && unknown.reason !== 'already in use',
       `an unregistered note must be identified as unknown, got ${JSON.stringify(unknown)}`
     )
     return 'spent and unknown notes are distinguishable without disclosing a spend'

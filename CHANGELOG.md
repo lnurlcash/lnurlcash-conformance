@@ -4,7 +4,18 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
-## 0.16.0 - unreleased
+## 0.16.1 - unreleased
+
+**A burned note is "already in use".** LUD-25 fixes that answer, at the
+informational GET and the callback alike (luds `92abbb3`), and a LUD-26
+recovery scan counts it, and only it, as a used index. 0.16.0 still graded
+"reports a spent note distinguishably from an unknown one" against the old
+wording, a reason containing "spent", so it failed every mint that answers
+as LUD-25 now says. The check now requires exactly `already in use`, and
+the mock mint answers that way (`burnedReason` makes it use another, which
+the self-grade checks is caught).
+
+## 0.16.0 - 2026-11-03
 
 Breaking. Follows LUD-26 as split out of LUD-25 (lnurl/luds `b62b8bf` and
 `a6c4652`, both marked BREAKING, through `92e430f`).
