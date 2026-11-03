@@ -6,8 +6,8 @@ publishing with no npm token in the repo, a SLSA provenance attestation, a
 secret scan over the exact files being published, an exports check, an
 action-pin audit, and a two-runner reproducible-build attestation.
 
-You control the version. Bump `package.json`, add the CHANGELOG entry, cut the
-release; anvil does the rest.
+You control the version. Bump `package.json`, add the CHANGELOG entry, push a
+`v*` tag; anvil does the rest, GitHub Release included.
 
 ## First publish, a one-time bootstrap
 
@@ -74,15 +74,18 @@ here first.
 1. Bump `version` in `package.json`.
 2. Add a `## x.y.z` section to `CHANGELOG.md`; anvil puts it in the release body.
 3. Commit and push to `main`.
-4. Cut the release:
+4. Tag it and push the tag:
 
    ```bash
-   gh release create v0.1.0 --title v0.1.0 --notes-from-tag
+   git tag v0.1.0 && git push origin v0.1.0
    ```
 
-   The `release: published` event fires `release.yml`, which runs anvil's gates,
-   the two-runner reproducible build, then an OIDC-authenticated publish and a
-   release-body update carrying the tarball hashes.
+   The tag push fires `release.yml`, which runs anvil's gates, the two-runner
+   reproducible build, then an OIDC-authenticated publish, and finally creates
+   the GitHub Release with the version's CHANGELOG section and the tarball
+   hashes. Do not create the Release by hand: nothing listens for it any more,
+   and anvil creates it once the publish succeeds. The tag must match
+   `package.json`'s version, or anvil refuses it before anything is published.
 
 You can also publish a specific tag by hand from Actions, Release, Run workflow.
 

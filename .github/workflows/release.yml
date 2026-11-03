@@ -6,8 +6,14 @@ name: release
 #
 # Two triggers land on this one file, which is the OIDC entry-point npm's
 # trusted publisher matches against:
-#   release: published  - you create the GitHub Release, this publishes it
+#   push of a v* tag    - this publishes it, then creates the GitHub Release
+#                         from the tag's CHANGELOG section
 #   workflow_dispatch   - publish a specific tag by hand
+#
+# The tag is passed to anvil explicitly (its chained mode): a Release this
+# workflow creates with GITHUB_TOKEN fires no workflow of its own, and there
+# is deliberately no `release: published` trigger either, so a tag is never
+# published twice.
 #
 # npm matches the trusted publisher against THIS caller workflow, not
 # against forgesworn/anvil - configure it on npmjs.com as repo
@@ -17,8 +23,8 @@ name: release
 # over from there.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
@@ -34,7 +40,7 @@ jobs:
   release:
     uses: forgesworn/anvil/.github/workflows/release.yml@d4294e622932d93957d73e5b1af0267382b6af04 # v0.10.1
     with:
-      tag: ${{ inputs.tag || '' }}
+      tag: ${{ inputs.tag || github.ref_name }}
       # The vectors ARE the product here: regenerate them and fail the
       # release if a single byte moved from what is committed.
       vector-test-command: npm run generate && git diff --exit-code vectors/
