@@ -99,7 +99,7 @@ try {
   assert.equal((await melt()).status, 'OK')
   lifecycleMint.state.settleMelt(k1)
   for (const query of forms) {
-    assert.deepEqual(await lookup(query), {status: 'ERROR', reason: 'Note already spent.'})
+    assert.deepEqual(await lookup(query), {status: 'ERROR', reason: 'already in use'})
   }
   assert.deepEqual(await lookup(`p=${bytesToHex(randomBytes(32))}`), {status: 'ERROR', reason: 'Unknown note.'})
   assert.equal(lifecycleMint.state.noteState(k1), 'burned')
@@ -838,6 +838,14 @@ if (!caughtBy(hidesSpent, SPENT_CHECK)) {
   die('a lookup hiding a spent note as unknown PASSED - the grader is blind')
 }
 console.log('ok   a lookup by p hiding a retained spent note caught')
+
+// Before luds 92abbb3 a mint could word the answer for a burned note as it
+// liked; a recovery scan now counts only "already in use" as a used index.
+const oldWording = await grade({burnedReason: 'Note already spent.'})
+if (!caughtBy(oldWording, SPENT_CHECK)) {
+  die('a burned note answered "Note already spent." PASSED - LUD-25 fixes it as "already in use"')
+}
+console.log('ok   a burned note answered in the old wording caught')
 
 // Keep the old fixture name accepted as a compatible alias, but stop
 // describing the intended spent response as a privacy violation.

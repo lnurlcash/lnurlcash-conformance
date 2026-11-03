@@ -87,6 +87,11 @@ const DEFAULTS = {
   // included. LUD-25 makes that a SHOULD; false withholds c/c2
   // entirely, as a SERVICE with no signer does.
   signatures: true,
+  // How a burned note is answered, at the informational GET and the
+  // callback alike. LUD-25 fixes it as exactly "already in use" (luds
+  // 92abbb3), which a LUD-26 recovery scan counts as a used index; older
+  // mints said "Note already spent.". Non-compliant otherwise.
+  burnedReason: 'already in use',
   // Certify over the superseded message without the domain, as every mint
   // did before luds 92abbb3. Non-compliant.
   certificateWithoutDomain: false,
@@ -1020,7 +1025,7 @@ export const createMockMint = async (options = {}) => {
         if (!invent) {
           if (!held) return fail('Unknown note.')
           if (held.state === 'burned') {
-            return fail(opts.hashLookup === 'hidesSpent' ? 'Unknown note.' : 'Note already spent.')
+            return fail(opts.hashLookup === 'hidesSpent' ? 'Unknown note.' : opts.burnedReason)
           }
           if (held.state === 'pending') return fail('pending')
         }
@@ -1061,7 +1066,7 @@ export const createMockMint = async (options = {}) => {
         const verdict = opens(spend, note)
         if (!verdict.ok) return fail(verdict.specific ? verdict.reason : 'Unknown note.')
       }
-      if (note.state === 'burned') return fail('Note already spent.')
+      if (note.state === 'burned') return fail(opts.burnedReason)
       if (note.state === 'pending') return fail('pending')
       const sig = certify(spend.q, note.amountMsat, {h: note.h})
       return send({
@@ -1165,8 +1170,9 @@ export const createMockMint = async (options = {}) => {
         }
       }
 
+      // a burned note is "already in use" at the callback too (LUD-25)
       for (const {note} of found) {
-        if (note.state === 'burned') return fail('Invalid or already spent k1.')
+        if (note.state === 'burned') return fail(opts.burnedReason)
         if (note.state === 'pending') return fail('pending')
       }
       const total = found.reduce((sum, f) => sum + f.note.amountMsat, 0)
