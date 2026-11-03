@@ -4,6 +4,68 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## 0.16.0 - unreleased
+
+Breaking. Follows LUD-26 as split out of LUD-25 (lnurl/luds `b62b8bf` and
+`a6c4652`, both marked BREAKING, through `92e430f`).
+
+**Derivation is plain BIP-32.** Below each SERVICE's root
+`S = m/139'/d1/d2/d3/d4` a note key is the BIP-32 private key at its path:
+wallet notes `S/a'/0/i`, change `S/a'/1/i`, share `n` at `S/a'/2/n'` and its
+notes `S/a'/2/n'/i`. The `LNURLcash/derive` tweak and its purposes are gone.
+`d1..d4` now hash the domain without its port, the string the canonical spend
+transaction commits to, where the old scheme hashed the host as stored. Every
+seed-derived note key changes, so a wallet that only scans the new tree finds
+none of the notes it holds: `part2.json`'s `legacy` records both superseded
+tweaks so it can find and sweep them.
+
+**`cx1` is a share's xpub**, `bech32m("cx", chainCode || P compressed)`, 65
+bytes and 113 characters, BIP-32's order. The 64-byte `x(P) || chainCode`
+shape is invalid, so every Lightning Address registered under it has to be
+registered again.
+
+**Registration proofs** are signed by the share's own key, verified against
+`x(P)` of the `cx1`, over `LNURLcash:register:<domain>:<username>:<cx1>`,
+`LNURLcash:update:<domain>:<username>:<new cx1>` (a PUT, by the key on file,
+alongside a register `newsig` by the new share) or
+`LNURLcash:unregister:<domain>:<username>`, the username lowercased.
+
+**Certificates bind the domain**: `LNURLcash:<domain>:<amount_msat>:<hex(Q)>`.
+A certificate over the old message no longer verifies as current;
+`part2.json`'s `legacyCertificates` keep it readable as legacy. A `cs1` whose
+recovery-id is above 3 is invalid.
+
+**Mint fees** are a token anywhere in the `text/plain` entry, values ending at
+whitespace, and a third value is the LUD-26 address fee (`addressFeeMsat` in
+every parse expectation). `Mint fees: 1000 , 2000` no longer parses, and
+`Mint fees: 1000,2000,3000` now does.
+
+Vectors:
+
+- `spec-vectors.json` is now `lud25` and `lud26`: luds' own
+  `25-vectors.json` and `26-vectors.json`, rebuilt from the primitives in
+  their exact shape. The selfcheck compares them with a copy of the luds
+  files in `tools/luds/` instead of hex transcribed from 25.md. `vector1`
+  to `vector5` are gone.
+- `part2.json` and `nostr-seed.json` follow the new tree, with accounts,
+  shares and every note's `ck1`; `prePurpose` moved into `legacy`.
+- `fees.json`: the parse cases above, and `unknown: true` where the token is
+  present but does not parse.
+
+Grader and mock mint:
+
+- Certificates are graded over `LNURLcash:<domain>:<amount_msat>:<hex(Q)>`,
+  the domain the note URL's own, and one over the old message is named as
+  such. The mock mint certifies the same way; `certificateWithoutDomain`
+  makes it sign the old message, and the self-grade checks that is caught.
+- `Mint fees` is read as a token anywhere in the entry, a third value
+  allowed.
+
+Not yet updated: the registered-address grade (`--address`) still expects
+the `text/cpub` internal-transfer hint, which LUD-26 replaced with sending
+the note to the Lightning Address callback, and nothing grades
+registration, update or the address fee yet. They move with the mints.
+
 ## 0.15.0 - 2026-09-29
 
 **LUD-25's unified taproot model** (luds `6e865b1`, "unified taproot

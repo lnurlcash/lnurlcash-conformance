@@ -45,18 +45,14 @@ const ser32 = value => {
 
 const noteId = k1 => bytesToHex(sha256(hexToBytes(k1)))
 
-// The Lightning-signed-message digest over LNURLcash:<amount>:<subject>.
-// For a certificate the subject is hex(Q); the optional bound-mint receipt
-// keeps the h it has always signed.
-const sigDigest = (subjectHex, amountMsat) =>
-  sha256(
-    sha256(
-      new Uint8Array([
-        ...utf8ToBytes(LSM_PREFIX),
-        ...utf8ToBytes(`LNURLcash:${amountMsat}:${subjectHex}`)
-      ])
-    )
-  )
+// The Lightning-signed-message digest. A certificate signs
+// LNURLcash:<domain>:<amount>:<hex(Q)> (luds 92abbb3); the optional
+// bound-mint receipt keeps the LNURLcash:<amount>:<h> it has always signed.
+const lsmDigestOf = message =>
+  sha256(sha256(new Uint8Array([...utf8ToBytes(LSM_PREFIX), ...utf8ToBytes(message)])))
+const sigDigest = (subjectHex, amountMsat) => lsmDigestOf(`LNURLcash:${amountMsat}:${subjectHex}`)
+const certificateDigest = (domain, subjectHex, amountMsat) =>
+  lsmDigestOf(`LNURLcash:${domain}:${amountMsat}:${subjectHex}`)
 
 const nowSecs = () => Math.floor(Date.now() / 1000)
 
@@ -91,6 +87,9 @@ const DEFAULTS = {
   // included. LUD-25 makes that a SHOULD; false withholds c/c2
   // entirely, as a SERVICE with no signer does.
   signatures: true,
+  // Certify over the superseded message without the domain, as every mint
+  // did before luds 92abbb3. Non-compliant.
+  certificateWithoutDomain: false,
   // The hosts a spend's signature may be bound to. Unset, the mock takes
   // the hostname it was reached at, which is what a note URL for it names.
   domains: undefined,
@@ -454,11 +453,20 @@ export const createMockMint = async (options = {}) => {
 
   // A cs1 over (hex(Q), amount), the certificate LUD-25 has a SERVICE
   // hand out for every note it issues. Undefined when signatures are off.
+  // The domain a certificate names: the first the mock was told, or the
+  // hostname the current request reached it at.
+  let certificateDomain = null
   const certify = (qHex, amountMsat, {h = null, previousKey = opts.signWithPreviousKey} = {}) => {
     if (!opts.signatures) return undefined
     const key = previousKey && previousPriv ? previousPriv : priv
     const subject = opts.certificateOverH && h ? h : qHex
-    return encodeCs1(amountMsat, signWith(sigDigest(subject, amountMsat), key))
+    // The older mints these two modes imitate signed before luds 92abbb3
+    // bound the domain, so they sign without it too.
+    const withoutDomain =
+      opts.certificateWithoutDomain || opts.certificateOverH || opts.signatureLayout === 'leading'
+    return encodeCs1(amountMsat, signWith(certificateDomain === null || withoutDomain
+      ? sigDigest(subject, amountMsat)
+      : certificateDigest(certificateDomain, subject, amountMsat), key))
   }
 
   // The optional bound-mint receipt keeps its own signature: raw hex over
@@ -636,6 +644,9 @@ export const createMockMint = async (options = {}) => {
     }
     const fail = reason => send({status: 'ERROR', reason})
     const origin = `http://${req.headers.host}`
+    certificateDomain = opts.domains
+      ? asList(opts.domains)[0].toLowerCase()
+      : new URL(origin).hostname.toLowerCase()
 
     // ---- LUD-16 payRequest (minting) ----
     // Both shapes are in the wild. A Lightning Address mint lives under

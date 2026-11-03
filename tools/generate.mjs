@@ -702,14 +702,13 @@ const ser32 = index => {
   return out
 }
 
-// BIP-341's tweak, so a watcher holding only the cx1 derives the same pk the
-// holder does. purpose and i are any uint32 and are never hardened (luds
-// 50d740a): purpose 0 is the wallet's own notes, 1 a split's change, 2 the
-// Lightning Address rail (auto-mint and internal transfer).
+// The superseded per-note tweak (luds 50d740a until a6c4652), kept only for
+// part2.json's legacy record: purpose 0 was the wallet's own notes, 1 a
+// split's change, 2 the Lightning Address rail. LUD-26 replaced it with plain
+// BIP-32 below.
 const PURPOSE_WALLET = 0
 const PURPOSE_CHANGE = 1
 const PURPOSE_ADDRESS = 2
-const PURPOSE_NAMES = ['wallet', 'change', 'Lightning Address']
 const deriveTweakOf = (Px, chainCode, purpose, index) =>
   purpose === null
     ? bytesToNumber(taggedHash('LNURLcash/derive', Px, chainCode, ser32(index))) % CURVE_N
@@ -732,53 +731,403 @@ const noteKeysAt = (node, purpose, index) => {
   return {secretKey: numberTo32(sk), pubkey: held}
 }
 
-const PART2_INDICES = [0, 1, 2, 1000, HARDENED - 1, HARDENED, 0xffffffff]
-// Every purpose-0 index above, then the first two indices of purposes 1 and
-// 2, so the purpose-0 index-0 note stays notes[0].
-const PART2_KEYS = [
-  ...PART2_INDICES.map(index => [PURPOSE_WALLET, index]),
-  [PURPOSE_CHANGE, 0],
-  [PURPOSE_CHANGE, 1],
-  [PURPOSE_ADDRESS, 0],
-  [PURPOSE_ADDRESS, 1]
-]
-const PART2_HOSTS = ['mint.example', 'mint.lnurlcash.com', 'moneyer.dev', 'localhost:3338']
+// ---- LUD-26: plain BIP-32 below each SERVICE's root --------------------------
+//
+// Since luds a6c4652 ("BREAKING simpler derivation") a note key is nothing
+// but the BIP-32 private key at its path:
+//
+//   S            = m/139'/d1/d2/d3/d4     d1..d4 from LUD-05's steps over the domain
+//   S/a'/0/i     wallet: every note the wallet mints, rotates or merges into, and a split's p1
+//   S/a'/1/i     change: a split's p2
+//   S/a'/2/n'    share n, exported as cx1 = bech32m("cx", chainCode || P compressed)
+//   S/a'/2/n'/i  note i of share n, credited by the SERVICE, which derives it with CKDpub
+//
+// Q = x(sk·G), as for any key-path note. `domain` is the string the canonical
+// spend transaction commits to, the host's lowercase name without its port,
+// so a host carrying a port hashes the same as its bare name here (the
+// superseded schemes above hashed the host as stored, port included).
 
-const part2Branch = (mnemonic, host) => {
-  const seed = seedOf(mnemonic)
-  const cashRoot = cashRootOf(seed)
-  const domainIndices = cashDomainIndices(cashRoot, host)
-  const node = cashDomainNode(cashRoot, host)
-  const P = secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey))
-  const branchPubkey = P.toBytes(true).slice(1)
+const CHAIN_WALLET = 0
+const CHAIN_CHANGE = 1
+const CHAIN_SHARE = 2
+
+const pointOf = privateKey => secp256k1.Point.BASE.multiply(bytesToNumber(privateKey))
+
+// CKDpub, so every share note below is also derived from the cx1 alone and
+// the two are held equal: a SERVICE never holds anything else.
+const ckdPub = ({publicKey, chainCode}, index) => {
+  if (index >= HARDENED) throw new Error(`CKDpub cannot take hardened ${index}`)
+  const material = hmac(sha512, chainCode, concat(publicKey, ser32(index)))
+  const left = bytesToNumber(material.subarray(0, 32))
+  if (left >= CURVE_N) throw new Error(`invalid public child at ${index}`)
+  const child = secp256k1.Point.fromBytes(publicKey).add(secp256k1.Point.BASE.multiply(left))
+  return {publicKey: child.toBytes(true), chainCode: material.slice(32)}
+}
+
+const serviceRootOf = (seed, host) => {
   const domain = spendDomainOf(host)
+  const cashRoot = cashRootOf(seed)
+  const domainIndices = cashDomainIndices(cashRoot, domain)
+  return {
+    domain,
+    domainIndices,
+    cashHashingKey: ckdPriv(cashRoot, 0).privateKey,
+    node: domainIndices.reduce(ckdPriv, cashRoot)
+  }
+}
+
+// d1..d4 are raw indices, written as they fall; everything below S marks a
+// hardened step with ', the way 26-vectors.json writes its paths.
+const pathOf = (root, below) =>
+  `m/139'/${root.domainIndices.join('/')}` +
+  below.map(i => (i >= HARDENED ? `/${i - HARDENED}'` : `/${i}`)).join('')
+
+const cx1Of = node => bech32mOf('cx', concat(node.chainCode, pointOf(node.privateKey).toBytes(true)))
+
+// Every note, with its key-path spend at the root's domain.
+const noteRecord = (root, below, index) => {
+  const node = below.concat(index).reduce(ckdPriv, root.node)
+  const compressed = pointOf(node.privateKey).toBytes(true)
+  const spend = keyPathSpendOf(node.privateKey, root.domain)
+  if (bytesToHex(spend.Q) !== bytesToHex(compressed.slice(1))) throw new Error(`Q is not x(pk) at ${pathOf(root, below.concat(index))}`)
+  return {
+    index,
+    path: pathOf(root, below.concat(index)),
+    noteSecretKey: bytesToHex(node.privateKey),
+    notePubkeyCompressed: bytesToHex(compressed),
+    notePubkey: bytesToHex(spend.Q),
+    cp1: bech32mOf('cp', spend.Q),
+    sighash: bytesToHex(spend.sighash),
+    keyPathSignature: bytesToHex(spend.signature),
+    ck1: spend.ck1
+  }
+}
+
+const shareRecord = (root, account, share, indices) => {
+  const below = [account + HARDENED, CHAIN_SHARE, share + HARDENED]
+  const node = below.reduce(ckdPriv, root.node)
+  const P = pointOf(node.privateKey).toBytes(true)
+  const notes = indices.map(i => noteRecord(root, below, i))
+  for (const n of notes) {
+    const watched = ckdPub({publicKey: P, chainCode: node.chainCode}, n.index)
+    if (bytesToHex(watched.publicKey) !== n.notePubkeyCompressed) throw new Error(`CKDpub disagrees at share ${share} note ${n.index}`)
+  }
+  return {
+    share,
+    path: pathOf(root, below),
+    sharePrivateKey: bytesToHex(node.privateKey),
+    sharePubkey: bytesToHex(P),
+    chainCode: bytesToHex(node.chainCode),
+    cx1: cx1Of(node),
+    notes
+  }
+}
+
+const accountRecord = (root, account, {wallet, change, shares}) => ({
+  account,
+  wallet: wallet.map(i => noteRecord(root, [account + HARDENED, CHAIN_WALLET], i)),
+  change: change.map(i => noteRecord(root, [account + HARDENED, CHAIN_CHANGE], i)),
+  shares: shares.map(([share, indices]) => shareRecord(root, account, share, indices))
+})
+
+// A share's key signs its own registration, over a message that binds the
+// SERVICE's domain, the lowercased username and, for register and update,
+// the cx1 being put on file (luds 92abbb3, cc186e5).
+const addressProofMessageOf = (action, domain, username, cx1) =>
+  action === 'unregister'
+    ? `LNURLcash:unregister:${domain}:${username.toLowerCase()}`
+    : `LNURLcash:${action}:${domain}:${username.toLowerCase()}:${cx1}`
+
+const signShare = (sharePrivateKey, message) => schnorr.sign(sha256(utf8ToBytes(message)), sharePrivateKey, SCHNORR_AUX)
+
+// ---- superseded derivations, kept so a wallet can sweep -----------------------
+//
+// Two tweak-based schemes came before LUD-26's plain BIP-32, both on the
+// node m/139'/d1/d2/d3/d4 for the host exactly as stored (port included),
+// both with a 64-byte cx1 = bech32m("cx", x(P) || chainCode):
+//
+//   luds 50d740a..2f17578   t = tagged_hash("LNURLcash/derive", P || c || ser32(purpose) || ser32(i))
+//   luds 6e865b1..50d740a   t = tagged_hash("LNURLcash/derive", P || c || ser32(i))
+//
+// Notes minted under them are still money, so a wallet scans these too and
+// rotates whatever it finds into a LUD-26 key. No SERVICE derives there any
+// more, and no cx1 of this shape is ever registered again.
+
+const PURPOSE_KEYS = [
+  [PURPOSE_WALLET, 0],
+  [PURPOSE_WALLET, 1],
+  [PURPOSE_WALLET, 2],
+  [PURPOSE_CHANGE, 0],
+  [PURPOSE_ADDRESS, 0]
+]
+
+const legacyBranch = (mnemonic, host) => {
+  const node = cashDomainNode(cashRootOf(seedOf(mnemonic)), host)
+  const P = pointOf(node.privateKey)
+  const branchPubkey = P.toBytes(true).slice(1)
   return {
     mnemonic,
-    seedHex: bytesToHex(seed),
     host,
-    domain,
-    cashRoot: nodeHex(cashRootOf(seed)),
-    domainIndices,
     addressNode: nodeHex(node),
     branchPubkey: bytesToHex(branchPubkey),
     branchParity: P.y % 2n === 0n ? 'even' : 'odd',
     chainCode: bytesToHex(node.chainCode),
     cx1: bech32mOf('cx', concat(branchPubkey, node.chainCode)),
-    notes: PART2_KEYS.map(([purpose, index]) => {
+    notes: PURPOSE_KEYS.map(([purpose, index]) => {
       const {secretKey, pubkey} = noteKeysAt(node, purpose, index)
-      const spend = keyPathSpendOf(secretKey, domain)
-      if (bytesToHex(spend.Q) !== bytesToHex(pubkey)) throw new Error(`key-path Q is not the note key at ${purpose}/${index}`)
+      return {purpose, index, notePubkey: bytesToHex(pubkey), cp1: bech32mOf('cp', pubkey), noteSecretKey: bytesToHex(secretKey)}
+    }),
+    prePurpose: [0, 1, 2].map(index => {
+      const {secretKey, pubkey} = noteKeysAt(node, null, index)
+      return {index, notePubkey: bytesToHex(pubkey), cp1: bech32mOf('cp', pubkey), noteSecretKey: bytesToHex(secretKey)}
+    })
+  }
+}
+
+// ---- vectors: LUD-25's and LUD-26's own published test vectors ---------------
+//
+// lnurl/luds publishes its vectors as 25-vectors.json and 26-vectors.json.
+// spec-vectors.json rebuilds both from the primitives above, in their exact
+// shape and field names, so an implementation can load either file. The
+// selfcheck compares every value with a typed copy of the luds files
+// (tools/luds/), so a spec edit and a generator bug can never silently agree.
+
+const LUDS_COMMIT = '92e430f'
+
+const keyPathSpendVectorOf = (secretKey, domain) => {
+  const Q = schnorr.getPublicKey(secretKey)
+  const fields = sigMsgFieldsOf({Q, domain})
+  const sigmsg = concat(...fields.map(([, value]) => value))
+  const sighash = tapSighashOf(sigmsg)
+  const sig = schnorr.sign(sighash, secretKey, SCHNORR_AUX)
+  if (!schnorr.verify(sig, sighash, Q)) throw new Error('key-path spend does not verify')
+  return {
+    Q: bytesToHex(Q),
+    cp1: bech32mOf('cp', Q),
+    domain,
+    prevout_txid: bytesToHex(prevoutTxidOf(domain)),
+    spent_script_pubkey: bytesToHex(p2trOf(Q)),
+    sigmsg_fields: Object.fromEntries(fields.map(([name, value]) => [name, bytesToHex(value)])),
+    sigmsg: bytesToHex(sigmsg),
+    sighash: bytesToHex(sighash),
+    aux_rand: bytesToHex(SCHNORR_AUX),
+    sig: bytesToHex(sig),
+    spend_tx: bytesToHex(spendTransactionOf({domain, stack: [sig]})),
+    ck1: bech32mOf('ck', concat(Q, sig))
+  }
+}
+
+// An arbitrary SERVICE signing key, the one LUD-25's certificate vectors name.
+const SPEC_MINT_SEED_LABEL = 'LUD-25 test vector mint node'
+const SPEC_MINT_KEY = sha256(utf8ToBytes(SPEC_MINT_SEED_LABEL))
+
+// LUD-25's certificate, bound to the SERVICE's domain since luds 92abbb3.
+const certificateMessageOf = (domain, amountMsat, qHex) => `LNURLcash:${domain}:${amountMsat}:${qHex}`
+
+const specCertificate = (domain, qHex, amountMsat) => {
+  const message = certificateMessageOf(domain, amountMsat, qHex)
+  const digest = lightningSignedDigest(message)
+  const signature = signRecoverable(SPEC_MINT_KEY, digest)
+  return {
+    amount_msat: amountMsat,
+    message,
+    digest: bytesToHex(digest),
+    signature: bytesToHex(signature),
+    cs1: bech32mOf(`cs${amountSuffix(amountMsat)}`, signature)
+  }
+}
+
+const SPEC_SPEND_KEY = hexToBytes('3616b02290a133da73e758a54dbff1bf6439b4067a820cb51ca873fa4a13a96a')
+
+const lud25Vectors = () => {
+  const domain = 'mint.example'
+  const spend = keyPathSpendVectorOf(SPEC_SPEND_KEY, domain)
+  const note = bearerNoteOf(hexToBytes('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'))
+  const bearerCertificate = specCertificate(domain, bytesToHex(note.Q), 1000)
+  return {
+    description: `LUD-25's own test vectors (lnurl/luds ${LUDS_COMMIT}, 25-vectors.json), rebuilt from the primitives in the same shape.`,
+    key_path_spend: {
+      description: 'A ck1 for an arbitrary key-path note, signed with an all-zero aux_rand. The same ck1 fails at any other domain.',
+      sk: bytesToHex(SPEC_SPEND_KEY),
+      ...spend
+    },
+    certificates: {
+      description: 'cs1 certificates from an arbitrary SERVICE key, signed for domain mint.example. Signatures are r || s || recovery-id.',
+      service_sk: bytesToHex(SPEC_MINT_KEY),
+      mintPubkey: bytesToHex(secp256k1.getPublicKey(SPEC_MINT_KEY, true)),
+      Q: spend.Q,
+      domain,
+      cases: [specCertificate(domain, spend.Q, 1000), specCertificate(domain, spend.Q, 21000000)]
+    },
+    bearer_note: {
+      description: 'A bearer note: both short forms, its full cw1, and a cs1 from the certificates SERVICE key.',
+      preimage: bytesToHex(note.preimage),
+      h: bytesToHex(note.h),
+      leaf: bytesToHex(note.leaf),
+      tapleaf_hash: bytesToHex(note.leafHash),
+      H: bytesToHex(NUMS_H),
+      tweak: bytesToHex(numberTo32(note.t)),
+      Q: bytesToHex(note.Q),
+      control_block: bytesToHex(note.controlBlock),
+      cp1: bech32mOf('cp', note.Q),
+      cw1: cw1Of({script: note.leaf, controlBlock: note.controlBlock, witness: [note.preimage]}),
+      certificate: bearerCertificate,
+      note_url: `lnurlw://${domain}/w?k1=${bytesToHex(note.preimage)}&c=${bearerCertificate.cs1}`
+    }
+  }
+}
+
+// 26-vectors.json's own shape: short field names, notes keyed by i.
+const lud26Note = (root, below, i) => {
+  const node = below.concat(i).reduce(ckdPriv, root.node)
+  const pk = pointOf(node.privateKey).toBytes(true)
+  return {
+    i,
+    path: pathOf(root, below.concat(i)),
+    sk: bytesToHex(node.privateKey),
+    pk: bytesToHex(pk),
+    Q: bytesToHex(pk.slice(1)),
+    cp1: bech32mOf('cp', pk.slice(1))
+  }
+}
+
+const lud26Account = (root, account, {wallet, change, shares}) => {
+  const chain = (c, indices) => ({
+    path: `${pathOf(root, [account + HARDENED, c])}/i`,
+    notes: indices.map(i => lud26Note(root, [account + HARDENED, c], i))
+  })
+  return {
+    account,
+    wallet: chain(CHAIN_WALLET, wallet),
+    change: chain(CHAIN_CHANGE, change),
+    shareable: shares.map(([share, indices]) => {
+      const below = [account + HARDENED, CHAIN_SHARE, share + HARDENED]
+      const node = below.reduce(ckdPriv, root.node)
       return {
-        purpose,
-        index,
-        notePubkey: bytesToHex(pubkey),
-        cp1: bech32mOf('cp', pubkey),
-        noteSecretKey: bytesToHex(secretKey),
-        sighash: bytesToHex(spend.sighash),
-        keyPathSignature: bytesToHex(spend.signature),
-        ck1: spend.ck1
+        share,
+        path: pathOf(root, below),
+        p: bytesToHex(node.privateKey),
+        P: bytesToHex(pointOf(node.privateKey).toBytes(true)),
+        chaincode: bytesToHex(node.chainCode),
+        cx1: cx1Of(node),
+        notes: indices.map(i => lud26Note(root, below, i))
       }
     })
+  }
+}
+
+const BIP32_SEED_1 = hexToBytes('000102030405060708090a0b0c0d0e0f')
+const BIP32_SEED_2 = hexToBytes(
+  'fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542'
+)
+
+const lud26Derivation = (seed, host, accounts) => {
+  const root = serviceRootOf(seed, host)
+  return {
+    seed: bytesToHex(seed),
+    domain: root.domain,
+    cashHashingKey: bytesToHex(root.cashHashingKey),
+    d: root.domainIndices,
+    accounts: accounts.map(([account, layout]) => lud26Account(root, account, layout))
+  }
+}
+
+const lud26Vectors = () => {
+  const derivation = [
+    lud26Derivation(BIP32_SEED_1, 'mint.example', [
+      [0, {wallet: [0, 1, 2, 5], change: [0, 1], shares: [[0, [0, 1, 2]], [1, [0]]]}],
+      [1, {wallet: [0], change: [0], shares: [[0, [0]]]}]
+    ]),
+    lud26Derivation(BIP32_SEED_2, 'cash.example.com', [
+      [0, {wallet: [0, 1, 2], change: [0], shares: [[0, [0, 1]], [1, [0]]]}]
+    ])
+  ]
+
+  // derivation[0]'s wallet note 0, whose pk has odd y.
+  const spendNote = derivation[0].accounts[0].wallet.notes[0]
+  const sk = hexToBytes(spendNote.sk)
+  if (spendNote.pk.slice(0, 2) !== '03') throw new Error('the LUD-26 spend vector no longer has an odd-y pk')
+  const signingSk = numberTo32(CURVE_N - bytesToNumber(sk))
+
+  // Proofs at derivation[1]'s domain: register share 0, update to share 1,
+  // unregister with share 1, now on file.
+  const {domain} = derivation[1]
+  const [oldShare, newShare] = derivation[1].accounts[0].shareable
+  const username = 'alice'
+  const proof = (action, cx1, signer) => {
+    const message = addressProofMessageOf(action, domain, username, cx1)
+    return {
+      message,
+      digest: bytesToHex(sha256(utf8ToBytes(message))),
+      sig: bytesToHex(signShare(hexToBytes(signer.p), message))
+    }
+  }
+
+  return {
+    description: `LUD-26's own test vectors (lnurl/luds ${LUDS_COMMIT}, 26-vectors.json), rebuilt from the primitives in the same shape. S = m/139'/d1/d2/d3/d4; wallet notes S/a'/0/i, change S/a'/1/i, share n S/a'/2/n' exported as cx1 = bech32m(chaincode || P compressed), its notes S/a'/2/n'/i. Q = x(pk).`,
+    derivation,
+    key_path_spend: {
+      description: "A ck1 for derivation[0]'s wallet note 0, whose pk has odd y: the BIP-340 signer negates sk before signing.",
+      path: spendNote.path,
+      sk: spendNote.sk,
+      pk: spendNote.pk,
+      signing_sk: bytesToHex(signingSk),
+      ...keyPathSpendVectorOf(sk, derivation[0].domain)
+    },
+    registration: {
+      description: "Proofs for username alice at derivation[1]'s domain: register account 0 share 0's cx1, update to share 1's cx1 (sig by the key on file, newsig by the new cx1's key over the register message), then unregister with share 1's key.",
+      username,
+      domain,
+      cx1: oldShare.cx1,
+      new_cx1: newShare.cx1,
+      register: proof('register', oldShare.cx1, oldShare),
+      update: {
+        sig: proof('update', newShare.cx1, oldShare),
+        newsig: proof('register', newShare.cx1, newShare)
+      },
+      unregister: proof('unregister', null, newShare)
+    }
+  }
+}
+
+const specVectors = {
+  version: VERSION,
+  spec: SPEC,
+  description: `LUD-25's and LUD-26's own published test vectors (lnurl/luds ${LUDS_COMMIT}, 25-vectors.json and 26-vectors.json), rebuilt here from the primitives in exactly their shape and field names, so an implementation can load lud25 and lud26 in place of the luds files. The selfcheck compares every value with a typed copy of those files and re-derives each of them independently.`,
+  luds: LUDS_COMMIT,
+  lud25: lud25Vectors(),
+  lud26: lud26Vectors()
+}
+
+// ---- vectors: key-path notes (part2.json) -------------------------------------
+//
+// Broader than the spec's own vectors: two BIP39 mnemonics across four hosts,
+// one of them with a port, every note with its ck1, the share notes derived
+// both privately and from the cx1, address proofs for every action, domain-
+// bound certificates, and the superseded schemes a wallet still sweeps. The
+// file keeps its name from when the draft called this half of LUD-25 "Part 2".
+
+const PART2_HOSTS = ['mint.example', 'mint.lnurlcash.com', 'moneyer.dev', 'localhost:3338']
+// The largest index that is not a hardened step, so an implementation that
+// reads a note index as anything wider than a non-hardened uint31 shows up.
+const MAX_NOTE_INDEX = HARDENED - 1
+const PART2_LAYOUT = [
+  [0, {wallet: [0, 1, 2, 1000, MAX_NOTE_INDEX], change: [0, 1], shares: [[0, [0, 1, 2, MAX_NOTE_INDEX]], [1, [0]]]}],
+  [1, {wallet: [0], change: [0], shares: [[0, [0]]]}]
+]
+
+const part2Branch = (mnemonic, host) => {
+  const seed = seedOf(mnemonic)
+  const root = serviceRootOf(seed, host)
+  return {
+    mnemonic,
+    seedHex: bytesToHex(seed),
+    host,
+    domain: root.domain,
+    cashHashingKey: bytesToHex(root.cashHashingKey),
+    domainIndices: root.domainIndices,
+    serviceRoot: nodeHex(root.node),
+    accounts: PART2_LAYOUT.map(([account, layout]) => accountRecord(root, account, layout))
   }
 }
 
@@ -786,11 +1135,11 @@ const part2Branches = [MNEMONIC_A, MNEMONIC_B].flatMap(m => PART2_HOSTS.map(h =>
 
 const PART2_MINT_KEY = hexToBytes('da6ec5c4342514114ee493a55ddc06d085d61eb78f0b7163e07cdb7f1f66ac05')
 
-const part2Certificate = (notePubkey, amountMsat) => {
-  const message = `LNURLcash:${amountMsat}:${notePubkey}`
+const part2Certificate = (domain, notePubkey, amountMsat, message = certificateMessageOf(domain, amountMsat, notePubkey)) => {
   const digest = lightningSignedDigest(message)
   const signature = signRecoverable(PART2_MINT_KEY, digest)
   return {
+    domain,
     notePubkey,
     amountMsat,
     message,
@@ -800,304 +1149,106 @@ const part2Certificate = (notePubkey, amountMsat) => {
   }
 }
 
-const firstNotes = part2Branches[0].notes
-const samplePubkey = hexToBytes(firstNotes[0].notePubkey)
-const sampleCp1 = firstNotes[0].cp1
+const firstBranch = part2Branches[0]
+const firstWallet = firstBranch.accounts[0].wallet
+const [firstShare, secondShare] = firstBranch.accounts[0].shares
+const samplePubkey = hexToBytes(firstWallet[0].notePubkey)
+const sampleCp1 = firstWallet[0].cp1
+const sampleCx1 = firstShare.cx1
+const sampleCx1Bytes = concat(hexToBytes(firstShare.chainCode), hexToBytes(firstShare.sharePubkey))
 const mixedCase = value => value.slice(0, 8) + value.slice(8, 20).toUpperCase() + value.slice(20)
+
 const part2Certificates = [
-  part2Certificate(firstNotes[0].notePubkey, 1000),
-  part2Certificate(firstNotes[1].notePubkey, 21000),
-  part2Certificate(firstNotes[2].notePubkey, 99999),
-  part2Certificate(firstNotes[3].notePubkey, 100000000)
+  part2Certificate(firstBranch.domain, firstWallet[0].notePubkey, 1000),
+  part2Certificate(firstBranch.domain, firstWallet[1].notePubkey, 21000),
+  part2Certificate(firstBranch.domain, firstWallet[2].notePubkey, 99999),
+  part2Certificate(firstBranch.domain, firstWallet[3].notePubkey, 100000000),
+  // the same note and amount at another domain: a different certificate
+  part2Certificate('moneyer.dev', firstWallet[0].notePubkey, 1000)
 ]
-// Bound to the SERVICE's own domain, so a proof one mint captured cannot be
-// replayed at another (25.md "Lightning Address auto-mint").
-const addressProof = (action, username, domain = PART2_HOSTS[0]) => {
-  const message = `LNURLcash:${action}:${domain}:${username}`
+
+// Before luds 92abbb3 the message named no domain. Still issued on notes
+// people hold, so a wallet still reads them, reported as legacy.
+const part2LegacyCertificates = [
+  part2Certificate(null, firstWallet[0].notePubkey, 1000, `LNURLcash:1000:${firstWallet[0].notePubkey}`),
+  part2Certificate(null, firstWallet[1].notePubkey, 21000, `LNURLcash:21000:${firstWallet[1].notePubkey}`)
+].map(({domain, ...rest}) => ({superseded: true, ...rest}))
+
+const addressProof = ({action, username, domain = firstBranch.domain, cx1 = null, signer, role}) => {
+  const message = addressProofMessageOf(action, domain, username, cx1)
   return {
+    ...(role ? {role} : {}),
     action,
     domain,
     username,
+    cx1,
     message,
     digest: bytesToHex(sha256(utf8ToBytes(message))),
-    indexZeroSecretKey: firstNotes[0].noteSecretKey,
-    indexZeroPubkey: firstNotes[0].notePubkey,
-    signature: bytesToHex(signSchnorr(hexToBytes(firstNotes[0].noteSecretKey), message))
+    signerCx1: signer.cx1,
+    signerPubkey: signer.sharePubkey.slice(2),
+    signature: bytesToHex(signShare(hexToBytes(signer.sharePrivateKey), message))
   }
 }
 
-// ---- vectors: LUD-25's own published "Test Vectors" section --------------
-//
-// Transcribed from 25.md itself (https://github.com/lnurl/luds/blob/lnurlcash/25.md#test-vectors),
-// not derived independently: this file exists so every implementation can
-// check itself against the exact numbers the spec document publishes,
-// generated here from the same primitives everything else in this script
-// uses, so a spec edit and a generator bug can never silently agree with
-// each other.
+const part2AddressProofs = [
+  addressProof({action: 'register', username: 'alice', cx1: firstShare.cx1, signer: firstShare}),
+  addressProof({action: 'update', username: 'alice', cx1: secondShare.cx1, signer: firstShare, role: 'sig'}),
+  addressProof({action: 'register', username: 'alice', cx1: secondShare.cx1, signer: secondShare, role: 'newsig'}),
+  addressProof({action: 'unregister', username: 'alice', signer: secondShare}),
+  addressProof({action: 'register', username: 'bob', cx1: firstShare.cx1, signer: firstShare}),
+  addressProof({action: 'register', username: 'alice', domain: 'moneyer.dev', cx1: firstShare.cx1, signer: firstShare}),
+  addressProof({action: 'register', username: 'Alice', cx1: firstShare.cx1, signer: firstShare})
+]
 
-const withPublicKey = node => ({
-  ...node,
-  publicKey: secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey)).toBytes(true)
-})
-
-const specNoteVector = (branch, purpose, index) => {
-  const branchXonly = branch.publicKey.slice(1)
-  const t = deriveTweakOf(branchXonly, branch.chainCode, purpose, index)
-  const {pubkey, secretKey} = noteKeysAt(branch, purpose, index)
-  const Q = secp256k1.Point.fromBytes(concat(Uint8Array.of(0x02), branchXonly))
-    .add(secp256k1.Point.BASE.multiply(t))
-    .toBytes(true)
-  return {
-    purpose,
-    index,
-    t: numberTo32(t),
-    Q,
-    pk: pubkey,
-    sk: secretKey,
-    cp1: bech32mOf('cp', pubkey)
-  }
-}
-
-const specVector1 = () => {
-  const seed = hexToBytes('000102030405060708090a0b0c0d0e0f')
-  const domain = 'mint.example'
-  const cashRoot = cashRootOf(seed)
-  const hashingNode = ckdPriv(cashRoot, 0)
-  const domainIndices = cashDomainIndices(cashRoot, domain)
-  const branch = withPublicKey(cashDomainNode(cashRoot, domain))
-  // Purpose 0 at 0, 1, 2 and 5, then index 0 on purposes 1 and 2, in 25.md's order.
-  const notes = [
-    ...[0, 1, 2, 5].map(i => specNoteVector(branch, PURPOSE_WALLET, i)),
-    specNoteVector(branch, PURPOSE_CHANGE, 0),
-    specNoteVector(branch, PURPOSE_ADDRESS, 0)
-  ]
-  return {
-    seedHex: bytesToHex(seed),
-    domain,
-    cashHashingKey: bytesToHex(hashingNode.privateKey),
-    domainIndices,
-    branchPrivateKey: bytesToHex(branch.privateKey),
-    branchPubkeyCompressed: bytesToHex(branch.publicKey),
-    branchPubkeyXOnly: bytesToHex(branch.publicKey.slice(1)),
-    branchParity: branch.publicKey[0] === 2 ? 'even' : 'odd',
-    chainCode: bytesToHex(branch.chainCode),
-    cx1: bech32mOf('cx', concat(branch.publicKey.slice(1), branch.chainCode)),
-    notes: notes.map(n => ({
-      purpose: n.purpose,
-      index: n.index,
-      t: bytesToHex(n.t),
-      Q: bytesToHex(n.Q),
-      pk: bytesToHex(n.pk),
-      sk: bytesToHex(n.sk),
-      cp1: n.cp1
-    }))
-  }
-}
-
-const specVector2 = () => {
-  const seed = hexToBytes(
-    'fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542'
-  )
-  const domain = 'cash.example.com'
-  const cashRoot = cashRootOf(seed)
-  const hashingNode = ckdPriv(cashRoot, 0)
-  const domainIndices = cashDomainIndices(cashRoot, domain)
-  const branch = withPublicKey(cashDomainNode(cashRoot, domain))
-  const notes = [0, 1, 2].map(i => specNoteVector(branch, PURPOSE_WALLET, i))
-  // The register/unregister proof key is purpose 0, index 0 (luds 50d740a).
-  const {secretKey: sk0} = noteKeysAt(branch, PURPOSE_WALLET, 0)
-  const username = 'alice'
-  // The vector's own domain, bound into the message since luds 265759f.
-  const addressProofOf = action => {
-    const message = `LNURLcash:${action}:${domain}:${username}`
-    return {
-      action,
-      domain,
-      username,
-      message,
-      digest: bytesToHex(sha256(utf8ToBytes(message))),
-      signature: bytesToHex(signSchnorr(sk0, message))
-    }
-  }
-  return {
-    seedHex: bytesToHex(seed),
-    domain,
-    cashHashingKey: bytesToHex(hashingNode.privateKey),
-    domainIndices,
-    branchPrivateKey: bytesToHex(branch.privateKey),
-    branchPubkeyCompressed: bytesToHex(branch.publicKey),
-    branchPubkeyXOnly: bytesToHex(branch.publicKey.slice(1)),
-    branchParity: branch.publicKey[0] === 2 ? 'even' : 'odd',
-    chainCode: bytesToHex(branch.chainCode),
-    cx1: bech32mOf('cx', concat(branch.publicKey.slice(1), branch.chainCode)),
-    notes: notes.map(n => ({
-      purpose: n.purpose,
-      index: n.index,
-      t: bytesToHex(n.t),
-      Q: bytesToHex(n.Q),
-      pk: bytesToHex(n.pk),
-      sk: bytesToHex(n.sk),
-      cp1: n.cp1
-    })),
-    addressProofs: [addressProofOf('register'), addressProofOf('unregister')]
-  }
-}
-
-// Test vector 3: the key-path spend of vector 1's pk_0 at mint.example,
-// every step from the domain to the signature, down to the serialised
-// canonical spend transaction a libbitcoinkernel verifier would be handed.
-const specVector3 = () => {
-  const v1 = specVector1()
-  const sk = hexToBytes(v1.notes[0].sk)
-  const Q = hexToBytes(v1.notes[0].pk)
-  const domain = 'mint.example'
-  const fields = sigMsgFieldsOf({Q, domain})
-  const sigMsg = concat(...fields.map(([, value]) => value))
-  const sighash = tapSighashOf(sigMsg)
-  const signature = schnorr.sign(sighash, sk, SCHNORR_AUX)
-  if (!schnorr.verify(signature, sighash, Q)) throw new Error('vector 3 does not verify')
-  return {
-    secretKey: bytesToHex(sk),
-    Q: bytesToHex(Q),
-    cp1: bech32mOf('cp', Q),
-    domain,
-    prevoutTxid: bytesToHex(prevoutTxidOf(domain)),
-    spentScriptPubKey: bytesToHex(p2trOf(Q)),
-    sigMsgFields: Object.fromEntries(fields.map(([name, value]) => [name, bytesToHex(value)])),
-    sigMsg: bytesToHex(sigMsg),
-    sighash: bytesToHex(sighash),
-    auxRand: bytesToHex(SCHNORR_AUX),
-    signature: bytesToHex(signature),
-    spendTransaction: bytesToHex(spendTransactionOf({domain, stack: [signature]})),
-    ck1: bech32mOf('ck', concat(Q, signature))
-  }
-}
-
-// An arbitrary mint signing key, the one test vector 4 names.
-const SPEC_MINT_SEED_LABEL = 'LUD-25 test vector mint node'
-const SPEC_MINT_KEY = sha256(utf8ToBytes(SPEC_MINT_SEED_LABEL))
-
-const specCertificate = (qHex, amountMsat) => {
-  const message = `LNURLcash:${amountMsat}:${qHex}`
-  const digest = lightningSignedDigest(message)
-  const signature = signRecoverable(SPEC_MINT_KEY, digest)
-  return {
-    amountMsat,
-    message,
-    digest: bytesToHex(digest),
-    signature: bytesToHex(signature),
-    cs1: bech32mOf(`cs${amountSuffix(amountMsat)}`, signature)
-  }
-}
-
-const specVector4 = () => {
-  // pk_0/pk_1 from vector 1
-  const v1 = specVector1()
-  const pk = v1.notes[0].pk
-  const otherPk = v1.notes[1].pk
-  return {
-    mintSeedLabel: SPEC_MINT_SEED_LABEL,
-    mintPrivateKey: bytesToHex(SPEC_MINT_KEY),
-    mintPubkey: bytesToHex(secp256k1.getPublicKey(SPEC_MINT_KEY, true)),
-    notePubkey: pk,
-    otherNotePubkey: otherPk,
-    certificates: [specCertificate(pk, 1000), specCertificate(pk, 21000000)]
-  }
-}
-
-// Test vector 5: a bearer note, both short forms, its full cw1, and a cs1
-// for it under vector 4's mint key.
-const specVector5 = () => {
-  const note = bearerNoteOf(hexToBytes('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'))
-  const cw1 = cw1Of({script: note.leaf, controlBlock: note.controlBlock, witness: [note.preimage]})
-  const certificate = specCertificate(bytesToHex(note.Q), 1000)
-  return {
-    preimage: bytesToHex(note.preimage),
-    h: bytesToHex(note.h),
-    leaf: bytesToHex(note.leaf),
-    tapleafHash: bytesToHex(note.leafHash),
-    H: bytesToHex(NUMS_H),
-    t: bytesToHex(numberTo32(note.t)),
-    Q: bytesToHex(note.Q),
-    controlBlock: bytesToHex(note.controlBlock),
-    cp1: bech32mOf('cp', note.Q),
-    cw1,
-    mintPubkey: bytesToHex(secp256k1.getPublicKey(SPEC_MINT_KEY, true)),
-    certificate,
-    certifiedNoteUrl: `lnurlw://mint.example/w?k1=${bytesToHex(note.preimage)}&c=${certificate.cs1}`
-  }
-}
-
-const specVectors = {
-  version: VERSION,
-  spec: SPEC,
-  description:
-    "LUD-25's own published \"Test Vectors\" section (25.md, lnurl/luds 50d740a), reproduced here from the primitives so every implementation checks itself against the exact numbers the spec document publishes, not just this project's own fixtures; the selfcheck compares every value with the spec text itself. Vectors 1 and 2 reuse BIP-32's own published test vector 1 and 2 seeds and land on opposite branch-key parities (vector 1 odd, vector 2 even), so both halves of the sk_i formula are exercised; each note carries its purpose (0 wallet, 1 change, 2 Lightning Address) and index, t = tagged_hash(\"LNURLcash/derive\", P || chaincode || ser32(purpose) || ser32(i)) mod n, and t and Q are shown alongside pk/sk. Vector 1 lists purpose 0 at i = 0, 1, 2 and 5, then i = 0 on purposes 1 and 2; vector 2 lists purpose 0 at i = 0, 1 and 2. Vector 2's register/unregister proofs are signed by the purpose-0 index-0 key over sha256(\"LNURLcash:<action>:<domain>:<username>\"), bound to the vector's own domain. Vector 3 is a key-path spend (ck1) of vector 1's purpose-0 pk_0 at mint.example: the prevout, every BIP-341 SigMsg field by name, the sighash, the BIP-340 signature with an all-zero aux_rand, and the serialised canonical spend transaction with its witness. Vector 4 is the mint's cs1 certificate over (hex(Q), amount) under a fixed key. Vector 5 is a bearer note: its preimage (the k1 short form), h (the cp1 short form), the OP_SHA256 <h> OP_EQUAL leaf, its tapleaf hash, the NUMS internal key H, the tweak, Q, the control block, cp1, the full cw1, a cs1 for it under vector 4's key, and the certified note URL carrying that cs1 as &c=.",
-  vector1: specVector1(),
-  vector2: specVector2(),
-  vector3: specVector3(),
-  vector4: specVector4(),
-  vector5: specVector5()
-}
-
-// The derivation as luds 6e865b1 had it, with no ser32(purpose): superseded,
-// recorded for one branch only so a wallet can recognise and sweep notes it
-// derived before purposes existed.
-const prePurposeRecord = (() => {
-  const branch = part2Branches[0]
-  const node = cashDomainNode(cashRootOf(seedOf(branch.mnemonic)), branch.host)
-  return {
-    superseded: true,
-    spec: 'lnurl/luds 6e865b1, before derivation purposes (50d740a)',
-    noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(i)) mod n',
-    mnemonic: branch.mnemonic,
-    host: branch.host,
-    cx1: branch.cx1,
-    notes: [0, 1, 2].map(index => {
-      const {secretKey, pubkey} = noteKeysAt(node, null, index)
-      return {index, notePubkey: bytesToHex(pubkey), cp1: bech32mOf('cp', pubkey), noteSecretKey: bytesToHex(secretKey)}
-    })
-  }
-})()
+const legacyCx1Bytes = hexToBytes(legacyBranch(MNEMONIC_A, 'mint.example').branchPubkey)
 
 const part2 = {
   version: VERSION,
   spec: SPEC,
-  description:
-    'LUD-25 key-path notes (the half of the draft once called Part 2): a note whose output key Q is a holder\'s own key, used as is with no BIP-86 tweak, spent by a ck1 and certified by a cs1. Every branch is the reference wallet\'s address path under a BIP39 seed (no passphrase): cashRoot is m/139\', domainIndices are the four raw uint32 read big-endian from HMAC-SHA256(key = the private key at m/139\'/0, msg = utf8(host)), and addressNode is m/139\'/d1/d2/d3/d4 as privateKey||chainCode hex. branchPubkey is its x-only key (branchParity says whether the full point has even y) and cx1 is bech32m("cx", branchPubkey || chainCode). Each note names its purpose (0: the wallet\'s own notes, including a split\'s p1 and every rotate or merge output; 1: a split\'s change p2; 2: Lightning Address auto-mint and internal transfer) and its index on that purpose, and t = tagged_hash("LNURLcash/derive", branchPubkey || chainCode || ser32_be(purpose) || ser32_be(index)) mod n; notePubkey = x(lift_x(branchPubkey) + t*G), which a watcher holding only the cx1 computes; noteSecretKey = ((branchParity even ? p : n - p) + t) mod n. A ck1 spends the note at one mint only: domain is the branch host\'s lowercase hostname with any port dropped, sighash is the BIP-341 key-path signature hash (SIGHASH_DEFAULT) of input 0 of the canonical spend transaction for that domain (prevout tagged_hash("LNURLcash/mint", domain), spent output (OP_1 <notePubkey>, 0); spends.json lists every SigMsg field), keyPathSignature is BIP-340 Schnorr over that sighash with an all-zero aux_rand, and ck1 is bech32m("ck", notePubkey || keyPathSignature). The same ck1 fails at any other domain. Register/unregister proofs are Schnorr signatures from the purpose-0 index-0 key over sha256("LNURLcash:<action>:<domain>:<username>"), separating action, mint and name. A certificate is a recoverable ECDSA signature by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<amount_msat>:<hex(notePubkey)>")); its bech32m HRP is "cs" plus the amount encoded by BOLT-11 rules. All four strings are bech32m with no length limit; all-uppercase is valid and mixed case is not (BIP-350). prePurpose records the superseded derivation without ser32(purpose) (luds 6e865b1) for one branch, only so a wallet can find and sweep notes it derived before purposes existed; no SERVICE derives there.',
+  description: `LUD-26 key-path notes (lnurl/luds ${LUDS_COMMIT}). Every branch is a BIP39 seed (no passphrase) at one host. domain is the host's lowercase name without its port; cashHashingKey is the private key at m/139'/0, domainIndices the four raw uint32 read big-endian from HMAC-SHA256(cashHashingKey, utf8(domain)), used as BIP-32 indices exactly as they fall, and serviceRoot S = m/139'/d1/d2/d3/d4 as privateKey||chainCode hex. Below S everything is plain BIP-32: account a's wallet notes at S/a'/0/i, its change at S/a'/1/i, and share n at S/a'/2/n', exported as cx1 = bech32m("cx", chainCode || P compressed), 65 bytes; share notes S/a'/2/n'/i equal CKDpub from the cx1 alone. A note's noteSecretKey is the BIP-32 private key at its path, notePubkeyCompressed its point, and notePubkey = Q = x(point), with no BIP-86 tweak. sighash is the BIP-341 key-path sighash of input 0 of the canonical spend transaction for domain, keyPathSignature BIP-340 with an all-zero aux_rand (the signer negates the key for an odd-y point), ck1 = bech32m("ck", Q || signature). certificates are recoverable ECDSA by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<domain>:<amount_msat>:<hex(Q)>")), HRP "cs" plus the BOLT-11 amount; legacyCertificates are the superseded message without the domain, which a wallet still reads. addressProofs are BIP-340 (all-zero aux_rand) by the share's own key over sha256 of "LNURLcash:register:<domain>:<username>:<cx1>", "LNURLcash:update:<domain>:<username>:<new cx1>" (by the key on file) or "LNURLcash:unregister:<domain>:<username>", the username lowercased; a PUT carries an update sig and a register newsig by the new share. legacy records the superseded tweak schemes, for sweeping only.`,
   conventions: {
-    addressBranch: "m/139'/d1/d2/d3/d4",
+    serviceRoot: "m/139'/d1/d2/d3/d4",
     hashingKey: "m/139'/0",
-    specTextSays: "m/139'/d1/d2/d3/d4 with the hashing key at m/139'/0 - the literal path every implementation uses",
-    noteTweak: 'tagged_hash("LNURLcash/derive", P || chainCode || ser32_be(purpose) || ser32_be(i)); pk_i = x(lift_x(P) + t*G); sk_i = (P even ? p : n - p) + t mod n; t is reduced mod n, as the spec requires (no index here reaches n)',
-    purposes: Object.fromEntries(PURPOSE_NAMES.map((name, purpose) => [purpose, name])),
-    purposeUse: 'purpose 0: every note the wallet mints, rotates into or merges into, and a split\'s p1; purpose 1: a split\'s change p2; purpose 2: a note credited by Lightning Address auto-mint or an internal transfer (the text/cpub hint\'s index). Each purpose has its own counter and its own recovery gap limit, and one cx1 covers all three.',
-    indexWidth: '4 bytes, big-endian, any uint32, never hardened; the same for purpose',
-    spendDomain: "the host's lowercase hostname, never its scheme or port; the derivation above still hashes the host exactly as stored, port included",
-    canonicalSpendTransaction: 'nVersion 2; vin[0] prevout (tagged_hash("LNURLcash/mint", domain), 0), empty scriptSig, nSequence 0xffffffff; vout[0] value 0, empty scriptPubKey; nLockTime 0; spent output (OP_1 <notePubkey>, 0)',
+    domainHashed: "the host's lowercase name without its port, the string the canonical spend transaction commits to",
+    walletChain: "S/a'/0/i",
+    changeChain: "S/a'/1/i",
+    share: "S/a'/2/n'",
+    shareNote: "S/a'/2/n'/i",
+    noteIndex: 'non-hardened, 0 to 2^31 - 1',
+    cx1Payload: 'chainCode (32) || P (33, compressed), BIP-32 order, 113 characters',
+    spendDomain: "the host's lowercase name, never its scheme or port",
+    canonicalSpendTransaction: 'nVersion 2; vin[0] prevout (tagged_hash("LNURLcash/mint", domain), 0), empty scriptSig, nSequence 0xffffffff; vout[0] value 0, empty scriptPubKey; nLockTime 0; spent output (OP_1 <Q>, 0)',
     ck1Signs: 'tagged_hash("TapSighash", 0x00 || SigMsg), the BIP-341 key-path sighash (SIGHASH_DEFAULT, spend_type 0x00) of input 0 of the canonical spend transaction for the domain',
     keyPathSignature: 'BIP-340 Schnorr, 64 bytes, all-zero aux_rand, so a ck1 is a deterministic function of the key and the domain',
     ck1Payload: '32-byte x-only public key || 64-byte Schnorr signature',
-    addressProofMessage: 'LNURLcash:<register|unregister>:<domain>:<username>',
-    addressProofMessageEncoding: 'UTF-8 bytes, sha256-hashed to a 32-byte digest, then BIP-340 Schnorr by the branch\'s purpose-0 index-0 key',
-    certificateMessage: 'LNURLcash:<amount_msat>:<hex(pk)>',
-    certificateHrp: 'cs || BOLT11_amount_suffix(amount_msat)'
+    addressProofMessages: {
+      register: 'LNURLcash:register:<domain>:<username>:<cx1>',
+      update: 'LNURLcash:update:<domain>:<username>:<new cx1>',
+      unregister: 'LNURLcash:unregister:<domain>:<username>'
+    },
+    addressProofSigner: "the share's own key p at S/a'/2/n', verified against x(P) of the cx1 being registered, or of the one on file",
+    addressProofEncoding: 'UTF-8, username lowercased, sha256-hashed to 32 bytes, BIP-340 with an all-zero aux_rand',
+    certificateMessage: 'LNURLcash:<domain>:<amount_msat>:<hex(Q)>',
+    certificateHrp: 'cs || BOLT11_amount_suffix(amount_msat)',
+    cs1Payload: 'r || s || recovery-id, 65 bytes, recovery-id 0 to 3'
   },
   mint: {
     privateKey: bytesToHex(PART2_MINT_KEY),
     mintPubkey: bytesToHex(secp256k1.getPublicKey(PART2_MINT_KEY, true))
   },
   branches: part2Branches,
-  prePurpose: prePurposeRecord,
   certificates: part2Certificates,
-  addressProofs: [
-    addressProof('register', 'alice'),
-    addressProof('unregister', 'alice'),
-    addressProof('register', 'bob'),
-    addressProof('register', 'alice', 'moneyer.dev')
-  ],
+  legacyCertificates: part2LegacyCertificates,
+  addressProofs: part2AddressProofs,
+  legacy: {
+    superseded: true,
+    description:
+      'The tweak schemes before LUD-26 (luds a6c4652), for one mnemonic at every host, so a wallet can find and sweep notes it derived under them. node is m/139\'/d1/d2/d3/d4 for the host exactly as stored, port included; cx1 is the 64-byte bech32m("cx", x(P) || chainCode). notes: t = tagged_hash("LNURLcash/derive", x(P) || chainCode || ser32(purpose) || ser32(index)) mod n (luds 50d740a, purposes 0 wallet, 1 change, 2 Lightning Address); prePurpose: the same without ser32(purpose) (luds 6e865b1). notePubkey = x(lift_x(x(P)) + t·G), noteSecretKey = ((P even ? p : n - p) + t) mod n.',
+    branches: PART2_HOSTS.map(host => legacyBranch(MNEMONIC_A, host))
+  },
   valid: [
-    {type: 'cp1', value: sampleCp1.toUpperCase(), bytes: bytesToHex(samplePubkey), why: 'all uppercase is the same string (BIP-350)'}
+    {type: 'cp1', value: sampleCp1.toUpperCase(), bytes: bytesToHex(samplePubkey), why: 'all uppercase is the same string (BIP-350)'},
+    {type: 'cx1', value: sampleCx1.toUpperCase(), bytes: bytesToHex(sampleCx1Bytes), why: 'all uppercase is the same string (BIP-350)'}
   ],
   invalid: [
     {type: 'cp1', value: bech32mOf('ck', samplePubkey), why: 'the ck human-readable part on a cp1 payload'},
@@ -1106,58 +1257,44 @@ const part2 = {
     {type: 'cp1', value: sampleCp1.slice(0, -1) + (sampleCp1.endsWith('q') ? 'p' : 'q'), why: 'the checksum does not verify'},
     {type: 'cp1', value: mixedCase(sampleCp1), why: 'mixed case (BIP-350)'},
     {type: 'ck1', value: sampleCp1, why: 'a cp1 is not a ck1'},
-    {type: 'ck1', value: bech32mOf('ck', hexToBytes(firstNotes[0].keyPathSignature)), why: '64-byte signature without the 32-byte public key'},
-    {type: 'cs1', value: firstNotes[0].ck1, why: 'a ck1 is not a cs1'},
+    {type: 'ck1', value: bech32mOf('ck', hexToBytes(firstWallet[0].keyPathSignature)), why: '64-byte signature without the 32-byte public key'},
+    {type: 'cs1', value: firstWallet[0].ck1, why: 'a ck1 is not a cs1'},
     {type: 'cs1', value: bech32mOf('cs', hexToBytes(part2Certificates[0].signature)), why: 'legacy fixed cs HRP carries no amount'},
-    {type: 'cx1', value: bech32mOf('cx', samplePubkey), why: '32 bytes, not 64'}
+    {
+      type: 'cs1',
+      value: bech32mOf('cs10n', concat(hexToBytes(part2Certificates[0].signature).slice(0, 64), Uint8Array.of(4))),
+      why: 'a recovery-id above 3'
+    },
+    {type: 'cs1', value: bech32mOf('cs10n', hexToBytes(part2Certificates[0].signature).slice(0, 64)), why: '64 bytes, not 65'},
+    {type: 'cx1', value: bech32mOf('cx', concat(legacyCx1Bytes, hexToBytes(legacyBranch(MNEMONIC_A, 'mint.example').chainCode))), why: 'the superseded 64-byte x(P) || chainCode shape'},
+    {type: 'cx1', value: bech32mOf('cx', concat(sampleCx1Bytes.slice(0, 32), Uint8Array.of(0x04), sampleCx1Bytes.slice(33))), why: 'P is not a compressed point (prefix 04)'},
+    {type: 'cx1', value: bech32mOf('cx', concat(sampleCx1Bytes.slice(0, 32), Uint8Array.of(0x02), new Uint8Array(32).fill(0xff))), why: 'P is not on the curve'},
+    {type: 'cx1', value: mixedCase(sampleCx1), why: 'mixed case (BIP-350)'}
   ]
 }
 
-// ---- vectors: Nostr-key address branches (an extension, not LUD-25) -------
+// ---- vectors: Nostr-key branches (an extension, not LUD-25/26) ------------------
 //
 // A holder with no BIP39 words - a hardware signer that keeps only its
 // identity key, or a wallet that never made any - can still be paid to keys
 // of its own: seed = HMAC-SHA256(key = the Nostr identity's secret key,
-// msg = "LNURLcash/nostr-seed"), then the Part 2 address path above from
-// that seed, unchanged. heartwood-esp32 derives this on the device and
-// lnurlcash-kit exports it. A mint only ever sees a cx1, so nothing here
-// changes what a mint does.
+// msg = "LNURLcash/nostr-seed"), then LUD-26's tree from that seed,
+// unchanged. A mint only ever sees a cx1, so nothing here changes what a
+// mint does.
 
 const NOSTR_SEED_LABEL = 'LNURLcash/nostr-seed'
 
 const nostrSeedCase = (identityHex, host) => {
   const seed = hmac(sha256, hexToBytes(identityHex), utf8ToBytes(NOSTR_SEED_LABEL))
-  const node = cashDomainNode(cashRootOf(seed), host)
-  const branchPubkey = secp256k1.Point.BASE.multiply(bytesToNumber(node.privateKey)).toBytes(true).slice(1)
-  const domain = spendDomainOf(host)
+  const root = serviceRootOf(seed, host)
   return {
     identity: identityHex,
-    identityPubkey: bytesToHex(secp256k1.Point.BASE.multiply(bytesToNumber(hexToBytes(identityHex))).toBytes(true).slice(1)),
+    identityPubkey: bytesToHex(pointOf(hexToBytes(identityHex)).toBytes(true).slice(1)),
     host,
-    domain,
+    domain: root.domain,
     seed: bytesToHex(seed),
-    addressNode: nodeHex(node),
-    cx1: bech32mOf('cx', concat(branchPubkey, node.chainCode)),
-    notes: [
-      [PURPOSE_WALLET, 0],
-      [PURPOSE_WALLET, 1],
-      [PURPOSE_WALLET, 7],
-      [PURPOSE_CHANGE, 0],
-      [PURPOSE_ADDRESS, 0]
-    ].map(([purpose, index]) => {
-      const {secretKey, pubkey} = noteKeysAt(node, purpose, index)
-      const spend = keyPathSpendOf(secretKey, domain)
-      return {
-        purpose,
-        index,
-        noteSecretKey: bytesToHex(secretKey),
-        notePubkey: bytesToHex(pubkey),
-        cp1: bech32mOf('cp', pubkey),
-        sighash: bytesToHex(spend.sighash),
-        keyPathSignature: bytesToHex(spend.signature),
-        ck1: spend.ck1
-      }
-    })
+    serviceRoot: nodeHex(root.node),
+    accounts: [accountRecord(root, 0, {wallet: [0, 1, 7], change: [0], shares: [[0, [0]]]})]
   }
 }
 
@@ -1169,7 +1306,7 @@ const nostrSeed = {
   spec: SPEC,
   extension: true,
   description:
-    'An extension, not LUD-25: a Part 2 address branch rooted in a Nostr identity key, for a holder with no BIP39 words. seed = HMAC-SHA256(key = identity (the 32-byte secret key), msg = utf8("LNURLcash/nostr-seed")); the branch is then the reference wallet\'s m/139\'/d1..d4 from that seed exactly as in part2.json, and every note field means what it means there, purpose included: domain is the case host\'s lowercase hostname without its port, and each ck1 signs that domain\'s key-path sighash. identityPubkey is the identity\'s x-only public key, the npub a lightning address belongs to. heartwood-esp32 derives this on the device and lnurlcash-kit exports it (deriveNostrAddressNode); a mint sees an ordinary cx1.',
+    'An extension, not LUD-25/26: a LUD-26 tree rooted in a Nostr identity key, for a holder with no BIP39 words. seed = HMAC-SHA256(key = identity (the 32-byte secret key), msg = utf8("LNURLcash/nostr-seed")); everything below is LUD-26 from that seed exactly as in part2.json, and every field means what it means there. identityPubkey is the identity\'s x-only public key, the npub a lightning address belongs to. A mint sees an ordinary cx1.',
   label: NOSTR_SEED_LABEL,
   cases: [
     nostrSeedCase(IDENTITY_ONE, 'moneyer.dev'),
@@ -1492,11 +1629,15 @@ const grossUpCase = (netMsat, fee, why) => ({
   why
 })
 
+// A parse expectation: the mint fee and the LUD-26 address fee, null when
+// none is advertised.
+const parsedFee = (fee, addressFeeMsat = null) => ({...fee, addressFeeMsat})
+
 const fees = {
   version: VERSION,
   spec: SPEC,
   description:
-    'Optional mint fees (LUD-25). A SERVICE advertises what it withholds on minting via an extra ["text/plain", "Mint fees: <base_fee_msat>,<fee_percent_ppm>"] entry in the payRequest metadata, so a WALLET can warn the payer that the note it ends up holding is worth less than the invoice it paid. A SERVICE that omits the entry is fee-free, not unknown.',
+    'Optional mint fees (LUD-25) and the address fee (LUD-26). A SERVICE advertises what it withholds on minting with a "Mint fees: <base_fee_msat>,<fee_ppm>" token anywhere in its text/plain metadata entry, so a WALLET can warn the payer that the note it ends up holding is worth less than the invoice it paid. The values are plain base-10 integers separated by commas and end at whitespace or the end of the entry; "Mint fees:" may be followed by spaces. A third value is LUD-26\'s address fee per Lightning Address registration (addressFeeMsat; null when absent or unparseable, which a WALLET reads as free and so refuses any registration invoice). A SERVICE without the token is fee-free; a token whose first two values do not parse is a fee the WALLET does not know (expect null, unknown: true), and it relies on maxWithdrawable alone.',
   formula: {
     apply: 'max(0, gross - base_fee_msat - floor(gross * fee_percent_ppm / 1_000_000))',
     grossUp: 'the smallest gross for which apply(gross) == net',
@@ -1508,16 +1649,23 @@ const fees = {
   parse: [
     {
       metadata: meta([['text/plain', 'a mint'], ['text/plain', 'Mint fees: 1000,2000']]),
-      expect: FEE_A
+      expect: parsedFee(FEE_A)
     },
     {
       metadata: meta([['text/plain', 'Mint fees:1000,2000']]),
-      expect: FEE_A,
+      expect: parsedFee(FEE_A),
       why: 'whitespace after the colon is optional'
     },
     {
+      metadata: meta([['text/plain', 'a mint. Mint fees: 1000,2000 and a description']]),
+      expect: parsedFee(FEE_A),
+      why: 'the token is found anywhere in the entry, and its values end at whitespace (luds 92e430f)'
+    },
+    {
       metadata: meta([['text/plain', 'Mint fees: 1000 , 2000 ']]),
-      expect: FEE_A
+      expect: null,
+      unknown: true,
+      why: 'values end at whitespace, so this is one value: the token is present but does not parse'
     },
     {
       metadata: meta([['text/plain', 'a mint']]),
@@ -1532,11 +1680,13 @@ const fees = {
     {
       metadata: meta([['text/plain', 'Mint fees: 0,1000000']]),
       expect: null,
+      unknown: true,
       why: 'a fee of 100% or more can never net anything, and would make a naive gross-up walk hang - refuse it as no valid entry'
     },
     {
       metadata: meta([['text/plain', 'Mint fees: 0,2000000']]),
       expect: null,
+      unknown: true,
       why: 'above 100%'
     },
     {
@@ -1547,26 +1697,55 @@ const fees = {
     {
       metadata: meta([['text/plain', 'Mint fees: -1,2000']]),
       expect: null,
+      unknown: true,
       why: 'negative components are not a valid advertisement'
     },
     {
       metadata: meta([['text/plain', 'Mint fees: 1000']]),
       expect: null,
+      unknown: true,
       why: 'both components are required'
     },
     {
-      metadata: meta([['text/plain', 'Mint fees: 1000,2000,3000']]),
+      metadata: meta([['text/plain', 'Mint fees: 1000,2000,21000']]),
+      expect: parsedFee(FEE_A, 21000),
+      why: 'a third value is the LUD-26 address fee'
+    },
+    {
+      metadata: meta([['text/plain', 'Mint fees: 0,0,21000']]),
+      expect: parsedFee(FEE_FREE, 21000),
+      why: 'an address fee alone, with no mint fee'
+    },
+    {
+      metadata: meta([['text/plain', 'Mint fees: 0,0,0']]),
       expect: null,
-      why: 'exactly two components'
+      why: 'every value zero is identical to no fee'
+    },
+    {
+      metadata: meta([['text/plain', 'Mint fees: 1000,2000,x']]),
+      expect: parsedFee(FEE_A),
+      why: 'an unparseable third value leaves the mint fee standing and the address fee unadvertised'
+    },
+    {
+      metadata: meta([['text/plain', 'Mint fees: 1000,2000,21000,7']]),
+      expect: parsedFee(FEE_A, 21000),
+      why: 'values after the third are defined by no LUD yet and ignored'
+    },
+    {
+      metadata: meta([['text/plain', 'Mint fees: 1000,2000 Address fee: 21000']]),
+      expect: parsedFee(FEE_A),
+      why: 'the separate "Address fee:" token of luds 92abbb3 was folded into Mint fees in 92e430f and is no longer read'
     },
     {
       metadata: meta([['text/plain', 'Mint fees: 99999999999999999999,2000']]),
       expect: null,
+      unknown: true,
       why: 'digits past 2^53 lose integer precision in most languages - refuse rather than estimate with a mangled fee'
     },
     {
       metadata: meta([['text/plain', 'Mint fees: 1000,99999999999999999999']]),
       expect: null,
+      unknown: true,
       why: 'the same for the ppm component (a ppm this large fails the 100% rule regardless)'
     },
     {metadata: 'not json', expect: null},
@@ -1574,18 +1753,18 @@ const fees = {
     {metadata: '[]', expect: null},
     {
       metadata: meta([['text/plain', 'Mint fees: 500,0']]),
-      expect: {baseFeeMsat: 500, feePpm: 0}
+      expect: parsedFee({baseFeeMsat: 500, feePpm: 0})
     },
     {
       metadata: meta([['text/plain', 'Mint fees: 0,5000']]),
-      expect: {baseFeeMsat: 0, feePpm: 5000}
+      expect: parsedFee({baseFeeMsat: 0, feePpm: 5000})
     },
     {
       metadata: meta([
         ['text/plain', 'Mint fees: 500,0'],
         ['text/plain', 'Mint fees: 1000,2000']
       ]),
-      expect: {baseFeeMsat: 500, feePpm: 0},
+      expect: parsedFee({baseFeeMsat: 500, feePpm: 0}),
       why: 'the first valid advertisement wins'
     }
   ],

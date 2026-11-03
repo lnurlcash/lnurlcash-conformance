@@ -51,12 +51,20 @@ const recoversTo = (digest, sig, pubkeyHex) => {
   return false
 }
 
-// A certificate: cs1 over "LNURLcash:<amount_msat>:<hex(Q)>". Every note
-// has a public Q, a bearer note included, so this is the one message a
-// certificate signs (luds 6e865b1). `subjectHex` is hex(Q), or a bearer
-// note's h when the grader is naming the pre-taproot mistake.
-const verifyCertificate = (subjectHex, amountMsat, sig, mintPubkeyHex) =>
-  recoversTo(signedMessageDigest(`LNURLcash:${amountMsat}:${subjectHex}`), sig, mintPubkeyHex)
+// A certificate: cs1 over "LNURLcash:<domain>:<amount_msat>:<hex(Q)>". Every
+// note has a public Q, a bearer note included, so this is the one message a
+// certificate signs (luds 6e865b1), bound to the mint's domain since luds
+// 92abbb3. `subjectHex` is hex(Q), or a bearer note's h when the grader is
+// naming the pre-taproot mistake; a null `domain` is the superseded message
+// without one, which the grader only ever names as a mistake.
+const verifyCertificate = (subjectHex, amountMsat, sig, mintPubkeyHex, domain = null) =>
+  recoversTo(
+    signedMessageDigest(
+      domain === null ? `LNURLcash:${amountMsat}:${subjectHex}` : `LNURLcash:${domain}:${amountMsat}:${subjectHex}`
+    ),
+    sig,
+    mintPubkeyHex
+  )
 
 // cs1 and cx1 are bech32m. cs1 has a variable HRP: "cs" plus the amount
 // under BOLT-11's amount rules. Longer than BIP-173's 90 characters by
@@ -241,6 +249,11 @@ const proportionalFee = (gross, ppm) =>
 export const applyMintFee = (gross, fee) =>
   Math.max(0, gross - (fee?.baseFeeMsat ?? 0) - proportionalFee(gross, fee?.feePpm ?? 0))
 
+// "Mint fees: <base>,<ppm>[,<address fee>...]" anywhere in a text/plain
+// entry, its values ending at whitespace (luds 92e430f). The third value is
+// LUD-26's address fee, which the grader does not use.
+const MINT_FEES_TOKEN = /Mint fees:\s*(\d+),(\d+)(?:,\S*)?(?=\s|$)/
+
 // The LUD-25 fee advertisement, parsed from payRequest metadata: null for
 // a fee-free (or silent) mint. The grader needs it because the spec's fee
 // algebra changes what a compliant split and merge return.
@@ -254,7 +267,7 @@ export const parseAdvertisedMintFee = metadata => {
   if (!Array.isArray(entries)) return null
   for (const entry of entries) {
     if (!Array.isArray(entry) || entry[0] !== 'text/plain') continue
-    const match = typeof entry[1] === 'string' && entry[1].match(/^Mint fees:\s*(\d+)\s*,\s*(\d+)\s*$/)
+    const match = typeof entry[1] === 'string' && entry[1].match(MINT_FEES_TOKEN)
     if (!match) continue
     const baseFeeMsat = Number(match[1])
     const feePpm = Number(match[2])
@@ -375,10 +388,10 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
     const entries = JSON.parse(pay.metadata)
     assert(Array.isArray(entries), 'metadata is not an array')
     const fee = entries.find(
-      e => Array.isArray(e) && e[0] === 'text/plain' && /^Mint fees:/.test(e[1] ?? '')
+      e => Array.isArray(e) && e[0] === 'text/plain' && /Mint fees:/.test(e[1] ?? '')
     )
     if (!fee) return 'no fee advertised (fee-free)'
-    const match = fee[1].match(/^Mint fees:\s*(\d+)\s*,\s*(\d+)\s*$/)
+    const match = fee[1].match(MINT_FEES_TOKEN)
     assert(match, `malformed fee entry: ${JSON.stringify(fee[1])}`)
     assert(
       Number(match[2]) < 1_000_000,
@@ -1148,10 +1161,16 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     if (certificate.amountMsat !== amountMsat) {
       return {problem: `the cs1 says ${certificate.amountMsat} msat but the note is worth ${amountMsat} msat`}
     }
-    const signedBy = signers().find(key => verifyCertificate(qHex, amountMsat, certificate.signature, key))
+    const signedBy = signers().find(key => verifyCertificate(qHex, amountMsat, certificate.signature, key, domain))
     if (signedBy) return {signedBy}
+    if (signers().some(key => verifyCertificate(qHex, amountMsat, certificate.signature, key))) {
+      return {
+        problem:
+          'the cs1 signs the superseded message without the domain - since luds 92abbb3 a certificate signs LNURLcash:<domain>:<amount_msat>:<hex(Q)>, so a wallet checking this one offline rejects it'
+      }
+    }
     const h = hOfQ.get(qHex)
-    if (h && signers().some(key => verifyCertificate(h, amountMsat, certificate.signature, key))) {
+    if (h && [domain, null].some(d => signers().some(key => verifyCertificate(h, amountMsat, certificate.signature, key, d)))) {
       return {
         problem:
           "the cs1 signs the bearer note's h, the pre-taproot message - LUD-25 certifies every note over hex(Q), so a wallet checking this one offline rejects it"
@@ -1917,7 +1936,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   // has a SERVICE certify every note (a SHOULD), and a certificate is only
   // any use offline if it signs exactly (hex(Q), value): one that does not
   // is a wallet rejecting a good note, so it fails.
-  await report.check('every certificate verifies over hex(Q) and the note value', async () => {
+  await report.check('every certificate verifies over the domain, hex(Q) and the note value', async () => {
     const present = certificates.filter(c => c.sig !== null)
     const wrong = []
     const signedBy = new Set()
