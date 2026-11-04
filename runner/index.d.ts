@@ -8,10 +8,12 @@
 // own. Shipping the declarations puts that in one place, next to the code
 // they describe.
 
-/** what the mint fee is, in LUD-25's own two terms */
+/** what the mint fee is, in LUD-25's own two terms, and LUD-26's address fee */
 export interface MintFee {
   baseFeeMsat: number
   feePpm: number
+  /** per Lightning Address registration; null (or absent) where registering is free */
+  addressFeeMsat?: number | null
 }
 
 export type ReportStatus = 'pass' | 'fail' | 'warn' | 'skip'
@@ -62,34 +64,58 @@ export declare const invoiceAmountMsat: (pr: string) => number | null
 /** what a gross mint of `gross` msat leaves once `fee` is withheld */
 export declare const applyMintFee: (gross: number, fee: MintFee | null) => number
 
-/** the `Mint fees: base,ppm` line out of a payRequest's metadata array */
+/** the `Mint fees: base,ppm[,address fee]` token out of a payRequest's metadata array */
 export declare const parseAdvertisedMintFee: (metadata: string) => MintFee | null
 
-export interface InternalTransferHint {
-  cx1: string
-  index: number
-  pubkeyXOnly: Uint8Array
-  chainCode: Uint8Array
-}
-
-/** the `text/cpub` branch and next purpose-2 index hint out of registered-address metadata */
-export declare const parseInternalTransferHint: (
+/**
+ * The same, read as fees.json does: `unknown` when a token is present and
+ * does not parse, `entry` the text it was found in.
+ */
+export declare const readFeeAdvertisement: (
   metadata: string
-) => InternalTransferHint | null
+) => {fee: MintFee | null; unknown: boolean; entry: string | null}
+
+/** a LUD-26 share's cx1: bech32m("cx", chainCode || compressed P) */
+export declare const encodeCx1: (chainCode: Uint8Array, compressedPubkey: Uint8Array) => string
+export declare const decodeCx1: (cx1: string) => {chainCode: Uint8Array; pubkey: Uint8Array} | null
+
+/** the message a LUD-26 register, update or unregister proof signs */
+export declare const registrationMessage: (
+  action: 'register' | 'update' | 'unregister',
+  domain: string,
+  username: string,
+  cx1?: string | null
+) => string
+/** hex BIP-340 signature over sha256(message) */
+export declare const signRegistration: (message: string, secretKey: Uint8Array, auxRand?: Uint8Array) => string
+export declare const verifyRegistration: (message: string, sigHex: string, xOnlyPubkey: Uint8Array) => boolean
 
 /** the read-only mint checks: payRequest, withdrawLink, fees, verify, extensions */
 export declare const gradeMint: (
   payUrl: string,
   report: Report,
   options?: {
-    /** Grade as a LUD-25 cx1-registered Lightning Address rather than a
-     * mint payLink: it mints on the next unused key of its own branch, so a
-     * comment naming no output is free text and must not fail the payment.
-     * Declared, not detected - an unsafe preimage-keyed fallback looks
-     * identical before settlement. */
+    /** Grade as a LUD-26 cx1-registered Lightning Address rather than a
+     * mint payLink: no commentAllowed, a plain LUD-16 payment, mint@'s
+     * withdrawLink and fees, and a +tag paying the same share. Declared,
+     * not detected - an unsafe preimage-keyed fallback looks identical
+     * before settlement. */
     registeredAddress?: boolean
   }
-) => Promise<void>
+) => Promise<unknown>
+
+/**
+ * MUTATING. Registers a throwaway username on the mint with a share only
+ * the grader holds, probes every refusal LUD-26 requires, updates it to a
+ * second share and unregisters it. Against a mint charging an address fee
+ * the registration is held on an unpaid invoice, which is held to the
+ * advertised fee, and the update and unregister checks are skipped.
+ */
+export declare const gradeRegistration: (
+  mint: string,
+  report: Report,
+  options?: {username?: string}
+) => Promise<{username: string; domain: string; addressFeeMsat: number | null} | undefined>
 
 /**
  * Read-only. Needs a freshly minted, never-rotated note and what its mint

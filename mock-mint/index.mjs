@@ -12,8 +12,9 @@
 
 import {createServer} from 'node:http'
 import {bech32m} from '@scure/base'
-import {sha256} from '@noble/hashes/sha2.js'
-import {secp256k1} from '@noble/curves/secp256k1.js'
+import {sha256, sha512} from '@noble/hashes/sha2.js'
+import {hmac} from '@noble/hashes/hmac.js'
+import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {randomBytes} from 'node:crypto'
 import {realpathSync} from 'node:fs'
@@ -30,11 +31,6 @@ const concat = (...parts) => {
     offset += part.length
   }
   return out
-}
-
-const taggedHash = (tag, ...parts) => {
-  const tagHash = sha256(utf8ToBytes(tag))
-  return sha256(concat(tagHash, tagHash, ...parts))
 }
 
 const ser32 = value => {
@@ -68,7 +64,9 @@ const fakeInvoice = (amountMsat, preimage) => {
   // filler in the data part. Nothing here is payable, and nothing should
   // pretend otherwise - a conformance run must never be mistakable for a
   // mainnet one.
-  const data = bytesToHex(sha256(hexToBytes(preimage))).replace(/[b-f]/g, 'q')
+  // The filler keeps to the bech32 charset and, above all, holds no '1',
+  // or the human-readable part ends inside it and the amount reads as none.
+  const data = bytesToHex(sha256(hexToBytes(preimage))).replace(/[b-f]/g, 'q').replace(/1/g, 'p')
   return `lnbc${encodeAmountHrp(amountMsat)}1${data}`
 }
 
@@ -169,9 +167,6 @@ const DEFAULTS = {
   // alone, which a current wallet reads as no certificate at all; 'both'
   // sends each under both names, as a mint mid-transition does
   certificateNames: 'c',
-  // the payRequest metadata type a registered address's internal-transfer
-  // hint travels under: 'text/cpub' as of luds 50d740a, 'text/xpub' before
-  addressHintType: 'text/cpub',
   // accept any ck1 whose Q is outstanding without checking its signature,
   // so a spend bound to another mint's domain, or to none, opens the note
   unverifiedCk1: false,
@@ -328,13 +323,54 @@ const DEFAULTS = {
   // the draft's line 80 behaviour and is now the defect - see
   // docs/COMMENT-IS-MANDATORY.md.
   commentFallsBack: false,
-  // LUD-25 Part 2: a registered Lightning Address with a cx1 against it.
-  // Not a defect - this mint has a key to mint under whatever the comment
-  // says (the next unused one on its branch), so a comment naming no
-  // output is the free text LUD-12 invites and is ignored, not refused.
-  // The note still lands under a branch key and never under the payment
-  // preimage, which is the whole difference from `commentFallsBack`.
+  // ---- LUD-26 Lightning Address ----
+  //
+  // Registration (POST, PUT, DELETE on /.well-known/lnurlp/<username>) is
+  // always served. registeredAddress pre-registers registeredUsername
+  // against 26-vectors.json's first share (derivation[1], account 0, share
+  // 0), already paid for, so a grade or a test can pay an address without
+  // registering one first and check the notes it credits against luds' own.
   registeredAddress: false,
+  registeredUsername: 'alice',
+  // the LUD-26 address fee per registration, advertised as the third value
+  // of Mint fees; 0 is free
+  addressFeeMsat: 0,
+  // what the registration invoice actually charges, when it is not what is
+  // advertised: above it, or anything at all with no fee advertised
+  addressFeeChargedMsat: undefined,
+  // non-compliant: serve the address before its fee settles
+  publishesUnpaidAddress: false,
+  // non-compliant: accept any sig and newsig, never verifying either
+  registrationUnverified: false,
+  // non-compliant: verify the 0.15 register message, which binds no cx1
+  registrationWithoutCx1: false,
+  // non-compliant: let a POST replace a registration
+  overwritesRegistration: false,
+  // non-compliant: true accepts any cx1 again; 'afterUnregister' forgets a
+  // cx1 once its username is unregistered; 'byCx1' compares the cx1 string
+  // rather than x(P), so another chain code or parity walks past
+  reusesCx1: false,
+  // non-compliant: register the reserved username mint, or one with a +
+  acceptsReservedUsernames: false,
+  // non-compliant: verify only one of an update's two proofs, 'sig' or
+  // 'newsig' being the one checked
+  updateChecksOnly: undefined,
+  // non-compliant: let the key on file be anything on unregister
+  unregisterUnverified: false,
+  // non-compliant: refuse with reasons other than LUD-26's exact strings
+  // ('Unknown user.' and the like)
+  registrationReasons: 'lud26',
+  // non-compliant: leave Access-Control-Allow-Origin off POST, PUT and
+  // DELETE responses, or refuse the OPTIONS preflight
+  noMutationCors: false,
+  noPreflight: false,
+  // non-compliant: an address payRequest that sets commentAllowed, takes a
+  // +tag as an unknown user, advertises other fees than mint@, or still
+  // publishes the share's cx1 as the retired text/cpub hint
+  addressCommentAllowed: false,
+  plusTagUnknown: false,
+  addressFeesDiffer: false,
+  addressHint: false,
   // non-compliant, and narrower: refuse a malformed comment - an empty value
   // included - but fall back when the key is absent entirely. That is the
   // distinction the malformed loop cannot reach, and the commonest way to
@@ -400,24 +436,6 @@ export const createMockMint = async (options = {}) => {
   // the invoice that will credit it.
   const boundOutputs = new Map()
 
-  // A deterministic watch-only branch for the registered-address fixture.
-  // It is public test material, not a secret used for value. The mock uses
-  // the actual LUD-25 tweak on purpose 2, the Lightning Address counter
-  // auto-mint and internal transfer share (luds 50d740a), so its text/cpub
-  // hint names the same output its next quote reserves.
-  const registeredBranchSecret = hexToBytes('44'.repeat(32))
-  const registeredBranchPubkey = secp256k1.getPublicKey(registeredBranchSecret, true).slice(1)
-  const registeredChainCode = sha256(utf8ToBytes('lnurlcash-conformance registered address'))
-  const registeredCx1 = bech32m.encode(
-    'cx',
-    bech32m.toWords(concat(registeredBranchPubkey, registeredChainCode)),
-    200
-  )
-  // The purpose-2 index: a Lightning Address payment and an internal
-  // transfer land on it, never on the wallet's own purpose 0.
-  const ADDRESS_PURPOSE = 2
-  let registeredIndex = 0
-
   // A Q is spoken for if it is a note in any state, the fallback note of an
   // invoice this mint issued, or the output a bound quote is waiting to
   // credit. Minting over any of them hands the output to somebody who
@@ -425,21 +443,6 @@ export const createMockMint = async (options = {}) => {
   // land.
   const outputInUse = qHex =>
     notes.has(qHex) || invoiceNotes.has(qHex) || boundOutputs.has(qHex)
-
-  const nextRegisteredOutput = () => {
-    const branch = secp256k1.Point.fromBytes(concat(Uint8Array.of(0x02), registeredBranchPubkey))
-    for (;;) {
-      const index = registeredIndex++
-      // t mod n, as the spec requires: a tweak >= n is reduced, not skipped
-      const tweak =
-        BigInt(`0x${bytesToHex(taggedHash('LNURLcash/derive', registeredBranchPubkey, registeredChainCode, ser32(ADDRESS_PURPOSE), ser32(index)))}`) %
-        secp256k1.Point.Fn.ORDER
-      const note = branch.add(secp256k1.Point.BASE.multiplyUnsafe(tweak))
-      if (note.equals(secp256k1.Point.ZERO)) continue
-      const output = bytesToHex(note.toBytes(true).slice(1))
-      if (!outputInUse(output)) return output
-    }
-  }
 
   // What makes a request the same request: the same set of notes burned,
   // the same p1, the same p2, the same amount. Matched on the Qs they
@@ -482,6 +485,186 @@ export const createMockMint = async (options = {}) => {
   const mintNote = (qHex, amountMsat, options = {}) => {
     notes.set(qHex, {amountMsat, state: 'outstanding', lockedAt: nowSecs(), ...(options.h ? {h: options.h} : {})})
     return certify(qHex, amountMsat, options)
+  }
+
+  // ---- LUD-26 registrations ----
+  //
+  // username (lowercase) -> {cx1, chainCode, pubkey, paid, paymentHash?}.
+  // usedKeys holds x(P) of every cx1 ever accepted, registered now or not,
+  // so a share is registered once and a captured proof never applies again.
+  const registrations = new Map()
+  const usedKeys = new Set()
+  const usedCx1s = new Set()
+
+  const decodeCx1 = value => {
+    try {
+      const {prefix, words} = bech32m.decode(String(value).toLowerCase(), 200)
+      if (prefix !== 'cx') return null
+      const bytes = bech32m.fromWords(words)
+      if (bytes.length !== 65) return null
+      const pubkey = bytes.slice(32)
+      secp256k1.Point.fromBytes(pubkey)
+      return {chainCode: bytes.slice(0, 32), pubkey, xOnly: bytesToHex(pubkey.slice(1))}
+    } catch {
+      return null
+    }
+  }
+
+  // BIP-32 CKDpub, the one derivation a SERVICE ever does: note i of a
+  // share is x(point(IL) + P), IL the left half of HMAC-SHA512(chain code,
+  // P || ser32(i)). An index whose IL is out of range, or lands on the
+  // point at infinity, is skipped, as BIP-32 says.
+  const shareNote = (registration, index) => {
+    const I = hmac(sha512, registration.chainCode, concat(registration.pubkey, ser32(index)))
+    const il = BigInt(`0x${bytesToHex(I.slice(0, 32))}`)
+    if (il === 0n || il >= secp256k1.Point.Fn.ORDER) return null
+    const child = secp256k1.Point.fromBytes(registration.pubkey).add(secp256k1.Point.BASE.multiply(il))
+    if (child.equals(secp256k1.Point.ZERO)) return null
+    return bytesToHex(child.toBytes(true).slice(1))
+  }
+
+  // LUD-26 picks pk_i when the payment settles, never when the invoice is
+  // issued, and skips any index already outstanding or burned.
+  const creditShare = (registration, amountMsat) => {
+    for (let index = 0; ; index++) {
+      const q = shareNote(registration, index)
+      if (q === null || outputInUse(q)) continue
+      mintNote(q, amountMsat)
+      return q
+    }
+  }
+
+  const registerShare = (username, cx1, {paid}) => {
+    const decoded = decodeCx1(cx1)
+    registrations.set(username, {cx1, chainCode: decoded.chainCode, pubkey: decoded.pubkey, xOnly: decoded.xOnly, paid})
+    usedKeys.add(decoded.xOnly)
+    usedCx1s.add(cx1.toLowerCase())
+    return registrations.get(username)
+  }
+
+  // public test material: 26-vectors.json, derivation[1], account 0, share 0
+  const FIXTURE_CX1 =
+    'cx18aghckkhav720au2580rzzp22htwhk93lk2nasejseld6xnlswfs87hlh8emj9p4mg3mkrqyqhlufhj2lk0pjnfufwd89xz3cz9lt0csjgye9y'
+  if (opts.registeredAddress) registerShare(opts.registeredUsername.toLowerCase(), FIXTURE_CX1, {paid: true})
+
+  const cx1Used = decoded =>
+    opts.reusesCx1 === true
+      ? false
+      : opts.reusesCx1 === 'afterUnregister'
+        ? [...registrations.values()].some(r => r.xOnly === decoded.xOnly)
+        : opts.reusesCx1 === 'byCx1'
+          ? usedCx1s.has(encodeCx1Of(decoded))
+          : usedKeys.has(decoded.xOnly)
+  const encodeCx1Of = decoded => bech32m.encode('cx', bech32m.toWords(concat(decoded.chainCode, decoded.pubkey)), 200)
+
+  const verifyProof = (message, sigHex, xOnlyHex) => {
+    if (opts.registrationUnverified) return true
+    try {
+      return schnorr.verify(hexToBytes(sigHex), sha256(utf8ToBytes(message)), hexToBytes(xOnlyHex))
+    } catch {
+      return false
+    }
+  }
+
+  const REASONS = {
+    lud26: {unknown: 'unknown user', taken: 'already registered', used: 'cx1 already used'},
+    other: {unknown: 'Unknown user.', taken: 'Username taken.', used: 'Key already registered.'}
+  }
+  const reasons = REASONS[opts.registrationReasons] ?? REASONS.lud26
+
+  // The address fee invoice, held against a registration until it settles.
+  const addressFeeInvoice = username => {
+    const charged = opts.addressFeeChargedMsat ?? opts.addressFeeMsat
+    if (!(charged > 0)) return null
+    const preimage = bytesToHex(randomBytes(32))
+    const paymentHash = noteId(preimage)
+    const pr = fakeInvoice(charged, preimage)
+    invoices.set(paymentHash, {amountMsat: charged, preimage, settled: false, pr, registrationFor: username})
+    return {pr, paymentHash}
+  }
+
+  // What a registration request does, given its method and form. The
+  // domains are the ones a spend may be bound to: the SERVICE's own.
+  const handleRegistration = (method, rawUsername, form, domains) => {
+    const username = rawUsername.toLowerCase()
+    const current = registrations.get(username)
+    const cx1 = form.get('cx1')?.trim() ?? ''
+    const sig = form.get('sig')?.trim() ?? ''
+    const signedBy = (action, xOnly, boundCx1 = cx1) =>
+      domains.some(domain => {
+        const base = `LNURLcash:${action}:${domain}:${username}`
+        const message =
+          action === 'unregister' ? base : opts.registrationWithoutCx1 && action === 'register' ? base : `${base}:${boundCx1}`
+        return verifyProof(message, action === 'register' && form.has('newsig') && method === 'PUT' ? form.get('newsig').trim() : sig, xOnly)
+      })
+
+    if (method === 'POST') {
+      if (!username || ((username.includes('+') || username === opts.username || username === '_') && !opts.acceptsReservedUsernames)) {
+        return {status: 'ERROR', reason: 'username not allowed'}
+      }
+      const decoded = decodeCx1(cx1)
+      if (!decoded) return {status: 'ERROR', reason: 'invalid cx1'}
+      if (!signedBy('register', decoded.xOnly)) return {status: 'ERROR', reason: 'invalid signature'}
+      if (current && !opts.overwritesRegistration) return {status: 'ERROR', reason: reasons.taken}
+      if (cx1Used(decoded)) return {status: 'ERROR', reason: reasons.used}
+      const fee = addressFeeInvoice(username)
+      const registration = registerShare(username, cx1, {paid: fee === null})
+      if (fee) {
+        registration.paymentHash = fee.paymentHash
+        return {status: 'OK', pr: fee.pr}
+      }
+      return {status: 'OK'}
+    }
+
+    if (method === 'PUT') {
+      if (!current || !current.paid) return {status: 'ERROR', reason: reasons.unknown}
+      const decoded = decodeCx1(cx1)
+      if (!decoded) return {status: 'ERROR', reason: 'invalid cx1'}
+      const newsig = form.get('newsig')?.trim() ?? ''
+      const sigOk = domains.some(domain => verifyProof(`LNURLcash:update:${domain}:${username}:${cx1}`, sig, current.xOnly))
+      const newsigOk = domains.some(domain => verifyProof(`LNURLcash:register:${domain}:${username}:${cx1}`, newsig, decoded.xOnly))
+      if ((!sigOk && opts.updateChecksOnly !== 'newsig') || (!newsigOk && opts.updateChecksOnly !== 'sig')) {
+        return {status: 'ERROR', reason: 'invalid signature'}
+      }
+      if (cx1Used(decoded)) return {status: 'ERROR', reason: reasons.used}
+      registerShare(username, cx1, {paid: true})
+      return {status: 'OK'}
+    }
+
+    // DELETE
+    if (!current) return {status: 'ERROR', reason: reasons.unknown}
+    const ok = opts.unregisterUnverified || domains.some(domain => verifyProof(`LNURLcash:unregister:${domain}:${username}`, sig, current.xOnly))
+    if (!ok) return {status: 'ERROR', reason: 'invalid signature'}
+    registrations.delete(username)
+    return {status: 'OK'}
+  }
+
+  // Settling an invoice: what a node would report, and what the test hook
+  // and in-process tests use. A mint quote credits its note, an address
+  // payment credits the share's next unused key, and an address fee
+  // publishes the registration it holds.
+  const settleInvoice = paymentHash => {
+    const invoice = invoices.get(paymentHash)
+    if (!invoice) return null
+    if (invoice.settled) return invoice
+    invoice.settled = true
+    if (invoice.registrationFor !== undefined) {
+      const registration = registrations.get(invoice.registrationFor)
+      if (registration?.paymentHash === paymentHash) registration.paid = true
+      return invoice
+    }
+    if (invoice.share !== undefined) {
+      const registration = registrations.get(invoice.share)
+      if (registration) invoice.creditedTo = creditShare(registration, invoice.amountMsat)
+      return invoice
+    }
+    // Paying a mint invoice brings its comment-bound note into existence.
+    // The payment-preimage fallback is reachable only under deliberate
+    // legacy defect flags that allowed an unnamed quote.
+    const target = invoice.boundTo ?? bearer(hexToBytes(paymentHash)).q
+    if (!notes.has(target)) mintNote(target, invoice.amountMsat, {h: invoice.boundH ?? (invoice.boundTo ? null : paymentHash)})
+    if (invoice.boundTo) boundOutputs.delete(invoice.boundTo)
+    return invoice
   }
 
   // The note a k1 opens, by its Q, whatever spelling the k1 takes. Also
@@ -549,7 +732,14 @@ export const createMockMint = async (options = {}) => {
     failMelt(k1) {
       const note = notes.get(qOfK1(k1))
       if (note) note.state = 'outstanding'
-    }
+    },
+    // settle(paymentHash) settles an invoice this mock issued, as its node
+    // would: a mint quote's note, an address payment's share note (its Q
+    // returned as creditedTo) or an address fee's registration.
+    settle(paymentHash) {
+      return settleInvoice(paymentHash.toLowerCase())
+    },
+    registrations
   }
 
   // ---- test hooks ----
@@ -581,16 +771,9 @@ export const createMockMint = async (options = {}) => {
     }
     if (url.pathname === '/_test/settle') {
       const hash = q.get('payment_hash')?.toLowerCase()
-      const invoice = hash ? invoices.get(hash) : null
+      const invoice = hash ? settleInvoice(hash) : null
       if (!invoice) return fail('unknown payment hash')
-      invoice.settled = true
-      // Paying a mint invoice brings its comment-bound note into existence.
-      // The payment-preimage fallback is reachable only under deliberate
-      // legacy defect flags that allowed an unnamed quote.
-      const target = invoice.boundTo ?? bearer(hexToBytes(hash)).q
-      if (!notes.has(target)) mintNote(target, invoice.amountMsat, {h: invoice.boundH ?? (invoice.boundTo ? null : hash)})
-      if (invoice.boundTo) boundOutputs.delete(invoice.boundTo)
-      return send({status: 'OK', settled: true})
+      return send({status: 'OK', settled: true, ...(invoice.creditedTo ? {p: encodeCp1(invoice.creditedTo)} : {})})
     }
     if (url.pathname === '/_test/state') {
       const k1 = q.get('k1')?.trim()
@@ -619,7 +802,41 @@ export const createMockMint = async (options = {}) => {
       return handleTestHook(url, q, sendRaw)
     }
 
-    // Every protocol endpoint below is a GET, and /w/cb mutates on whatever
+    // LUD-26 registration: POST, PUT and DELETE at the Lightning Address
+    // itself, form-encoded, answered in JSON with CORS on every response,
+    // and the preflight a PUT or DELETE needs.
+    const registrationMatch = url.pathname.match(/^\/\.well-known\/lnurlp\/([^/]+)$/)
+    if (registrationMatch && req.method === 'OPTIONS' && !opts.noPreflight) {
+      res.writeHead(204, {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'access-control-allow-headers': 'content-type',
+        'access-control-max-age': '86400'
+      })
+      return res.end()
+    }
+    if (registrationMatch && ['POST', 'PUT', 'DELETE'].includes(req.method)) {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const form = new URLSearchParams(Buffer.concat(chunks).toString('utf8'))
+      const domains = opts.domains
+        ? asList(opts.domains).map(d => d.toLowerCase())
+        : [new URL(`http://${req.headers.host}`).hostname.toLowerCase()]
+      let username
+      try {
+        username = decodeURIComponent(registrationMatch[1])
+      } catch {
+        username = ''
+      }
+      const body = handleRegistration(req.method, username, form, domains)
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        ...(opts.noMutationCors ? {} : {'access-control-allow-origin': '*'})
+      })
+      return res.end(JSON.stringify(body))
+    }
+
+    // Every other protocol endpoint is a GET, and /w/cb mutates on whatever
     // arrives - an OPTIONS preflight or a stray POST must never reach a
     // handler. The grader checks exactly this.
     if (req.method !== 'GET') {
@@ -662,28 +879,60 @@ export const createMockMint = async (options = {}) => {
       url.pathname.match(/^\/\.well-known\/lnurlp\/(.+)$/) ??
       url.pathname.match(/^\/lnurlp\/(.+)$/)
     if (lnurlpMatch) {
-      const user = lnurlpMatch[1]
-      if (user !== opts.username && user !== '_') {
-        return send({status: 'ERROR', reason: 'Unknown user.'}, 404)
+      let user
+      try {
+        user = decodeURIComponent(lnurlpMatch[1]).toLowerCase()
+      } catch {
+        user = ''
+      }
+      // LUD-16's +tag is ignored: <name>+<tag> pays <name>'s share.
+      const name = opts.plusTagUnknown ? user : user.split('+')[0]
+      const feeToken = (baseFeeMsat, feePpm) =>
+        baseFeeMsat > 0 || feePpm > 0 || opts.addressFeeMsat > 0
+          ? `Mint fees: ${baseFeeMsat},${feePpm}${opts.addressFeeMsat > 0 ? `,${opts.addressFeeMsat}` : ''}`
+          : null
+      const withdrawLink =
+        opts.withdrawLinkForm === 'plain' ? `${origin}/w` : `lnurlw://${req.headers.host}/w`
+      const registration = registrations.get(name)
+      if (name !== opts.username && name !== '_') {
+        if (!registration || !(registration.paid || opts.publishesUnpaidAddress)) {
+          return send({status: 'ERROR', reason: reasons.unknown})
+        }
+        // A LUD-26 Lightning Address: mint@'s withdrawLink and fees, no
+        // commentAllowed, minting into the share's next unused key.
+        const metadata = [
+          ['text/plain', `a mock LNURLcash Lightning Address - nothing here is payable`],
+          ['text/identifier', `${name}@${req.headers.host}`]
+        ]
+        const fee = opts.addressFeesDiffer
+          ? feeToken(opts.baseFeeMsat + 1000, opts.feePpm)
+          : feeToken(opts.baseFeeMsat, opts.feePpm)
+        if (fee) metadata.push(['text/plain', fee])
+        if (opts.addressHint) metadata.push(['text/cpub', `${registration.cx1}:0`])
+        return send({
+          tag: 'payRequest',
+          callback: `${origin}/p/cb/${encodeURIComponent(name)}`,
+          minSendable: minSendableMsat,
+          maxSendable: opts.maxSendableMsat,
+          metadata: JSON.stringify(metadata),
+          withdrawLink,
+          disposable: false,
+          ...(opts.addressCommentAllowed ? {commentAllowed: 64} : {})
+        })
       }
       const metadata = [
         ['text/plain', 'a mock LNURLcash mint - nothing here is payable'],
-        ['text/identifier', `${user}@${req.headers.host}`]
+        ['text/identifier', `${name}@${req.headers.host}`]
       ]
-      if (opts.baseFeeMsat > 0 || opts.feePpm > 0) {
-        metadata.push(['text/plain', `Mint fees: ${opts.baseFeeMsat},${opts.feePpm}`])
-      }
-      if (opts.registeredAddress) {
-        metadata.push([opts.addressHintType, `${registeredCx1}:${registeredIndex}`])
-      }
+      const fee = feeToken(opts.baseFeeMsat, opts.feePpm)
+      if (fee) metadata.push(['text/plain', fee])
       return send({
         tag: 'payRequest',
         callback: `${origin}/p/cb`,
         minSendable: minSendableMsat,
         maxSendable: opts.maxSendableMsat,
         metadata: JSON.stringify(metadata),
-        withdrawLink:
-          opts.withdrawLinkForm === 'plain' ? `${origin}/w` : `lnurlw://${req.headers.host}/w`,
+        withdrawLink,
         disposable: false,
         // "I accept an h on my pay callback". Every mint has a payRequest
         // and the mint address document is experimental, so this is the
@@ -807,6 +1056,35 @@ export const createMockMint = async (options = {}) => {
       return send(body)
     }
 
+    // ---- LUD-26 Lightning Address pay callback ----
+    //
+    // No comment is read: the note lands at the share's next unused key,
+    // picked when the invoice settles, never now.
+    const addressCallback = url.pathname.match(/^\/p\/cb\/([^/]+)$/)
+    if (addressCallback) {
+      let name
+      try {
+        name = decodeURIComponent(addressCallback[1]).toLowerCase()
+      } catch {
+        name = ''
+      }
+      const registration = registrations.get(name)
+      if (!registration || !(registration.paid || opts.publishesUnpaidAddress)) return fail(reasons.unknown)
+      if (opts.sunset) return fail('This mint is sunsetting - minting is disabled.')
+      const amount = Number(q.get('amount'))
+      if (!Number.isFinite(amount) || amount <= 0) return fail('Invalid amount.')
+      if (amount < minSendableMsat || amount > opts.maxSendableMsat) return fail('Amount out of range.')
+      const net = applyFee(amount)
+      if (net <= 0) return fail('Amount too small to mint a note.')
+      const preimage = bytesToHex(randomBytes(32))
+      const paymentHash = noteId(preimage)
+      const pr = fakeInvoice(amount, preimage)
+      invoices.set(paymentHash, {amountMsat: net, preimage, settled: false, pr, share: name})
+      const body = {pr, disposable: false}
+      if (opts.verify) body.verify = `${origin}/verify/${paymentHash}`
+      return send(body)
+    }
+
     // ---- LUD-06 pay callback: mint a note ----
     if (url.pathname === '/p/cb') {
       if (opts.sunset) {
@@ -901,12 +1179,6 @@ export const createMockMint = async (options = {}) => {
           // to compare h.
           boundTo = named
           boundH = hex
-          namedByComment = true
-        } else if (opts.registeredAddress) {
-          // The next unused key on the branch. Claimed as the quote is
-          // issued, so two free-text quotes never name one output.
-          boundTo = nextRegisteredOutput()
-          boundH = null
           namedByComment = true
         } else if (
           !opts.commentFallsBack &&
@@ -1352,6 +1624,9 @@ if (isEntryPoint()) {
   mint.state.creditNote(k1, 21000)
   console.log(`mock mint listening on ${mint.url}`)
   console.log(`  lightning address: ${flags.username ?? 'mint'}@127.0.0.1:${mint.port}`)
+  if (flags.registeredAddress) {
+    console.log(`  registered address: ${flags.registeredUsername ?? 'alice'}@127.0.0.1:${mint.port}`)
+  }
   console.log(`  a 21 sat note:     lnurlw://127.0.0.1:${mint.port}/w?k1=${k1}&amount=21000`)
   console.log(`  its output key:    ${encodeCp1(bearer(sha256(hexToBytes(k1))).q)}`)
   console.log(`  mint pubkey:       ${mint.state.pubkey}`)

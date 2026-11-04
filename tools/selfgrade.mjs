@@ -15,8 +15,10 @@ import {
   gradeMint,
   gradeMintedValue,
   gradeNote,
+  gradeRegistration,
   parseAdvertisedMintFee
 } from '../runner/index.mjs'
+import {readFileSync} from 'node:fs'
 
 const grade = async (mockOptions, {previousPubkeys, payPath, registeredAddress} = {}) => {
   const mint = await createMockMint(mockOptions)
@@ -472,12 +474,12 @@ if (statusOf(noCommentCapability, MINT_TO_HASH_CHECK) !== 'fail') {
 }
 console.log('ok   a mint that cannot accept the mandatory comment fails')
 
-// LUD-25 Part 2: a registered Lightning Address is not a mint payLink. It
-// mints on the next unused key of its own branch, so a comment naming no
-// output is the free text LUD-12 invites. Grading one under the payLink
-// rules calls correct behaviour non-conformant - which is what the suite
-// did to the reference mint after lnurl-mint #46.
-const addressUngraded = await grade({registeredAddress: true})
+// LUD-26: a registered Lightning Address is not a mint payLink. It mints
+// into its share's next unused key, so it MUST NOT set commentAllowed and
+// takes a plain LUD-16 payment. Graded as a payLink it fails, which is
+// what keeps --address from being cosmetic.
+const ADDRESS_PATH = '/.well-known/lnurlp/alice'
+const addressUngraded = await grade({registeredAddress: true}, {payPath: ADDRESS_PATH})
 if (statusOf(addressUngraded, MINT_TO_HASH_CHECK) !== 'fail') {
   die(
     `a registered address graded as a mint payLink did not fail: ${statusOf(addressUngraded, MINT_TO_HASH_CHECK)}`
@@ -485,38 +487,110 @@ if (statusOf(addressUngraded, MINT_TO_HASH_CHECK) !== 'fail') {
 }
 console.log('ok   a registered address graded as a payLink fails, so the flag is not cosmetic')
 
-const address = await grade({registeredAddress: true}, {registeredAddress: true})
-if (statusOf(address, MINT_TO_HASH_CHECK) !== 'pass') {
-  die(`a registered address failed its own rules: ${detailOf(address, MINT_TO_HASH_CHECK)}`)
+const address = await grade({registeredAddress: true}, {payPath: ADDRESS_PATH, registeredAddress: true})
+if (address.failed > 0) {
+  die(`a registered address FAILED the grade: ${address.results.filter(r => r.status === 'fail').map(r => `${r.name} - ${r.detail}`).join('; ')}`)
 }
-if (address.failed > 0) die('a registered address FAILED the grade')
-if (!/registered Lightning Address/.test(detailOf(address, MINT_TO_HASH_CHECK))) {
-  die(`the report did not name what it graded: ${detailOf(address, MINT_TO_HASH_CHECK)}`)
+for (const name of ['a Lightning Address sets no commentAllowed (LUD-26)', 'a +tag pays the same Lightning Address (LUD-26)']) {
+  if (statusOf(address, name) !== 'pass') die(`a registered address did not pass ${name}: ${detailOf(address, name)}`)
 }
-console.log('ok   a registered address passes under --address, and the report names it')
+conserved(address, 'a registered address')
+console.log('ok   a registered address passes under --address')
 
-// The internal-transfer hint is text/cpub since luds 50d740a; one still
-// published as text/xpub is not found.
-const oldHint = await grade({registeredAddress: true, addressHintType: 'text/xpub'}, {registeredAddress: true})
-const HINT_CHECK = 'advertises its cx1 and next index for internal transfers'
-if (statusOf(oldHint, HINT_CHECK) !== 'fail') {
-  die(`an address hint published as text/xpub was not caught: ${statusOf(oldHint, HINT_CHECK)}`)
+// Each LUD-26 address rule, broken on its own, and the check that names it.
+for (const [options, check, status, what] of [
+  [{addressCommentAllowed: true}, 'a Lightning Address sets no commentAllowed (LUD-26)', 'fail', 'an address setting commentAllowed'],
+  [{plusTagUnknown: true}, 'a +tag pays the same Lightning Address (LUD-26)', 'fail', 'an address refusing a +tag'],
+  [{addressFeesDiffer: true, baseFeeMsat: 1000}, "a Lightning Address carries mint@'s withdrawLink and Mint fees (LUD-26)", 'fail', "an address advertising other fees than mint@'s"],
+  [{addressHint: true}, "publishes no watch-only key for the address's share", 'warn', 'an address publishing its cx1 as text/cpub']
+]) {
+  const report = await grade({registeredAddress: true, ...options}, {payPath: ADDRESS_PATH, registeredAddress: true})
+  if (statusOf(report, check) !== status) die(`${what} was not caught: ${statusOf(report, check)} - ${detailOf(report, check)}`)
+  console.log(`ok   ${what} caught`)
 }
-console.log('ok   an internal-transfer hint under the old text/xpub name caught')
 
-// The flag relaxes the comment rules and nothing else. It cannot separate
-// an address from a preimage-keyed fallback - both answer free text with
-// an invoice, and they differ only in what key the note lands under, which
-// no read-only probe can see. So it is a declaration of trust, and the
-// value of pinning it here is that it stays a narrow one: an address
-// broken in any other way must still fail.
-const addressTooShort = await grade({commentAllowed: 32}, {registeredAddress: true})
-if (statusOf(addressTooShort, MINT_TO_HASH_CHECK) !== 'fail') {
-  die(
-    `an address that cannot carry a 64-character comment did not fail: ${statusOf(addressTooShort, MINT_TO_HASH_CHECK)}`
-  )
+// The mock credits an address as LUD-26 says: BIP-32 CKDpub from the
+// share's cx1, picked at settlement, skipping an index already in use. Its
+// fixture is luds' own share, so the notes it credits are luds' own Qs.
+{
+  const share = JSON.parse(readFileSync(new URL('./luds/26-vectors.json', import.meta.url), 'utf8')).derivation[1].accounts[0].shareable[0]
+  const mint = await createMockMint({registeredAddress: true})
+  try {
+    const pay = async () => {
+      const body = await (await fetch(`${mint.url}/p/cb/alice?amount=5000`)).json()
+      assert.equal(typeof body.pr, 'string', `the address issued no invoice: ${JSON.stringify(body)}`)
+      return [...mint.state.invoices].find(([, invoice]) => invoice.pr === body.pr)[0]
+    }
+    const first = await pay()
+    const second = await pay()
+    assert.equal(mint.state.notes.size, 0, 'an address credited a note before its invoice settled')
+    // Settled out of order: the index belongs to settlement, not the quote.
+    assert.equal(mint.state.settle(second).creditedTo, share.notes[0].Q, 'the first settlement did not land at note 0')
+    // A note already outstanding at the next index is skipped.
+    mint.state.creditOutput(encodeCp1(hexToBytes(share.notes[1].Q)), 1000)
+    const skipped = mint.state.settle(first).creditedTo
+    assert(
+      skipped !== share.notes[0].Q && skipped !== share.notes[1].Q && mint.state.notes.get(skipped)?.amountMsat === 5000,
+      'an index already outstanding was credited over'
+    )
+  } finally {
+    await mint.close()
+  }
+  console.log("ok   the mock credits an address at luds' own share notes, picked at settlement, skipping one in use")
 }
-console.log('ok   --address relaxes the comment rules only, not the rest of the grade')
+
+// LUD-26 registration: register, refuse, update, unregister. Mutating, so
+// a fresh mock per case.
+const registration = async options => {
+  const mint = await createMockMint(options)
+  try {
+    const report = createReport()
+    await gradeRegistration(`${mint.url}/.well-known/lnurlp/mint`, report)
+    return report
+  } finally {
+    await mint.close()
+  }
+}
+const registered = await registration({})
+if (registered.failed > 0 || registered.results.some(r => r.status !== 'pass')) {
+  die(`a compliant mint did not pass registration clean: ${registered.results.filter(r => r.status !== 'pass').map(r => `${r.status} ${r.name} - ${r.detail}`).join('; ')}`)
+}
+console.log(`ok   a compliant mint passes registration clean (${registered.results.length} checks)`)
+
+const feeHeld = await registration({addressFeeMsat: 21000, baseFeeMsat: 1000, feePpm: 10})
+if (feeHeld.failed > 0) {
+  die(`a mint charging its advertised address fee failed: ${feeHeld.results.filter(r => r.status === 'fail').map(r => `${r.name} - ${r.detail}`).join('; ')}`)
+}
+if (!/held on an address fee of 21000 msat/.test(detailOf(feeHeld, 'registers a username with a valid proof (LUD-26)'))) {
+  die(`the fee-held registration was not named: ${detailOf(feeHeld, 'registers a username with a valid proof (LUD-26)')}`)
+}
+if (statusOf(feeHeld, 'unregisters with the key on file (LUD-26)') !== 'skip') {
+  die('a registration held on an unpaid fee was graded as if published')
+}
+console.log('ok   a mint charging its advertised address fee passes, and the unpaid half is skipped and named')
+
+for (const [options, check, what] of [
+  [{addressFeeMsat: 21000, addressFeeChargedMsat: 30000}, 'registers a username with a valid proof (LUD-26)', 'an address fee above the advertised one'],
+  [{addressFeeChargedMsat: 5000}, 'registers a username with a valid proof (LUD-26)', 'an address fee charged with none advertised'],
+  [{addressFeeMsat: 21000, publishesUnpaidAddress: true}, 'publishes no address before its fee settles (LUD-26)', 'an address published before its fee settles'],
+  [{registrationUnverified: true}, 'refuses a registration proof that does not bind its key, domain and cx1', 'a registration that verifies nothing'],
+  [{registrationWithoutCx1: true}, 'refuses a registration proof that does not bind its key, domain and cx1', 'a registration proof binding no cx1'],
+  [{overwritesRegistration: true}, 'refuses a second registration of a taken username (LUD-26)', 'a POST overwriting a registration'],
+  [{reusesCx1: true}, 'refuses a cx1 it has accepted before (LUD-26)', 'a cx1 registered twice'],
+  [{reusesCx1: 'byCx1'}, 'refuses a cx1 it has accepted before (LUD-26)', 'a cx1 rule comparing strings, not x(P)'],
+  [{reusesCx1: 'afterUnregister'}, 'moves a username to a new cx1 with a PUT (LUD-26)', 'a cx1 forgotten once off file'],
+  [{acceptsReservedUsernames: true}, 'refuses the usernames mint and <name>+<tag> (LUD-26)', 'a reserved username registered'],
+  [{updateChecksOnly: 'sig'}, 'refuses an update without both proofs (LUD-26)', 'an update checking sig alone'],
+  [{updateChecksOnly: 'newsig'}, 'refuses an update without both proofs (LUD-26)', 'an update checking newsig alone'],
+  [{unregisterUnverified: true}, 'refuses an unregister not signed by the key on file (LUD-26)', 'an unregister that verifies nothing'],
+  [{registrationReasons: 'other'}, 'answers "unknown user" for a free username (LUD-26)', "refusals other than LUD-26's exact reasons"],
+  [{noMutationCors: true}, 'answers every POST, PUT and DELETE with CORS (LUD-26)', 'mutations answered without CORS'],
+  [{noPreflight: true}, 'answers the CORS preflight a PUT or DELETE needs (LUD-26)', 'a refused preflight']
+]) {
+  const report = await registration(options)
+  if (statusOf(report, check) !== 'fail') die(`${what} was not caught: ${statusOf(report, check)} - ${detailOf(report, check)}`)
+  console.log(`ok   ${what} caught`)
+}
 
 const binding = await grade({mintToHash: true})
 if (binding.failed > 0) {

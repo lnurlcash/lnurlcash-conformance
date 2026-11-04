@@ -22,8 +22,10 @@ import {
   scriptTree,
   tweakSecretKey
 } from './spend.mjs'
+import {encodeCx1, freshShare, registrationMessage, signRegistration} from './share.mjs'
 
 export {keyPathSpend}
+export {decodeCx1, encodeCx1, registrationMessage, signRegistration, verifyRegistration} from './share.mjs'
 
 const noteId = k1 => bytesToHex(sha256(hexToBytes(k1)))
 
@@ -250,58 +252,47 @@ export const applyMintFee = (gross, fee) =>
   Math.max(0, gross - (fee?.baseFeeMsat ?? 0) - proportionalFee(gross, fee?.feePpm ?? 0))
 
 // "Mint fees: <base>,<ppm>[,<address fee>...]" anywhere in a text/plain
-// entry, its values ending at whitespace (luds 92e430f). The third value is
-// LUD-26's address fee, which the grader does not use.
-const MINT_FEES_TOKEN = /Mint fees:\s*(\d+),(\d+)(?:,\S*)?(?=\s|$)/
+// entry, its values plain base-10 integers ending at whitespace (luds
+// 92e430f). The third value is LUD-26's address fee per registration.
+const MINT_FEES_TOKEN = /Mint fees:\s*(\S*)/
+const plainInteger = value =>
+  /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : null
+
+// What a payRequest's metadata advertises, exactly as fees.json reads it:
+// `fee` is {baseFeeMsat, feePpm, addressFeeMsat} or null (fee-free, silent
+// or unparseable), `unknown` says a token was there and did not parse, and
+// `entry` is the text the token was found in.
+export const readFeeAdvertisement = metadata => {
+  const none = {fee: null, unknown: false, entry: null}
+  let entries
+  try {
+    entries = JSON.parse(metadata)
+  } catch {
+    return none
+  }
+  if (!Array.isArray(entries)) return none
+  for (const entry of entries) {
+    if (!Array.isArray(entry) || entry[0] !== 'text/plain' || typeof entry[1] !== 'string') continue
+    const match = entry[1].match(MINT_FEES_TOKEN)
+    if (!match) continue
+    const values = match[1].split(',')
+    const baseFeeMsat = plainInteger(values[0] ?? '')
+    const feePpm = plainInteger(values[1] ?? '')
+    if (baseFeeMsat === null || feePpm === null || feePpm >= 1_000_000) {
+      return {fee: null, unknown: true, entry: entry[1]}
+    }
+    const addressFeeMsat = values.length > 2 ? plainInteger(values[2]) : null
+    if (baseFeeMsat === 0 && feePpm === 0 && !addressFeeMsat) return {fee: null, unknown: false, entry: entry[1]}
+    return {fee: {baseFeeMsat, feePpm, addressFeeMsat}, unknown: false, entry: entry[1]}
+  }
+  return none
+}
 
 // The LUD-25 fee advertisement, parsed from payRequest metadata: null for
 // a fee-free (or silent) mint. The grader needs it because the spec's fee
-// algebra changes what a compliant split and merge return.
-export const parseAdvertisedMintFee = metadata => {
-  let entries
-  try {
-    entries = JSON.parse(metadata)
-  } catch {
-    return null
-  }
-  if (!Array.isArray(entries)) return null
-  for (const entry of entries) {
-    if (!Array.isArray(entry) || entry[0] !== 'text/plain') continue
-    const match = typeof entry[1] === 'string' && entry[1].match(MINT_FEES_TOKEN)
-    if (!match) continue
-    const baseFeeMsat = Number(match[1])
-    const feePpm = Number(match[2])
-    if (baseFeeMsat === 0 && feePpm === 0) return null
-    return {baseFeeMsat, feePpm}
-  }
-  return null
-}
-
-// A registered Part 2 address advertises the safe-to-share branch and its
-// best-known next purpose-2 index as ["text/cpub", "cx1...:<i>"] (named
-// text/xpub before luds 50d740a, which is no longer read). Parsing it here
-// makes --address assert the actual discovery signal rather than merely
-// trusting the operator's flag.
-export const parseInternalTransferHint = metadata => {
-  let entries
-  try {
-    entries = JSON.parse(metadata)
-  } catch {
-    return null
-  }
-  if (!Array.isArray(entries)) return null
-  for (const entry of entries) {
-    if (!Array.isArray(entry) || entry[0] !== 'text/cpub' || typeof entry[1] !== 'string') continue
-    const sep = entry[1].lastIndexOf(':')
-    if (sep < 0) continue
-    const cx1 = entry[1].slice(0, sep)
-    const index = Number(entry[1].slice(sep + 1))
-    const branch = decodeCash('cx', cx1.toLowerCase(), 64)
-    if (!branch || !Number.isInteger(index) || index < 0 || index > 0xffffffff) continue
-    return {cx1, index, pubkeyXOnly: branch.slice(0, 32), chainCode: branch.slice(32)}
-  }
-  return null
-}
+// algebra changes what a compliant split and merge return. Carries LUD-26's
+// addressFeeMsat too, null where registering is free.
+export const parseAdvertisedMintFee = metadata => readFeeAdvertisement(metadata).fee
 
 // Resolves what the user typed - a Lightning Address, a bare domain, or a
 // URL - to the payRequest URL to grade.
@@ -321,31 +312,19 @@ export const resolveMint = input => {
 
 // ---- read-only checks -----------------------------------------------------
 
-// `registeredAddress` grades the target as a LUD-25 Part 2 Lightning
-// Address rather than a mint payLink. The two are the same document to a
-// wallet - both advertise commentAllowed and a withdrawLink, and both
-// mint on payment - but the draft's comment rules are written for the
-// payLink, which has no key to mint under but the one the comment names.
-// A cx1-registered address always has one, the next unused key on its
-// branch, so there a comment naming no output is the ordinary free text
-// LUD-12 invites and is ignored rather than refused (lnurl-mint #46,
-// after every Wallet of Satoshi and Primal payment to such an address
-// failed on a typed message).
+// `registeredAddress` grades the target as a LUD-26 Lightning Address with
+// a cx1 registered against it rather than as a mint payLink. Both carry a
+// withdrawLink and both mint on payment, but an address mints into its
+// share's next unused key, so it MUST NOT set commentAllowed (a comment
+// could never reach the WALLET) and takes a plain LUD-16 payment, where a
+// payLink refuses every quote that does not name its note.
 //
-// Deliberately a flag and not a probe. "Returned an invoice for a comment
-// naming no output" is also exactly what a mint falling back to a
-// preimage-keyed note does, and that mint is dangerous - the preimage
-// race the draft's Security considerations describes. Nothing on the wire
-// tells the two apart before settlement: they differ only in what key the
-// note lands under. Guessing would wave the dangerous one through, so the
-// strict payLink rules stay the default and an address is declared.
-//
-// The cost of that is real and worth stating: this flag takes the
-// operator's word, and a preimage-keyed fallback passes under it. It
-// relaxes the comment rules and nothing else, and the draft gives an
-// address no way to say what it is on the wire. A signal it could
-// advertise - so this became detectable rather than declared - is worth
-// raising against LUD-25 Part 2.
+// Still a flag and not a probe. A payRequest with a withdrawLink and no
+// commentAllowed is also what a mint that falls back to a preimage-keyed
+// note looks like, and that mint is dangerous - the preimage race LUD-25's
+// Security considerations describe. The two differ only in what key the
+// note lands under, which nothing shows before settlement, so the strict
+// payLink rules stay the default and an address is declared.
 export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}) => {
   let pay
   let mintAddress
@@ -387,26 +366,23 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
   await report.check('metadata parses, and any fee advertisement is valid', async () => {
     const entries = JSON.parse(pay.metadata)
     assert(Array.isArray(entries), 'metadata is not an array')
-    const fee = entries.find(
-      e => Array.isArray(e) && e[0] === 'text/plain' && /Mint fees:/.test(e[1] ?? '')
-    )
-    if (!fee) return 'no fee advertised (fee-free)'
-    const match = fee[1].match(MINT_FEES_TOKEN)
-    assert(match, `malformed fee entry: ${JSON.stringify(fee[1])}`)
+    const {fee, unknown, entry} = readFeeAdvertisement(pay.metadata)
+    if (entry === null) return 'no fee advertised (fee-free)'
     assert(
-      Number(match[2]) < 1_000_000,
-      `fee of ${match[2]} ppm is 100% or more - no amount can ever net anything`
+      !unknown,
+      `malformed fee entry: ${JSON.stringify(entry)} - "Mint fees: <base_fee_msat>,<fee_ppm>[,<address_fee_msat>]", plain integers, ppm under 1000000`
     )
-    return `${match[1]} msat + ${match[2]} ppm`
+    if (fee === null) return 'an explicit zero fee (fee-free)'
+    const values = entry.match(MINT_FEES_TOKEN)[1].split(',')
+    const mintPart = `${fee.baseFeeMsat} msat + ${fee.feePpm} ppm`
+    if (values.length > 2 && fee.addressFeeMsat === null && values[2] !== '0') {
+      throw soft(
+        `${mintPart}, and a third value ${JSON.stringify(values[2])} that is no address fee - a WALLET reads registering as free and refuses any registration invoice`
+      )
+    }
+    return fee.addressFeeMsat ? `${mintPart}, address fee ${fee.addressFeeMsat} msat` : mintPart
   })
 
-  if (registeredAddress) {
-    await report.check('advertises its cx1 and next index for internal transfers', async () => {
-      const hint = parseInternalTransferHint(pay.metadata)
-      assert(hint, 'no valid ["text/cpub", "cx1...:<i>"] metadata entry (text/xpub is its name before luds 50d740a)')
-      return `purpose-2 index ${hint.index}`
-    })
-  }
 
   let verifyUrl
   await report.check('issues an invoice for the amount requested', async () => {
@@ -469,6 +445,15 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
     )
     return body.reason
   })
+
+  // A LUD-26 Lightning Address is graded by its own rules from here: it
+  // carries the mint's withdrawLink and fees but mints into a share, so
+  // the mint address document, the liabilities and the comment rules are
+  // mint@'s to answer for, not its.
+  if (registeredAddress) {
+    await gradeAddressRules(payUrl, pay, report)
+    return pay
+  }
 
   await report.check('publishes a mint address (experimental, optional)', async () => {
     const mirror = payUrl.replace('/.well-known/lnurlp/', '/.well-known/lnurlw/')
@@ -680,19 +665,6 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
     }
     const spelt = spelling => (spelling === 'comment' ? 'a LUD-12 comment' : 'an h parameter')
 
-    // The behaviour #46 fixed, asserted rather than assumed. Asked once,
-    // not once per malformed value: on an address a quote claims the next
-    // branch index as it is issued, so every probe costs the holder a key
-    // whether or not anyone pays. `gm` is short enough that no mint could
-    // read it as a commitment of any spelling.
-    if (registeredAddress) {
-      const freeText = await quoteAt('comment', 'gm')
-      assert(
-        freeText.status !== 'ERROR' && typeof freeText.pr === 'string',
-        `refused a comment naming no output: ${freeText.reason} - this address mints on its own branch, so an ordinary LUD-12 message must not fail the payment`
-      )
-    }
-
     const advertised = spellingsOf(pay)
     const corroborated = spellingsOf(mintAddress)
     const claimed = [...new Set([...advertised, ...corroborated])]
@@ -772,11 +744,6 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
 
     for (const spelling of probed) {
       for (const [what, value] of malformed) {
-        // Every one of these names no output, which on an address is free
-        // text, already covered above. `h` stays probed either way: it is
-        // a parameter invented for this one purpose, so a malformed one is
-        // a wallet error wherever it is sent.
-        if (spelling === 'comment' && registeredAddress) continue
         const body = await quoteAt(spelling, value)
         if (spelling === 'h') {
           if (!hClaimed) continue
@@ -800,34 +767,20 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
     // The canonical spelling of the comment is cp1<Q>; the 64-hex h probed
     // above is only a bearer note's short form. A note keyed from a seed
     // has nothing but its cp1, so a mint taking only hex cannot mint one.
-    // An address is left out, as for the malformed values: what it does
-    // with a comment naming an output is its own branch's business.
-    if (!registeredAddress) {
-      const keyed = await quoteAt('comment', encodeCp1(schnorr.getPublicKey(secp256k1.utils.randomSecretKey())))
-      assert(
-        keyed.status !== 'ERROR' && typeof keyed.pr === 'string',
-        `refused a comment naming its note as cp1<Q>: ${keyed.reason} - LUD-25 mints to a cp1 or a bearer note's hex h, and a note keyed from a seed has only the first`
-      )
-    }
+    const keyed = await quoteAt('comment', encodeCp1(schnorr.getPublicKey(secp256k1.utils.randomSecretKey())))
+    assert(
+      keyed.status !== 'ERROR' && typeof keyed.pr === 'string',
+      `refused a comment naming its note as cp1<Q>: ${keyed.reason} - LUD-25 mints to a cp1 or a bearer note's hex h, and a note keyed from a seed has only the first`
+    )
 
     // The malformed loop can only probe values; explicitly cover absence.
     const bare = new URL(pay.callback)
     bare.searchParams.set('amount', String(amount))
     const unnamed = await get(bare)
-    if (registeredAddress) {
-      // The draft is explicit that a registered address needs no comment
-      // at all: it derives the next key from its own cx1. Refusing here
-      // would break every plain Lightning payment to the address.
-      assert(
-        unnamed.status !== 'ERROR' && typeof unnamed.pr === 'string',
-        `refused a quote carrying no comment: ${unnamed.reason} - a registered address mints on its own branch, so a payment to it must not need one`
-      )
-    } else {
-      assert(
-        unnamed.status === 'ERROR' && !unnamed.pr,
-        'issued an invoice for a quote carrying no comment - current LUD-25 requires rejection before invoicing'
-      )
-    }
+    assert(
+      unnamed.status === 'ERROR' && !unnamed.pr,
+      'issued an invoice for a quote carrying no comment - current LUD-25 requires rejection before invoicing'
+    )
 
     if (hClaimed) {
       const mismatch = new URL(pay.callback)
@@ -884,9 +837,6 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
       }
     }
     if (problems.length > 0) throw soft(problems.join('; '))
-    if (registeredAddress) {
-      return `registered Lightning Address, minting on its own branch: named by ${probed.join(' and ')}; claimed by ${claimedBy.join(', ')}; bound a quote to a hash of the runner's own secret, and honoured one carrying free text and one carrying no comment at all`
-    }
     return `named by ${probed.join(' and ')}; claimed by ${claimedBy.join(', ')}; bound a quote to a hash of the runner's own secret and to a cp1, and refused five malformed ones as the draft requires`
   })
 
@@ -895,6 +845,467 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
   // it, and fetching the same endpoint twice to get them would be silly.
   if (pay && mintAddress) pay.mintAddress = mintAddress
   return pay
+}
+
+// ---- LUD-26 Lightning Address -------------------------------------------
+
+// A request that is not a GET: what LUD-26's registration needs. The body
+// is form-encoded, so a browser WALLET's POST needs no preflight, and the
+// response is graded on its headers as well as its JSON. A 429 is waited
+// out as `get` does: a verdict on a rate limiter is not a verdict on the
+// registration rules.
+const call = async (method, url, {form, headers = {}} = {}, retriesLeft = 2) => {
+  const res = await fetch(url.toString(), {
+    method,
+    headers: {
+      ...(form ? {'content-type': 'application/x-www-form-urlencoded'} : {}),
+      ...headers
+    },
+    body: form ? new URLSearchParams(form).toString() : undefined,
+    signal: AbortSignal.timeout(15_000)
+  })
+  const text = await res.text()
+  let body
+  try {
+    body = text === '' ? null : JSON.parse(text)
+  } catch {
+    body = undefined
+  }
+  if (res.status === 429) {
+    if (retriesLeft > 0) {
+      const after = Number(res.headers.get('retry-after'))
+      await sleep(Math.min(Number.isFinite(after) && after > 0 ? after * 1000 : 10_000, 30_000) + 250)
+      return call(method, url, {form, headers}, retriesLeft - 1)
+    }
+    throw soft('the mint rate limited this grade (HTTP 429) - space the run out and grade again; nothing here is a verdict on the mint')
+  }
+  return {status: res.status, headers: res.headers, body, text}
+}
+
+const describe = response =>
+  response.body === undefined ? `a non-JSON answer: ${response.text.slice(0, 80)}` : JSON.stringify(response.body).slice(0, 160)
+
+// LUD-26 fixes its refusals as exact strings, which a WALLET acts on:
+// "unknown user" says a username is free, "cx1 already used" moves a
+// recovering WALLET on to its next share.
+const refusedWith = (response, reason) => response.body?.status === 'ERROR' && response.body.reason === reason
+const refused = response => response.body?.status === 'ERROR' && !response.body.pr
+const accepted = response => response.body?.status === 'OK'
+
+const lnurlpUrl = (origin, username) => `${origin}/.well-known/lnurlp/${username}`
+
+// A cx1 anywhere a payer can read it hands the share's every note to anyone
+// who looks. LUD-26 removed the text/cpub hint for exactly this: an
+// internal transfer now goes to the callback, and pk_i never leaves the
+// SERVICE.
+const CX1_PATTERN = /\bcx1[02-9ac-hj-np-z]{100,}/i
+
+// The address-only rules, run on a payRequest already fetched and graded
+// for shape. `mintPay` is mint@'s payRequest when the caller has it.
+const gradeAddressRules = async (payUrl, pay, report, {mintPay = null} = {}) => {
+  const origin = new URL(payUrl).origin
+  const username = decodeURIComponent(new URL(payUrl).pathname.split('/').pop() ?? '')
+
+  await report.check('a Lightning Address sets no commentAllowed (LUD-26)', async () => {
+    assert(
+      pay.commentAllowed === undefined || pay.commentAllowed === 0 || pay.commentAllowed === null,
+      `advertises commentAllowed: ${JSON.stringify(pay.commentAllowed)} - an address mints into its share's next key, so a comment never reaches the WALLET and can never select the note`
+    )
+    return 'no commentAllowed'
+  })
+
+  await report.check('a Lightning Address takes a payment that names no note', async () => {
+    const amount = Math.max(pay.minSendable, 1000)
+    const url = new URL(pay.callback)
+    url.searchParams.set('amount', String(amount))
+    const body = await get(url)
+    assert(
+      body.status !== 'ERROR' && typeof body.pr === 'string',
+      `refused a plain LUD-16 payment: ${body.reason} - an address picks the note itself, so every ordinary wallet must be able to pay it`
+    )
+    const invoiced = invoiceAmountMsat(body.pr)
+    if (invoiced !== null) assert(invoiced === amount, `asked for ${amount} msat, invoiced ${invoiced} msat`)
+    return `${amount} msat, no comment`
+  })
+
+  await report.check("a Lightning Address carries mint@'s withdrawLink and Mint fees (LUD-26)", async () => {
+    let mint = mintPay
+    if (!mint) {
+      mint = await get(lnurlpUrl(origin, 'mint'))
+      assert(
+        mint.tag === 'payRequest' && typeof mint.withdrawLink === 'string',
+        `mint@ serves no mint payRequest (${JSON.stringify(mint).slice(0, 120)}) - LUD-26 has a SERVICE serve it there, so a WALLET finds the withdrawLink and fees from the domain alone`
+      )
+    }
+    assert(typeof pay.withdrawLink === 'string', 'no withdrawLink - a WALLET cannot tell which mint the address credits')
+    assert(
+      fromLud17(pay.withdrawLink.trim()) === fromLud17(mint.withdrawLink.trim()),
+      `withdrawLink ${pay.withdrawLink} is not mint@'s ${mint.withdrawLink} - a payer would take the address for another mint and never transfer internally`
+    )
+    const own = readFeeAdvertisement(pay.metadata).fee
+    const mints = readFeeAdvertisement(mint.metadata).fee
+    const mintPart = fee => `${fee?.baseFeeMsat ?? 0} msat + ${fee?.feePpm ?? 0} ppm`
+    assert(
+      (own?.baseFeeMsat ?? 0) === (mints?.baseFeeMsat ?? 0) && (own?.feePpm ?? 0) === (mints?.feePpm ?? 0),
+      `advertises Mint fees of ${mintPart(own)} where mint@ advertises ${mintPart(mints)} - the note credited is the payment minus mint@'s fees, so a payer is told the wrong value`
+    )
+    return `${pay.withdrawLink}, ${mintPart(mints)}`
+  })
+
+  await report.check('a +tag pays the same Lightning Address (LUD-26)', async () => {
+    if (username.includes('+') || username === '_') throw soft(`graded at ${username}, which a tag cannot be added to`)
+    const tagged = await get(lnurlpUrl(origin, `${username}+conformance`))
+    assert(
+      tagged.tag === 'payRequest',
+      `${username}+conformance answered ${JSON.stringify(tagged).slice(0, 120)} - LUD-16 lets a payer add a +tag, and LUD-26 credits it to the same share`
+    )
+    assert(
+      typeof tagged.withdrawLink === 'string' && fromLud17(tagged.withdrawLink) === fromLud17(pay.withdrawLink ?? ''),
+      `${username}+conformance carries another withdrawLink: ${tagged.withdrawLink}`
+    )
+    return `${username}+conformance serves the same address`
+  })
+
+  await report.check("publishes no watch-only key for the address's share", async () => {
+    const leaks = []
+    let entries = []
+    try {
+      entries = JSON.parse(pay.metadata)
+    } catch {
+      // graded as malformed above
+    }
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (!Array.isArray(entry)) continue
+      if (entry[0] === 'text/cpub' || entry[0] === 'text/xpub') leaks.push(`a ${entry[0]} metadata entry`)
+      else if (typeof entry[1] === 'string' && CX1_PATTERN.test(entry[1])) leaks.push(`a cx1 in its ${entry[0]} entry`)
+    }
+    const {metadata: _metadata, ...rest} = pay
+    if (CX1_PATTERN.test(JSON.stringify(rest))) leaks.push('a cx1 in the payRequest')
+    if (leaks.length > 0) {
+      throw soft(
+        `publishes ${leaks.join(' and ')} - anyone can then watch every note the share receives; LUD-26 sends an internal transfer to the callback instead, so pk_i never leaves the SERVICE`
+      )
+    }
+    return 'none'
+  })
+}
+
+// ---- the registration checks ----------------------------------------------
+//
+// MUTATING, and not on the note: it registers a throwaway username on the
+// SERVICE with a share only the grader holds, updates it to a second share
+// and unregisters it, probing every refusal LUD-26 requires along the way.
+// The shares are random keys, so nothing the grade leaves behind can ever
+// be spent, and the cx1s it registered are spent too - LUD-26 never
+// accepts the same x(P) twice.
+//
+// Against a SERVICE that charges an address fee the registration is held
+// on an invoice nobody pays, so the update and unregister half is skipped
+// and the username comes free again when the invoice expires.
+export const gradeRegistration = async (mintInput, report, {username: chosen} = {}) => {
+  const mintUrl = resolveMint(mintInput)
+  const origin = new URL(mintUrl).origin
+  const domain = new URL(mintUrl).hostname.toLowerCase()
+  const username = (chosen ?? `conformance${bytesToHex(randomBytes(4))}`).toLowerCase()
+  const addressUrl = lnurlpUrl(origin, username)
+  const mutations = []
+  const mutate = async (method, url, form) => {
+    const response = await call(method, url, {form, headers: {origin: 'https://wallet.example'}})
+    mutations.push({method, response})
+    return response
+  }
+  const proof = (action, share, name = username, cx1 = share.cx1) =>
+    signRegistration(registrationMessage(action, domain, name, action === 'unregister' ? null : cx1), share.secretKey)
+  const register = (share, name = username, sig = proof('register', share, name)) =>
+    mutate('POST', lnurlpUrl(origin, name), {cx1: share.cx1, sig})
+
+  let mintPay
+  let addressFeeMsat = null
+  await report.check('mint@ serves the mint payRequest and its address fee (LUD-26)', async () => {
+    mintPay = await get(lnurlpUrl(origin, 'mint'))
+    assert(
+      mintPay.tag === 'payRequest' && typeof mintPay.withdrawLink === 'string',
+      `mint@${new URL(mintUrl).host} answered ${JSON.stringify(mintPay).slice(0, 120)} - LUD-26 has a SERVICE serve its mint payRequest there, so a WALLET learns the address fee before registering`
+    )
+    const {fee, unknown} = readFeeAdvertisement(mintPay.metadata)
+    assert(!unknown, 'its Mint fees entry does not parse, so a WALLET cannot tell what registering costs')
+    addressFeeMsat = fee?.addressFeeMsat ?? null
+    return addressFeeMsat ? `address fee ${addressFeeMsat} msat` : 'registering is free'
+  })
+  if (!mintPay || mintPay.tag !== 'payRequest') return
+
+  await report.check('answers "unknown user" for a free username (LUD-26)', async () => {
+    const response = await call('GET', addressUrl)
+    assert(
+      refusedWith(response, 'unknown user'),
+      `${username}@ answered ${describe(response)} - a WALLET learns a username is free from exactly {"status": "ERROR", "reason": "unknown user"}`
+    )
+    if (response.status !== 200) {
+      throw soft(`"unknown user", but with HTTP ${response.status} - LNURL answers an error in its JSON, never an HTTP status code (LUD-01)`)
+    }
+    return 'unknown user'
+  })
+
+  await report.check('answers the CORS preflight a PUT or DELETE needs (LUD-26)', async () => {
+    const problems = []
+    for (const method of ['PUT', 'DELETE']) {
+      const response = await call('OPTIONS', addressUrl, {
+        headers: {
+          origin: 'https://wallet.example',
+          'access-control-request-method': method,
+          'access-control-request-headers': 'content-type'
+        }
+      })
+      const allowOrigin = response.headers.get('access-control-allow-origin')
+      const allowMethods = (response.headers.get('access-control-allow-methods') ?? '').toUpperCase()
+      if (response.status < 200 || response.status >= 300) problems.push(`${method}: HTTP ${response.status}`)
+      else if (allowOrigin !== '*' && allowOrigin !== 'https://wallet.example') problems.push(`${method}: no Access-Control-Allow-Origin`)
+      else if (allowMethods !== '*' && !allowMethods.split(/\s*,\s*/).includes(method)) {
+        problems.push(`${method}: Access-Control-Allow-Methods ${JSON.stringify(allowMethods)} leaves it out`)
+      }
+    }
+    assert(problems.length === 0, `a browser WALLET could never send these: ${problems.join('; ')}`)
+    return 'PUT and DELETE'
+  })
+
+  // The share registered first, and the one it moves to.
+  const first = freshShare()
+  const second = freshShare()
+
+  await report.check('refuses a registration proof that does not bind its key, domain and cx1', async () => {
+    const stranger = freshShare()
+    const probes = [
+      ['signed by a key that is not the cx1\'s', proof('register', stranger, username, first.cx1)],
+      ['signed for another domain', signRegistration(registrationMessage('register', `not-${domain}`, username, first.cx1), first.secretKey)],
+      ['signed for another username', proof('register', first, `${username}x`)],
+      ['over the 0.15 message, which binds no cx1', signRegistration(`LNURLcash:register:${domain}:${username}`, first.secretKey)],
+      ['not a signature', '00'.repeat(64)]
+    ]
+    for (const [what, sig] of probes) {
+      const response = await register(first, username, sig)
+      assert(refused(response), `accepted a proof ${what}: ${describe(response)} - LUD-26 verifies sig against x(P) of the cx1 over its own domain, username and cx1`)
+    }
+    const after = await call('GET', addressUrl)
+    assert(refusedWith(after, 'unknown user'), `a refused registration left the username taken: ${describe(after)}`)
+    return `${probes.length} bad proofs refused, the username still free`
+  })
+
+  await report.check('refuses the usernames mint and <name>+<tag> (LUD-26)', async () => {
+    for (const name of ['mint', `${username}+tag`]) {
+      const share = freshShare()
+      const response = await register(share, name)
+      if (accepted(response)) {
+        await mutate('DELETE', lnurlpUrl(origin, name), {sig: proof('unregister', share, name)}).catch(() => {})
+      }
+      assert(
+        refused(response),
+        name === 'mint'
+          ? `registered mint: ${describe(response)} - mint@ is the mint payRequest a WALLET finds the withdrawLink and fees at`
+          : `registered a username containing +: ${describe(response)} - a +tag is ignored, so <name>+<tag> pays <name>`
+      )
+    }
+    return 'both refused'
+  })
+
+  let registered = false
+  let held = false
+  let onFile = null
+  await report.check('registers a username with a valid proof (LUD-26)', async () => {
+    const response = await register(first)
+    assert(accepted(response), `refused a valid registration: ${describe(response)}`)
+    registered = true
+    onFile = first
+    const pr = response.body.pr
+    if (addressFeeMsat === null) {
+      assert(
+        pr === undefined || pr === null,
+        'answered a registration with an invoice, but its Mint fees advertise no address fee - without a third value registering is free, and a WALLET refuses the pr'
+      )
+      return `${username}@${new URL(mintUrl).host}, free`
+    }
+    assert(typeof pr === 'string', `advertises an address fee of ${addressFeeMsat} msat and answered with no pr to pay it`)
+    held = true
+    const charged = invoiceAmountMsat(pr)
+    assert(charged !== null, 'the address fee invoice carries no amount, so a WALLET cannot hold it to the advertised fee')
+    assert(
+      charged <= addressFeeMsat,
+      `charged ${charged} msat against an advertised address fee of ${addressFeeMsat} - a WALLET refuses a pr above what Mint fees says`
+    )
+    return `${username}@${new URL(mintUrl).host}, held on an address fee of ${charged} msat`
+  })
+
+  if (registered) {
+    await report.check('refuses a second registration of a taken username (LUD-26)', async () => {
+      const response = await register(freshShare())
+      assert(
+        refusedWith(response, 'already registered'),
+        `answered ${describe(response)} - a registration is never overwritten by a POST, and LUD-26 refuses it with exactly "already registered"${held ? ', held for an unpaid fee included' : ''}`
+      )
+      return 'already registered'
+    })
+
+    await report.check('refuses a cx1 it has accepted before (LUD-26)', async () => {
+      const other = `${username}b`
+      // The same x(P) under another chain code and parity is the same key:
+      // the proof binds the cx1, but the rule binds x(P).
+      const flipped = Uint8Array.from(first.pubkey)
+      flipped[0] = flipped[0] === 2 ? 3 : 2
+      const twin = {...first, chainCode: randomBytes(32)}
+      twin.cx1 = encodeCx1(twin.chainCode, flipped)
+      for (const [what, share] of [['the same cx1', first], ['the same x(P) under another chain code and parity', twin]]) {
+        const response = await register(share, other)
+        if (accepted(response)) {
+          await mutate('DELETE', lnurlpUrl(origin, other), {sig: proof('unregister', share, other)}).catch(() => {})
+        }
+        assert(
+          refusedWith(response, 'cx1 already used'),
+          `registered ${what} again under another username: ${describe(response)} - LUD-26 refuses any x(P) it has accepted with exactly "cx1 already used"`
+        )
+      }
+      return 'cx1 already used, by cx1 and by x(P)'
+    })
+  }
+
+  if (held) {
+    await report.check('publishes no address before its fee settles (LUD-26)', async () => {
+      const response = await call('GET', addressUrl)
+      assert(
+        response.body?.tag !== 'payRequest',
+        'serves the payRequest of a registration whose address fee is unpaid - LUD-26 publishes nothing, auto-mints nothing, until the invoice settles'
+      )
+      return response.body?.reason ? `answers ${JSON.stringify(response.body.reason)}` : 'not published'
+    })
+    for (const name of [
+      'publishes the registered address',
+      'refuses an update without both proofs (LUD-26)',
+      'refuses an update for an unknown username (LUD-26)',
+      'moves a username to a new cx1 with a PUT (LUD-26)',
+      'refuses an unregister not signed by the key on file (LUD-26)',
+      'unregisters with the key on file (LUD-26)',
+      'never accepts an unregistered cx1 again (LUD-26)'
+    ]) {
+      report.skip(name, `the registration is held on an address fee the grader does not pay; ${username} comes free when the invoice expires`)
+    }
+  } else if (registered) {
+    await report.check('publishes the registered address', async () => {
+      const pay = await get(addressUrl)
+      assert(pay.tag === 'payRequest', `${username}@ answered ${JSON.stringify(pay).slice(0, 120)} after registering`)
+      assert(typeof pay.callback === 'string' && isAllowedUrl(pay.callback), `callback is not a fetchable URL: ${pay.callback}`)
+      const upper = await get(lnurlpUrl(origin, username.toUpperCase()))
+      assert(
+        upper.tag === 'payRequest',
+        `${username.toUpperCase()}@ answered ${JSON.stringify(upper).slice(0, 120)} - a username is case-insensitive`
+      )
+      await gradeAddressRules(addressUrl, pay, report, {mintPay})
+      return `${username}@ and ${username.toUpperCase()}@`
+    })
+
+    await report.check('refuses an update without both proofs (LUD-26)', async () => {
+      const stranger = freshShare()
+      const probes = [
+        ['sig not by the key on file', proof('update', stranger, username, second.cx1), proof('register', second)],
+        ['newsig not by the new cx1\'s key', proof('update', first, username, second.cx1), proof('register', stranger, username, second.cx1)],
+        ['sig binding another cx1', proof('update', first, username, stranger.cx1), proof('register', second)],
+        ['no newsig', proof('update', first, username, second.cx1), null]
+      ]
+      for (const [what, sig, newsig] of probes) {
+        const response = await mutate('PUT', addressUrl, {cx1: second.cx1, sig, ...(newsig ? {newsig} : {})})
+        assert(refused(response), `accepted an update with ${what}: ${describe(response)} - LUD-26 verifies sig by the key on file and newsig by the new cx1's`)
+      }
+      return `${probes.length} refused`
+    })
+
+    await report.check('refuses an update for an unknown username (LUD-26)', async () => {
+      const name = `${username}c`
+      const share = freshShare()
+      const response = await mutate('PUT', lnurlpUrl(origin, name), {
+        cx1: share.cx1,
+        sig: proof('update', first, name, share.cx1),
+        newsig: proof('register', share, name)
+      })
+      assert(refusedWith(response, 'unknown user'), `answered ${describe(response)} - LUD-26 refuses a PUT for a username not registered with exactly "unknown user"`)
+      return 'unknown user'
+    })
+
+    await report.check('moves a username to a new cx1 with a PUT (LUD-26)', async () => {
+      const response = await mutate('PUT', addressUrl, {
+        cx1: second.cx1,
+        sig: proof('update', first, username, second.cx1),
+        newsig: proof('register', second)
+      })
+      assert(accepted(response), `refused a valid update: ${describe(response)}`)
+      onFile = second
+      assert(!response.body.pr, 'charged for an update - LUD-26 charges no address fee to move a username')
+      const back = await mutate('PUT', addressUrl, {
+        cx1: first.cx1,
+        sig: proof('update', second, username, first.cx1),
+        newsig: proof('register', first)
+      })
+      assert(
+        refusedWith(back, 'cx1 already used'),
+        `moved the username back to its first cx1: ${describe(back)} - a PUT is held to "cx1 already used" like a POST`
+      )
+      if (accepted(back)) onFile = first
+      return 'updated, no fee, and the first cx1 refused'
+    })
+
+    await report.check('refuses an unregister not signed by the key on file (LUD-26)', async () => {
+      const stale = onFile === second ? first : freshShare()
+      for (const [what, sig] of [
+        ['by a key no longer on file', proof('unregister', stale)],
+        ['for another domain', signRegistration(registrationMessage('unregister', `not-${domain}`, username), onFile.secretKey)]
+      ]) {
+        const response = await mutate('DELETE', addressUrl, {sig})
+        assert(refused(response), `unregistered on a proof ${what}: ${describe(response)}`)
+      }
+      const still = await get(addressUrl)
+      assert(still.tag === 'payRequest', `a refused unregister took the address down: ${JSON.stringify(still).slice(0, 120)}`)
+      return 'refused, still published'
+    })
+
+    await report.check('unregisters with the key on file (LUD-26)', async () => {
+      const response = await mutate('DELETE', addressUrl, {sig: proof('unregister', onFile)})
+      assert(accepted(response), `refused a valid unregister: ${describe(response)}`)
+      registered = false
+      const after = await call('GET', addressUrl)
+      assert(refusedWith(after, 'unknown user'), `${username}@ answered ${describe(after)} after unregistering - it is free again`)
+      return 'unregistered, unknown user'
+    })
+
+    await report.check('never accepts an unregistered cx1 again (LUD-26)', async () => {
+      if (registered) throw soft('the username is still registered, so this cannot be told apart from "already registered"')
+      const response = await register(first)
+      if (accepted(response)) {
+        registered = true
+        onFile = first
+      }
+      assert(
+        refusedWith(response, 'cx1 already used'),
+        `registered a cx1 it accepted once before: ${describe(response)} - LUD-26 refuses any x(P) it has ever accepted, so a captured proof never applies again`
+      )
+      return 'cx1 already used'
+    })
+  }
+
+  await report.check('answers every POST, PUT and DELETE with CORS (LUD-26)', async () => {
+    assert(mutations.length > 0, 'nothing was sent')
+    const bare = mutations.filter(({response}) => response.headers.get('access-control-allow-origin') !== '*')
+    assert(
+      bare.length === 0,
+      `${[...new Set(bare.map(m => m.method))].join(', ')} answered without Access-Control-Allow-Origin: * - LUD-26 requires it on every POST, PUT and DELETE, so a browser WALLET can read the answer`
+    )
+    const coded = mutations.filter(({response}) => response.status !== 200)
+    if (coded.length > 0) {
+      throw soft(`${coded.length} answered with an HTTP status other than 200 (${[...new Set(coded.map(m => m.response.status))].join(', ')}) - LUD-26 answers in JSON, never with a status code`)
+    }
+    return `${mutations.length} responses`
+  })
+
+  // Leave nothing registered behind that the grade can still take down.
+  if (registered && !held && onFile) {
+    await mutate('DELETE', addressUrl, {sig: proof('unregister', onFile)}).catch(() => {})
+  }
+  return {username, domain, addressFeeMsat}
 }
 
 // ---- the minted-value check ----------------------------------------------

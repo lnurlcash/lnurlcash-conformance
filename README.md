@@ -221,6 +221,36 @@ than it owes warns too: whether it is fully backed is the operator's to
 disclose, and a mint that publishes an uncomfortable number is behaving
 better than one that publishes nothing.
 
+### Lightning Address (LUD-26)
+
+```bash
+npx lnurlcash-conform alice@example.com --address   # a registered address
+npx lnurlcash-conform mint@example.com --register   # registration, update, unregister
+```
+
+`--address` grades a `cx1`-registered Lightning Address by LUD-26's rules
+instead of the payLink's: no `commentAllowed`, a plain LUD-16 payment taken
+with no comment, `mint@`'s `withdrawLink` and `Mint fees`, a `+tag` paying the
+same share, and no `cx1` published where a payer can read it (the retired
+`text/cpub` hint warns). It is declared, not detected: a mint that falls back
+to a preimage-keyed note looks the same before settlement.
+
+`--register` mutates. It registers a throwaway username with a share only the
+runner holds and checks `"unknown user"` while it is free, the CORS preflight
+for PUT and DELETE and `Access-Control-Allow-Origin: *` on every mutation,
+refusal of proofs that do not bind the `cx1`'s key, the domain and the `cx1`,
+refusal of `mint` and `<name>+<tag>`, `"already registered"` for a taken
+username, and `"cx1 already used"` for any `x(P)` accepted before, under
+another chain code and parity too. It then updates the username to a second
+share (refusing a PUT missing either proof, and an update for an unknown
+username) and unregisters it (refusing a proof by a key no longer on file),
+and checks that the first `cx1` is never accepted again. Where `mint@`
+advertises an address fee (`Mint fees: <base>,<ppm>,<address_fee_msat>`), the
+registration must come back with a `pr` no larger than it and the address must
+stay unpublished; the runner does not pay it, so the update and unregister
+half is skipped. A registration answered with a `pr` when no fee is
+advertised fails.
+
 One check needs a real payment, which the runner cannot make on its own.
 Given a freshly minted, never-rotated note and what its mint invoice was
 paid at, it compares the note's value against the advertised fee:

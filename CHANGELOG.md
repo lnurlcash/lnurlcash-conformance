@@ -15,6 +15,67 @@ as LUD-25 now says. The check now requires exactly `already in use`, and
 the mock mint answers that way (`burnedReason` makes it use another, which
 the self-grade checks is caught).
 
+**LUD-26 Lightning Address and address fee are graded.** 0.16.0 left them
+out (see its "Not yet updated").
+
+- `--address` follows LUD-26: an address MUST NOT set `commentAllowed`, takes
+  a payment that names no note, carries `mint@`'s `withdrawLink` and `Mint
+  fees`, and pays the same share at `<name>+<tag>`. The `text/cpub`
+  internal-transfer hint is no longer required; publishing it, or any `cx1`,
+  now warns, since anyone can then watch the share. An address is no longer
+  graded against the payLink comment rules, the mint address document or
+  `/stats`, which are `mint@`'s.
+- New `--register` (`gradeRegistration`), mutating: registers a throwaway
+  username with a grader-held share, then updates and unregisters it. Graded:
+  `"unknown user"` while free; the PUT/DELETE preflight and
+  `Access-Control-Allow-Origin: *` on every POST, PUT and DELETE; refusal of
+  proofs not bound to the `cx1`'s key, the domain or the `cx1` (the 0.15
+  message included); refusal of `mint` and `<name>+<tag>`;
+  `"already registered"`; `"cx1 already used"` for any `x(P)` accepted
+  before, under another chain code and parity, by PUT, and after
+  unregistering; a PUT needing both `sig` and `newsig`, `"unknown user"` for
+  one on a free name, and no fee for it; DELETE by the key on file only.
+- The address fee: a registration against an advertised fee must answer with
+  a `pr` stating an amount no larger than it, and the address must stay
+  unpublished until it settles (the grader does not pay, so the update and
+  unregister half is skipped). A `pr` with no fee advertised fails. The
+  metadata check names the address fee, and warns on a third value that does
+  not parse.
+- `parseAdvertisedMintFee` now returns `addressFeeMsat` and reads exactly as
+  `fees.json` does (`Mint fees: 0,0,21000` is an address fee, not fee-free);
+  new `readFeeAdvertisement` also says when a token did not parse. The
+  selfcheck runs it over every `fees.json` parse case.
+- New exports `encodeCx1`, `decodeCx1`, `registrationMessage`,
+  `signRegistration` and `verifyRegistration` (`runner/share.mjs`), held by
+  the selfcheck to luds' 26-vectors cx1s and proofs byte for byte.
+- Removed: `parseInternalTransferHint` and its `InternalTransferHint` type.
+
+Mock mint:
+
+- Serves LUD-26 registration (POST, PUT, DELETE and the preflight) at every
+  `/.well-known/lnurlp/<username>`, and an unknown username answers
+  `"unknown user"` with HTTP 200, not `Unknown user.` with a 404.
+- `registeredAddress` now pre-registers `registeredUsername` (`alice`) against
+  26-vectors' first share instead of turning the mint payRequest into an
+  address. Address payments credit the share's next unused key by BIP-32
+  `CKDpub`, picked at settlement and skipping one in use, so the notes are
+  luds' own. `addressHintType` is gone.
+- `addressFeeMsat` advertises and charges an address fee; `state.settle()`
+  settles any invoice (quote, address payment or fee).
+- New defects, each caught by the self-grade: `addressFeeChargedMsat`,
+  `publishesUnpaidAddress`, `registrationUnverified`,
+  `registrationWithoutCx1`, `overwritesRegistration`, `reusesCx1`,
+  `acceptsReservedUsernames`, `updateChecksOnly`, `unregisterUnverified`,
+  `registrationReasons`, `noMutationCors`, `noPreflight`,
+  `addressCommentAllowed`, `plusTagUnknown`, `addressFeesDiffer`,
+  `addressHint`.
+- Fake invoices no longer hold a `1` in their data part, which made every
+  invoice amount unreadable and silently skipped the grader's
+  invoiced-amount checks against the mock.
+
+Not yet graded: LUD-26 internal transfer (a note sent to an address's
+callback), which needs a spendable note and a registered address together.
+
 ## 0.16.0 - 2026-11-03
 
 Breaking. Follows LUD-26 as split out of LUD-25 (lnurl/luds `b62b8bf` and

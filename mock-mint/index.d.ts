@@ -51,11 +51,6 @@ export interface MockMintOptions {
    */
   certificateNames?: 'c' | 'sig' | 'both'
   /**
-   * The metadata type of a registered address's internal-transfer hint:
-   * 'text/cpub' (default) as of luds 50d740a, 'text/xpub' before.
-   */
-  addressHintType?: string
-  /**
    * The hosts a spend's signature may be bound to, as a list or a
    * comma-separated string. Unset, the hostname the mock was reached at.
    */
@@ -257,6 +252,69 @@ export interface MockMintOptions {
    * pass one.
    */
   mintToHashAdvertisedOn?: MintToHashPlace[] | string
+
+  // ---- LUD-26 Lightning Address ----
+  //
+  // Registration (POST, PUT and DELETE on /.well-known/lnurlp/<username>)
+  // is always served.
+
+  /**
+   * Pre-register `registeredUsername` against 26-vectors.json's first share
+   * (derivation[1], account 0, share 0), already paid, so its notes are
+   * luds' own.
+   */
+  registeredAddress?: boolean
+  /** default 'alice' */
+  registeredUsername?: string
+  /** the address fee per registration, advertised as Mint fees' third value; 0 is free */
+  addressFeeMsat?: number
+  /** what the registration invoice charges, when not what is advertised */
+  addressFeeChargedMsat?: number
+  /** non-compliant: serve an address before its fee settles */
+  publishesUnpaidAddress?: boolean
+  /** non-compliant: accept any registration, update or unregister proof */
+  registrationUnverified?: boolean
+  /** non-compliant: verify the 0.15 register message, which binds no cx1 */
+  registrationWithoutCx1?: boolean
+  /** non-compliant: let a POST replace a registration */
+  overwritesRegistration?: boolean
+  /**
+   * non-compliant: true accepts any cx1 again; 'afterUnregister' forgets a
+   * cx1 once off file; 'byCx1' compares the string rather than x(P)
+   */
+  reusesCx1?: boolean | 'afterUnregister' | 'byCx1'
+  /** non-compliant: register `mint` or a username containing `+` */
+  acceptsReservedUsernames?: boolean
+  /** non-compliant: verify only one of an update's two proofs */
+  updateChecksOnly?: 'sig' | 'newsig'
+  /** non-compliant: unregister on any proof */
+  unregisterUnverified?: boolean
+  /** 'lud26' (default) refuses with LUD-26's exact reasons; 'other' does not */
+  registrationReasons?: 'lud26' | 'other'
+  /** non-compliant: no Access-Control-Allow-Origin on POST, PUT and DELETE */
+  noMutationCors?: boolean
+  /** non-compliant: refuse the OPTIONS preflight */
+  noPreflight?: boolean
+  /** non-compliant: an address payRequest that sets commentAllowed */
+  addressCommentAllowed?: boolean
+  /** non-compliant: answer <name>+<tag> as an unknown user */
+  plusTagUnknown?: boolean
+  /** non-compliant: an address advertising other Mint fees than mint@ */
+  addressFeesDiffer?: boolean
+  /** non-compliant: publish the share's cx1 as the retired text/cpub hint */
+  addressHint?: boolean
+}
+
+export interface MockRegistration {
+  cx1: string
+  chainCode: Uint8Array
+  /** the share's compressed P */
+  pubkey: Uint8Array
+  /** hex x(P) */
+  xOnly: string
+  /** false while held on an unpaid address fee */
+  paid: boolean
+  paymentHash?: string
 }
 
 export interface MintContact {
@@ -301,6 +359,12 @@ export interface MockMintState {
       boundH?: string | null
       /** the exact invoice returned on the quote, for LUD-21 binding */
       pr?: string
+      /** the username an address payment credits */
+      share?: string
+      /** the username an address fee holds */
+      registrationFor?: string
+      /** hex(Q) an address payment was credited at, once settled */
+      creditedTo?: string
     }
   >
   pubkey: string
@@ -331,6 +395,14 @@ export interface MockMintState {
   noteState(k1: string): NoteState | null
   settleMelt(k1: string): void
   failMelt(k1: string): void
+  /**
+   * Settle an invoice this mock issued, as its node would: a mint quote's
+   * note, an address payment's share note (at `creditedTo`) or an address
+   * fee's registration. Null for an unknown payment hash.
+   */
+  settle(paymentHash: string): MockMintState['invoices'] extends Map<string, infer I> ? I | null : never
+  /** LUD-26 registrations, by lowercase username */
+  registrations: Map<string, MockRegistration>
 }
 
 export interface MockMint {
