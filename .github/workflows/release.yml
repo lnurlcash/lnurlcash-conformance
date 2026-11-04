@@ -1,50 +1,177 @@
 name: release
 
-# Hardened npm release via forgesworn/anvil: OIDC trusted publishing (no
-# NPM_TOKEN), SLSA provenance, secret scan on the pack set, exports check,
-# frozen-vector gate, and a two-runner reproducible-build attestation.
+# Cutting a release is just tagging a commit on main: a vX.Y.Z tag publishes
+# lnurlcash-conformance X.Y.Z to npm and creates the GitHub Release. The tag
+# is the sole source of truth for the version - package.json carries a
+# 0.0.0-dev placeholder and the build stamps the tag's version into it with
+# `npm version` before packing, so there is no "bump package.json first"
+# step to forget (same model as lnurl-wallet's release-kit.yml).
 #
-# Two triggers land on this one file, which is the OIDC entry-point npm's
-# trusted publisher matches against:
-#   push of a v* tag    - this publishes it, then creates the GitHub Release
-#                         from the tag's CHANGELOG section
-#   workflow_dispatch   - publish a specific tag by hand
-#
-# The tag is passed to anvil explicitly (its chained mode): a Release this
-# workflow creates with GITHUB_TOKEN fires no workflow of its own, and there
-# is deliberately no `release: published` trigger either, so a tag is never
-# published twice.
-#
-# npm matches the trusted publisher against THIS caller workflow, not
-# against forgesworn/anvil - configure it on npmjs.com as repo
-# lnurlcash/lnurlcash-conformance, workflow release.yml. The very
-# first publish of a new package name cannot use OIDC at all
-# (npm/cli#8544); it is seeded by hand once, and trusted publishing takes
-# over from there.
+# npm matches the trusted publisher against THIS workflow file and the
+# npm-publish environment - configure it on npmjs.com as repo
+# lnurlcash/lnurlcash-conformance, workflow release.yml, environment
+# npm-publish. No NPM_TOKEN: publishing is OIDC with provenance.
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to publish (e.g. v0.1.0)
+        description: Release tag to publish, for example v0.16.2
         type: string
+        required: true
+      publish:
+        description: Publish to npm and create the GitHub Release after validation
+        type: boolean
+        default: false
         required: true
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    uses: forgesworn/anvil/.github/workflows/release.yml@d4294e622932d93957d73e5b1af0267382b6af04 # v0.10.1
-    with:
-      tag: ${{ inputs.tag || github.ref_name }}
-      # The vectors ARE the product here: regenerate them and fail the
-      # release if a single byte moved from what is committed.
-      vector-test-command: npm run generate && git diff --exit-code vectors/
-      # ci.yml actions are SHA-pinned, so the pin audit runs strict.
-      strict-action-pins: true
-      lifecycle-scripts-policy: strict
-      reproducibility-mode: strict
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      filename: ${{ steps.pack.outputs.filename }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release commit is on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::Release tags must point to a commit on origin/main"
+            exit 1
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.11.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Derive and set the package version from the release tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # npm itself rejects anything that is not a valid semver
+          npm version "${RELEASE_TAG#v}" --no-git-tag-version --allow-same-version
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The vectors ARE the product: `check` regenerates them and fails if a
+      # single byte moved from what is committed, then runs the self-check
+      # and the full self-grade of the grader against the mock mint.
+      - name: Check package
+        run: npm run check
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Verify public exports load
+        run: |
+          node --input-type=module <<'NODE'
+          const grader = await import('lnurlcash-conformance')
+          const mock = await import('lnurlcash-conformance/mock-mint')
+          const expected = ['gradeMint', 'gradeRegistration', 'readFeeAdvertisement', 'decodeCx1']
+          const missing = expected.filter(name => typeof grader[name] !== 'function')
+          if (missing.length) throw new Error(`Missing exports: ${missing.join(', ')}`)
+          if (!Object.keys(mock).length) throw new Error('mock-mint exports nothing')
+          NODE
+
+      - name: Pack exact release artefact
+        id: pack
+        run: |
+          set -euo pipefail
+          pack_json="$(npm pack --pack-destination "$RUNNER_TEMP" --json --ignore-scripts)"
+          filename="$(jq -r '(if type == "array" then .[0] else first(.[]) end).filename' <<<"$pack_json")"
+          test -n "$filename"
+          test -f "$RUNNER_TEMP/$filename"
+          npm publish --dry-run --access public "$RUNNER_TEMP/$filename"
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from CHANGELOG
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # the "## X.Y.Z - date" section, up to the next "## " heading;
+          # empty if the CHANGELOG has none for this version
+          awk -v v="$VERSION" '
+            /^## / { if (found) exit; found = ($2 == v) ; next }
+            found
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          wc -l "$RUNNER_TEMP/notes.md"
+
+      - name: Upload release artefact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            ${{ runner.temp }}/${{ steps.pack.outputs.filename }}
+            ${{ runner.temp }}/notes.md
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: |
+      needs.build.result == 'success' &&
+      (github.event_name == 'push' || inputs.publish == true)
+    runs-on: ubuntu-24.04
+    environment:
+      name: npm-publish
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Set up Node with npm trusted publishing
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.11.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Download validated release artefact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+
+      - name: Publish exact artefact to npm
+        env:
+          TARBALL: ${{ runner.temp }}/release/${{ needs.build.outputs.filename }}
+        run: npm publish --access public --provenance "$TARBALL"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          NOTES: ${{ runner.temp }}/release/notes.md
+          TARBALL: ${{ runner.temp }}/release/${{ needs.build.outputs.filename }}
+        run: |
+          set -euo pipefail
+          if [[ -s "$NOTES" ]]; then
+            notes=(--notes-file "$NOTES")
+          else
+            notes=(--generate-notes)
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_TAG" \
+            "${notes[@]}" \
+            "$TARBALL"

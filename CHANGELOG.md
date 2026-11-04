@@ -4,16 +4,7 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
-## 0.16.1 - unreleased
-
-**A burned note is "already in use".** LUD-25 fixes that answer, at the
-informational GET and the callback alike (luds `92abbb3`), and a LUD-26
-recovery scan counts it, and only it, as a used index. 0.16.0 still graded
-"reports a spent note distinguishably from an unknown one" against the old
-wording, a reason containing "spent", so it failed every mint that answers
-as LUD-25 now says. The check now requires exactly `already in use`, and
-the mock mint answers that way (`burnedReason` makes it use another, which
-the self-grade checks is caught).
+## 0.16.2 - 2026-11-04
 
 **LUD-26 Lightning Address and address fee are graded.** 0.16.0 left them
 out (see its "Not yet updated").
@@ -75,6 +66,26 @@ Mock mint:
 
 Not yet graded: LUD-26 internal transfer (a note sent to an address's
 callback), which needs a spendable note and a registered address together.
+
+**The release version comes from the tag.** Pushing a `vX.Y.Z` tag on main
+publishes X.Y.Z: `package.json` holds a `0.0.0-dev` placeholder and the
+release workflow stamps the tag's version in before packing, so there is
+no version bump to forget. The workflow is now the repo's own (as in
+lnurl-wallet) instead of forgesworn/anvil, whose tag gate refused any tag
+that did not already match `package.json`. It still publishes over OIDC
+with provenance, runs `npm run check` (the frozen-vector gate included)
+and creates the GitHub Release from this file's section for the version.
+
+## 0.16.1 - 2026-11-03
+
+**A burned note is "already in use".** LUD-25 fixes that answer, at the
+informational GET and the callback alike (luds `92abbb3`), and a LUD-26
+recovery scan counts it, and only it, as a used index. 0.16.0 still graded
+"reports a spent note distinguishably from an unknown one" against the old
+wording, a reason containing "spent", so it failed every mint that answers
+as LUD-25 now says. The check now requires exactly `already in use`, and
+the mock mint answers that way (`burnedReason` makes it use another, which
+the self-grade checks is caught).
 
 ## 0.16.0 - 2026-11-03
 
