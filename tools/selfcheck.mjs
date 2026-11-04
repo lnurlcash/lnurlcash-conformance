@@ -42,6 +42,8 @@ import {
   taprootTweak,
   tweakSecretKey
 } from '../runner/spend.mjs'
+import {decodeCx1 as graderDecodeCx1, encodeCx1 as graderEncodeCx1, registrationMessage, signRegistration, verifyRegistration} from '../runner/share.mjs'
+import {readFeeAdvertisement} from '../runner/index.mjs'
 
 const VECTORS = join(dirname(fileURLToPath(import.meta.url)), '..', 'vectors')
 const load = name => JSON.parse(readFileSync(join(VECTORS, name), 'utf8'))
@@ -814,6 +816,19 @@ const grossUp = (net, f) => {
   }
   return lo
 }
+
+// The grader reads Mint fees with its own parser; it must read every case
+// exactly as the vectors say a WALLET does.
+check("the grader's Mint fees parser reads every parse case as fees.json says", () => {
+  for (const c of fees.parse) {
+    const got = readFeeAdvertisement(c.metadata)
+    assert(
+      JSON.stringify(got.fee) === JSON.stringify(c.expect),
+      `${c.metadata}: expected ${JSON.stringify(c.expect)}, the grader reads ${JSON.stringify(got.fee)}`
+    )
+    assert(got.unknown === Boolean(c.unknown), `${c.metadata}: unknown is ${got.unknown}`)
+  }
+})
 
 check('every apply expectation follows from the formula', () => {
   for (const c of fees.apply) {
@@ -1640,6 +1655,36 @@ check("spec-vectors: lud26 registration proofs verify under each share's x(P), b
   verify('update sig', r.update.sig, `LNURLcash:update:${at}:${r.new_cx1}`, old)
   verify('update newsig', r.update.newsig, `LNURLcash:register:${at}:${r.new_cx1}`, renewed)
   verify('unregister', r.unregister, `LNURLcash:unregister:${at}`, renewed)
+})
+
+// The grader's own LUD-26 reading, held to luds' numbers: every share's cx1
+// and every registration proof, reproduced byte for byte with the zero
+// aux_rand 26-vectors.json signs with.
+check("the grader's cx1s and registration proofs are luds' own", () => {
+  for (const derivation of LUDS_26.derivation) {
+    for (const account of derivation.accounts) {
+      for (const share of account.shareable) {
+        assert(graderEncodeCx1(hexToBytes(share.chaincode), hexToBytes(share.P)) === share.cx1, `${share.path}: cx1`)
+        const decoded = graderDecodeCx1(share.cx1)
+        assert(decoded && bytesToHex(decoded.chainCode) === share.chaincode && bytesToHex(decoded.pubkey) === share.P, `${share.path}: cx1 decodes`)
+      }
+    }
+  }
+  const r = LUDS_26.registration
+  const [old, renewed] = LUDS_26.derivation[1].accounts[0].shareable
+  const zero = new Uint8Array(32)
+  for (const [label, proof, message, share] of [
+    ['register', r.register, registrationMessage('register', r.domain, r.username, r.cx1), old],
+    ['update sig', r.update.sig, registrationMessage('update', r.domain, r.username, r.new_cx1), old],
+    ['update newsig', r.update.newsig, registrationMessage('register', r.domain, r.username, r.new_cx1), renewed],
+    ['unregister', r.unregister, registrationMessage('unregister', r.domain, r.username), renewed]
+  ]) {
+    assert(message === proof.message, `${label}: message`)
+    assert(signRegistration(message, hexToBytes(share.p), zero) === proof.sig, `${label}: signature`)
+    assert(verifyRegistration(message, proof.sig, hexToBytes(share.P).slice(1)), `${label}: does not verify`)
+  }
+  assert(registrationMessage('register', 'Cash.Example.COM', 'Alice', r.cx1) === r.register.message, 'domain and username are lowercased')
+  assert(graderDecodeCx1(bech32m.encode('cx', bech32m.toWords(hexToBytes(old.chaincode + old.P.slice(2))), 200)) === null, 'the 64-byte pre-a6c4652 shape decodes as a cx1')
 })
 
 // ---- spends ----

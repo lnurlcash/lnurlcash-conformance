@@ -97,6 +97,8 @@ CLI: npx lnurlcash-mock-mint --port=8899  (nothing is payable)
 npx lnurlcash-conform mint@example.com                        read-only
 npx lnurlcash-conform mint@example.com --note=<url> --preimage=<hex>  bound mint
 npx lnurlcash-conform mint@example.com --note=<url> --spend   full, burns the note
+npx lnurlcash-conform alice@example.com --address             a registered address
+npx lnurlcash-conform mint@example.com --register             registration (mutating)
 
 Exit code non-zero on any failure. The optional extensions are graded
 softly: a mint publishing none of them loses nothing, a published field of
@@ -114,8 +116,18 @@ p1 naming a burned note refused as exactly "already in use"; a retry respelt
 (preimage vs full cw1, h vs cp1) replayed. A missing cs1 warns (SHOULD); a
 cs1 not over hex(Q) fails. Certificates are read from c and c2 only; a mint
 sending only the pre-50d740a sig/sig2 is graded uncertified (warns), and one
-sending both names passes. --address reads the internal-transfer hint from
-text/cpub (text/xpub before 50d740a is not read). Value always comes home.
+sending both names passes. Value always comes home.
+
+--address grades a LUD-26 registered Lightning Address: no commentAllowed,
+a plain payment with no comment, mint@'s withdrawLink and Mint fees, +tag
+paying the same share; a published cx1 or text/cpub hint warns.
+--register (mutating) registers a throwaway username: "unknown user" while
+free, CORS preflight and ACAO * on POST/PUT/DELETE, proofs bound to key,
+domain and cx1, mint and <name>+<tag> refused, "already registered",
+"cx1 already used" by x(P), PUT needing sig and newsig, "unknown user" for a
+PUT on a free name, DELETE by the key on file only, a cx1 never accepted
+again. With an advertised address fee the pr must not exceed it, the address
+stays unpublished, and the update/unregister half is skipped.
 
 ## Notes and spends, canonically (luds 6e865b1, keys per 50d740a)
 
