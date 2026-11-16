@@ -3,8 +3,9 @@
   "spec": "LUD-25 draft (lnurl/luds#301)",
   "description": "Optional mint fees (LUD-25) and the address fee (LUD-26). A SERVICE advertises what it withholds on minting with a \"Mint fees: <base_fee_msat>,<fee_ppm>\" token anywhere in its text/plain metadata entry, so a WALLET can warn the payer that the note it ends up holding is worth less than the invoice it paid. The values are plain base-10 integers separated by commas and end at whitespace or the end of the entry; \"Mint fees:\" may be followed by spaces. A third value is LUD-26's address fee per Lightning Address registration (addressFeeMsat; null when absent or unparseable, which a WALLET reads as free and so refuses any registration invoice). A SERVICE without the token is fee-free; a token whose first two values do not parse is a fee the WALLET does not know (expect null, unknown: true), and it relies on maxWithdrawable alone.",
   "formula": {
-    "apply": "max(0, gross - base_fee_msat - floor(gross * fee_percent_ppm / 1_000_000))",
-    "grossUp": "the smallest gross for which apply(gross) == net",
+    "apply": "max(0, gross - base_fee_msat - floor(gross * fee_ppm / 1_000_000)), rounded down to whole satoshis (luds fd80cdd)",
+    "grossUp": "the smallest gross for which apply(gross) >= net; equal to net when net is whole satoshis",
+    "baseFee": "base_fee_msat MUST be a multiple of 1000; an advertisement whose base is not is unknown",
     "overflowWarning": "compute the proportional term as floor(gross/1e6)*ppm + floor((gross%1e6)*ppm/1e6). A direct gross*ppm overflows 64-bit unsigned at realistic amounts (2.1e15 msat is 21M BTC; times 999999 ppm is ~2.1e21, past the 1.8e19 limit).",
     "minimality": "grossUp must return the exact minimum. A linear estimate followed by a one-msat walk is unbounded for a near-100% fee - about a million steps at 999999 ppm - so any guard on that walk yields a non-minimal answer on input a hostile SERVICE can choose. Use binary search: apply is non-decreasing with steps of 0 or 1."
   },
@@ -156,12 +157,18 @@
       "expect": null
     },
     {
-      "metadata": "[[\"text/plain\",\"Mint fees: 500,0\"]]",
+      "metadata": "[[\"text/plain\",\"Mint fees: 2000,0\"]]",
       "expect": {
-        "baseFeeMsat": 500,
+        "baseFeeMsat": 2000,
         "feePpm": 0,
         "addressFeeMsat": null
       }
+    },
+    {
+      "metadata": "[[\"text/plain\",\"Mint fees: 500,0\"]]",
+      "expect": null,
+      "unknown": true,
+      "why": "base_fee_msat MUST be a multiple of 1000 (luds fd80cdd): a sub-satoshi base cannot be withheld from a whole-satoshi credit, so the fee is unknown"
     },
     {
       "metadata": "[[\"text/plain\",\"Mint fees: 0,5000\"]]",
@@ -172,9 +179,9 @@
       }
     },
     {
-      "metadata": "[[\"text/plain\",\"Mint fees: 500,0\"],[\"text/plain\",\"Mint fees: 1000,2000\"]]",
+      "metadata": "[[\"text/plain\",\"Mint fees: 2000,0\"],[\"text/plain\",\"Mint fees: 1000,2000\"]]",
       "expect": {
-        "baseFeeMsat": 500,
+        "baseFeeMsat": 2000,
         "feePpm": 0,
         "addressFeeMsat": null
       },
@@ -188,7 +195,7 @@
         "baseFeeMsat": 1000,
         "feePpm": 2000
       },
-      "expect": 98800
+      "expect": 98000
     },
     {
       "grossMsat": 100000,
@@ -213,7 +220,7 @@
         "baseFeeMsat": 0,
         "feePpm": 1
       },
-      "expect": 1001,
+      "expect": 1000,
       "why": "the proportional part floors to zero"
     },
     {
@@ -222,7 +229,7 @@
         "baseFeeMsat": 0,
         "feePpm": 1
       },
-      "expect": 1999998
+      "expect": 1999000
     },
     {
       "grossMsat": 0,
@@ -238,15 +245,15 @@
         "baseFeeMsat": 0,
         "feePpm": 10000
       },
-      "expect": 20790
+      "expect": 20000
     },
     {
       "grossMsat": 2100000000000000,
       "fee": {
-        "baseFeeMsat": 3,
+        "baseFeeMsat": 0,
         "feePpm": 999999
       },
-      "expect": 2099999997,
+      "expect": 2100000000,
       "why": "21M BTC in msat at a 99.9999% fee: a naive gross*ppm multiply overflows 64-bit unsigned here and produces a wrong answer"
     },
     {
@@ -264,8 +271,8 @@
         "baseFeeMsat": 1000,
         "feePpm": 1000
       },
-      "expect": 498500,
-      "why": "nets 498500 msat. A fee implementation that works in whole sats rounds the withheld fee up to 2000 msat here and mints a 498000 msat note - half a sat short of conformant. The formula is msat-exact; a minted note is worth apply(gross) to the msat"
+      "expect": 498000,
+      "why": "nets 498500 msat before rounding, so the note is worth 498000 msat: the credit is rounded down to whole satoshis (luds fd80cdd). An implementation that stays msat-exact mints a note half a sat too large"
     }
   ],
   "grossUp": [
@@ -275,7 +282,7 @@
         "baseFeeMsat": 1000,
         "feePpm": 2000
       },
-      "expect": 99999
+      "expect": 100200
     },
     {
       "netMsat": 100000,
@@ -291,7 +298,7 @@
         "baseFeeMsat": 1000,
         "feePpm": 0
       },
-      "expect": 1001
+      "expect": 2000
     },
     {
       "netMsat": 10000,
@@ -312,19 +319,19 @@
     {
       "netMsat": 1,
       "fee": {
-        "baseFeeMsat": 3,
+        "baseFeeMsat": 0,
         "feePpm": 999999
       },
-      "expect": 3000001,
+      "expect": 999000001,
       "why": "a 99.9999% fee: the answer is far below the linear estimate, so an estimate-then-walk implementation returns a non-minimal gross unless its guard is around a million steps"
     },
     {
       "netMsat": 1000000,
       "fee": {
-        "baseFeeMsat": 3,
+        "baseFeeMsat": 0,
         "feePpm": 999999
       },
-      "expect": 1000002000001
+      "expect": 999999000001
     },
     {
       "netMsat": 0,
@@ -337,7 +344,7 @@
     }
   ],
   "grossUpRoundTrip": {
-    "note": "for every fee and net amount below, apply(grossUp(net, fee), fee) must equal net exactly, and apply(grossUp(net, fee) - 1, fee) must be strictly less than net - that is, the result is the true minimum, not merely sufficient",
+    "note": "for every fee and net amount below, apply(grossUp(net, fee), fee) must be at least net (exactly net when net is whole satoshis), and apply(grossUp(net, fee) - 1, fee) must be strictly less than net - that is, the result is the true minimum, not merely sufficient",
     "fees": [
       {
         "baseFeeMsat": 0,
@@ -356,7 +363,7 @@
         "feePpm": 2000
       },
       {
-        "baseFeeMsat": 3,
+        "baseFeeMsat": 0,
         "feePpm": 999999
       },
       {

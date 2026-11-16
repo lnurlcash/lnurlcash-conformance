@@ -25,7 +25,7 @@
         "receive OK",
         "observe the note still reserved"
       ],
-      "requirement": "OK on a melt means the payment is in flight. The note MUST NOT be treated as confirmed spent until settlement, and a failed payment restores it to outstanding. A holder locking it optimistically must be able to unlock on a confirmed failure."
+      "requirement": "OK on a melt means the payment is in flight. The note MUST NOT be treated as confirmed spent until settlement, and a failed payment restores it to outstanding. The OK carries LUD-21 verify: settled true (with the preimage) confirms the burn, Not found confirms the failure and the restored note. A holder locking it optimistically must be able to unlock on a confirmed failure."
     },
     {
       "name": "pending lockout",
@@ -33,7 +33,7 @@
         "melt k1",
         "attempt a rotate on the same k1 before settlement"
       ],
-      "requirement": "the second call fails with reason \"pending\" and MUST be retried, never read as spent"
+      "requirement": "the second call fails with reason \"pending\" and MUST be retried, never read as spent. Meanwhile the informational GET answers the note as worth 0 (luds fd80cdd)"
     },
     {
       "name": "ambiguous rotate",
@@ -58,7 +58,7 @@
         "the connection drops after the SERVICE applied it",
         "the HTTP stack silently resends the identical request"
       ],
-      "requirement": "a SERVICE MUST recognize the byte-identical retry from the same k1 set, h, h2 and amount, and return the original success, with the same c and c2 where the outputs had any, without moving balance again. A WALLET still persists every fresh output secret before sending the first request and keeps it across an ambiguous transport failure. A request that changes any recorded field is a genuine double-spend attempt and gets the ordinary already-spent refusal."
+      "requirement": "a SERVICE MUST recognize the byte-identical retry from the same k1 set, p1, p2 and amount, and return the original success, with the same c and c2 where the outputs had any, without moving balance again. A WALLET still persists every fresh output secret before sending the first request and keeps it across an ambiguous transport failure. A request that changes any recorded field is a genuine double-spend attempt and gets the ordinary already-spent refusal."
     },
     {
       "name": "settle a merge or split output",
@@ -83,12 +83,12 @@
         "rotate with h set to the id of an existing note, or to the payment hash of an invoice the SERVICE issued",
         "observe the refusal"
       ],
-      "requirement": "a SERVICE MUST refuse h/h2 values that collide with any note id it has ever minted or any invoice payment hash it has ever issued, before burning anything. Minting over an existing id hands the output to whoever already knows that id's preimage - for a pending mint invoice that is its future payer, and for a burned note it is every previous holder - or it bricks a paid mint whose settlement can no longer register under that key. A WALLET drawing fresh 32-byte secrets never collides honestly, so a collision is always adversarial. Refuse with the same reason as any dead k1: which table the id collided with is an oracle nobody is owed."
+      "requirement": "a SERVICE MUST refuse p1/p2 values that collide with any note id it has ever minted or any invoice payment hash it has ever issued, before burning anything. Minting over an existing id hands the output to whoever already knows that id's preimage - for a pending mint invoice that is its future payer, and for a burned note it is every previous holder - or it bricks a paid mint whose settlement can no longer register under that key. A WALLET drawing fresh 32-byte secrets never collides honestly, so a collision is always adversarial. Refuse with the same reason as any dead k1: which table the id collided with is an oracle nobody is owed."
     },
     {
       "name": "a split into the same hash twice",
       "steps": [
-        "split with h2 equal to h",
+        "split with p2 equal to p1",
         "observe the refusal"
       ],
       "requirement": "a SERVICE MUST refuse a split whose two output hashes are equal - one id cannot carry two notes, so accepting it either destroys the change or double-mints a single id."

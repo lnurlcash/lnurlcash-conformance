@@ -1,18 +1,18 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "LUD-26 key-path notes (lnurl/luds 92e430f). Every branch is a BIP39 seed (no passphrase) at one host. domain is the host's lowercase name without its port; cashHashingKey is the private key at m/139'/0, domainIndices the four raw uint32 read big-endian from HMAC-SHA256(cashHashingKey, utf8(domain)), used as BIP-32 indices exactly as they fall, and serviceRoot S = m/139'/d1/d2/d3/d4 as privateKey||chainCode hex. Below S everything is plain BIP-32: account a's wallet notes at S/a'/0/i, its change at S/a'/1/i, and share n at S/a'/2/n', exported as cx1 = bech32m(\"cx\", chainCode || P compressed), 65 bytes; share notes S/a'/2/n'/i equal CKDpub from the cx1 alone. A note's noteSecretKey is the BIP-32 private key at its path, notePubkeyCompressed its point, and notePubkey = Q = x(point), with no BIP-86 tweak. sighash is the BIP-341 key-path sighash of input 0 of the canonical spend transaction for domain, keyPathSignature BIP-340 with an all-zero aux_rand (the signer negates the key for an odd-y point), ck1 = bech32m(\"ck\", Q || signature). certificates are recoverable ECDSA by the mint key over sha256(sha256(\"Lightning Signed Message:\" || \"LNURLcash:<domain>:<amount_msat>:<hex(Q)>\")), HRP \"cs\" plus the BOLT-11 amount; legacyCertificates are the superseded message without the domain, which a wallet still reads. addressProofs are BIP-340 (all-zero aux_rand) by the share's own key over sha256 of \"LNURLcash:register:<domain>:<username>:<cx1>\", \"LNURLcash:update:<domain>:<username>:<new cx1>\" (by the key on file) or \"LNURLcash:unregister:<domain>:<username>\", the username lowercased; a PUT carries an update sig and a register newsig by the new share. legacy records the superseded tweak schemes, for sweeping only.",
+  "description": "LUD-26 key-path notes (lnurl/luds fd80cdd). Every branch is a BIP39 seed (no passphrase) at one host. domain is the host's lowercase name without its port; cashHashingKey is the private key at m/139'/0, domainIndices the four raw uint32 read big-endian from HMAC-SHA256(cashHashingKey, utf8(domain)), used as BIP-32 indices exactly as they fall, and serviceRoot S = m/139'/d1/d2/d3/d4 as privateKey||chainCode hex. Below S everything is plain BIP-32: account a's wallet notes at S/a'/0/i, its change at S/a'/1/i, and share n at S/a'/2/n', exported as cx1 = bech32m(\"cx\", chainCode || P compressed), 65 bytes; share notes S/a'/2/n'/i equal CKDpub from the cx1 alone. A note's noteSecretKey is the BIP-32 private key at its path, notePubkeyCompressed its point, and notePubkey = Q = x(point), with no BIP-86 tweak. sighash is the BIP-341 key-path sighash of input 0 of the canonical spend transaction for domain, keyPathSignature BIP-340 with an all-zero aux_rand (the signer negates the key for an odd-y point), ck1 = bech32m(\"ck\", Q || signature). certificates are recoverable ECDSA by the mint key over sha256(sha256(\"Lightning Signed Message:\" || \"LNURLcash:<domain>:<amount_msat>:<hex(Q)>:<t>\")), the cs1 payload r || s || recovery-id || u32 t (69 bytes), HRP \"cs\" plus the BOLT-11 amount. addressProofs are BIP-340 (all-zero aux_rand) by the share's own key over sha256 of \"LNURLcash:register:<domain>:<username>:<cx1>\", \"LNURLcash:update:<domain>:<username>:<new cx1>\" (by the key on file) or \"LNURLcash:unregister:<domain>:<username>\", the username lowercased; a PUT carries an update sig and a register newsig by the new share. legacy records the superseded tweak schemes, for sweeping only.",
   "conventions": {
     "serviceRoot": "m/139'/d1/d2/d3/d4",
     "hashingKey": "m/139'/0",
-    "domainHashed": "the host's lowercase name without its port, the string the canonical spend transaction commits to",
+    "domainHashed": "the host lowercased, in A-label form, without port, userinfo or trailing dot: the string the canonical spend transaction commits to",
     "walletChain": "S/a'/0/i",
     "changeChain": "S/a'/1/i",
     "share": "S/a'/2/n'",
     "shareNote": "S/a'/2/n'/i",
     "noteIndex": "non-hardened, 0 to 2^31 - 1",
     "cx1Payload": "chainCode (32) || P (33, compressed), BIP-32 order, 113 characters",
-    "spendDomain": "the host's lowercase name, never its scheme or port",
+    "spendDomain": "the host of withdrawLink, lowercased, in A-label form, without port, userinfo or trailing dot",
     "canonicalSpendTransaction": "nVersion 2; vin[0] prevout (tagged_hash(\"LNURLcash/mint\", domain), 0), empty scriptSig, nSequence 0xffffffff; vout[0] value 0, empty scriptPubKey; nLockTime 0; spent output (OP_1 <Q>, 0)",
     "ck1Signs": "tagged_hash(\"TapSighash\", 0x00 || SigMsg), the BIP-341 key-path sighash (SIGHASH_DEFAULT, spend_type 0x00) of input 0 of the canonical spend transaction for the domain",
     "keyPathSignature": "BIP-340 Schnorr, 64 bytes, all-zero aux_rand, so a ck1 is a deterministic function of the key and the domain",
@@ -24,9 +24,9 @@
     },
     "addressProofSigner": "the share's own key p at S/a'/2/n', verified against x(P) of the cx1 being registered, or of the one on file",
     "addressProofEncoding": "UTF-8, username lowercased, sha256-hashed to 32 bytes, BIP-340 with an all-zero aux_rand",
-    "certificateMessage": "LNURLcash:<domain>:<amount_msat>:<hex(Q)>",
+    "certificateMessage": "LNURLcash:<domain>:<amount_msat>:<hex(Q)>:<t>",
     "certificateHrp": "cs || BOLT11_amount_suffix(amount_msat)",
-    "cs1Payload": "r || s || recovery-id, 65 bytes, recovery-id 0 to 3"
+    "cs1Payload": "r || s || recovery-id || u32 t (big-endian), 69 bytes, recovery-id 0 to 3, t the Unix time of signing in seconds"
   },
   "mint": {
     "privateKey": "da6ec5c4342514114ee493a55ddc06d085d61eb78f0b7163e07cdb7f1f66ac05",
@@ -1871,66 +1871,61 @@
       "domain": "mint.example",
       "notePubkey": "9820be6eb2fd00e6dd739f029e58f61f4ae19a8ded723fc670db052285be2f80",
       "amountMsat": 1000,
-      "message": "LNURLcash:mint.example:1000:9820be6eb2fd00e6dd739f029e58f61f4ae19a8ded723fc670db052285be2f80",
-      "digest": "6c5340528f46c37ab1ce467d8ad21401efae66c19506236978ec3b90d474cb98",
-      "signature": "1a8486f57e4352df87f50b8c2184d5aedaff27ab9eeef64c922ae6c15ebcc35d65188dbb940323344d2c183afe856db444644448ecfab90091c8d7aa50ba7ab601",
-      "cs1": "cs10n1r2zgdat7gdfdlpl4pwxzrpx44md07fatnmh0vnyj9tnvzh4ucdwk2xydhw2qxge5f5kpswh7s4kmg3ryg3ywe74eqzgu34a22za84dspnxe2v3"
+      "t": 1800000000,
+      "message": "LNURLcash:mint.example:1000:9820be6eb2fd00e6dd739f029e58f61f4ae19a8ded723fc670db052285be2f80:1800000000",
+      "digest": "3d7beb76d3f6c4ee19b9237b992987220f77ce1c88706082ac03304acc371c31",
+      "signature": "b151044643270b86f02206491e08fe34d5e2755c33ee8d7189ae9e83d2758efd235f04acb5e5387bc8a36cd45a7aec1ec9b7498ca2c724932ad89471e17c426401",
+      "cs1": "cs10n1k9gsg3jryu9cdupzqey3uz87xn27ya2ux0hg6uvf460g85n43m7jxhcy4j672wrmez3ke4z60tkpajdhfxx293eyjv4d39r3u97yyeqpddyayqq2zuxva"
     },
     {
       "domain": "mint.example",
       "notePubkey": "be099b4e43dd97e630fb08aa70be58101d7d3f9016244624e6a02ac570ea5493",
       "amountMsat": 21000,
-      "message": "LNURLcash:mint.example:21000:be099b4e43dd97e630fb08aa70be58101d7d3f9016244624e6a02ac570ea5493",
-      "digest": "68eacdf06a33c5329ff63098502da2bfd2c418002febe1af2ba8a5edd4896396",
-      "signature": "7b410bbdf40f6f9771ee462327870cabd222ad66b69978933756aba06b527b69116fe5e64bc5905a7a5ecf4cb927b44f5e7b8e68a7156e48cf4ae4ca807212ff00",
-      "cs1": "cs210n10dqsh005pahewu0wgc3j0pcv40fz9ttxk6vh3yeh2646q66j0d53zml9ue9utyz60f0v7n9ey76y7hnm3e52w9twfr854ex2spep9lcq8cttav"
+      "t": 1800000000,
+      "message": "LNURLcash:mint.example:21000:be099b4e43dd97e630fb08aa70be58101d7d3f9016244624e6a02ac570ea5493:1800000000",
+      "digest": "06a38553b7f4f6d3bdff49083fc2ae73386392643cc1319c3a08ede93bac36e8",
+      "signature": "f30b4e7ad89bbf600c14be6a7c170af2f8b2b569bd380f3306b90ff2249f10e6378e614cade4ff8da7cc48582678e1a4d127a08f5cf08d73aa9dac4f066ed82a01",
+      "cs1": "cs210n17v95u7kcnwlkqrq5he48c9c27tut9dtfh5uq7vcxhy8lyfylzrnr0rnpfjk7flud5lxyskpx0rs6f5f85z84euydww4fmtz0qehds2spddyayqql743jj"
     },
     {
       "domain": "mint.example",
       "notePubkey": "9037a9bc3342d6a81f7e542f44da7786ad62e05bc63baba809f32d6da7c4a4ba",
       "amountMsat": 99999,
-      "message": "LNURLcash:mint.example:99999:9037a9bc3342d6a81f7e542f44da7786ad62e05bc63baba809f32d6da7c4a4ba",
-      "digest": "048768416c01af3131497d38560cd22f3158f58c9ad70ee23b7b976d4d3d2b1b",
-      "signature": "101eff152d3c29ace79e94227bcf3762cc829dc308b2e88b7913c411821981512565ea6c17879c25e55734f5d70e7fc311ee63fb73f294fcdfcd1320017972aa00",
-      "cs1": "cs999990p1zq0079fd8s56eeu7js38hnehvtxg98wrpzew3zmez0zprqses9gj2e02dstc08p9u4tnfawhpeluxy0wv0ah8u55ln0u6yeqq9uh92sq6hm7er"
+      "t": 1800000000,
+      "message": "LNURLcash:mint.example:99999:9037a9bc3342d6a81f7e542f44da7786ad62e05bc63baba809f32d6da7c4a4ba:1800000000",
+      "digest": "de505f8efe5d165f098d06c3cb422ce20cac25e8f4f2e1e352f2fb877cc80efe",
+      "signature": "a2f7a94451f3e608d14dc5c1637ee89dfab0a12fb884e0818b38091e7e09a9e7244988a5464c36596532ba3a95e9bf2d621b2692e5db4c23e7d24e885aef0f8e00",
+      "cs1": "cs999990p15tm6j3z370nq352dchqkxlhgnhatpgf0hzzwpqvt8qy3ulsf48njgjvg54rycdjev5et5w54axlj6csmy6fwtk6vy0nayn5gtthslrsqddyayqql4hvkt"
     },
     {
       "domain": "mint.example",
       "notePubkey": "31bb938273fb9d05d8d068cc19935c4af6664028125c9315c601f507791cc59a",
       "amountMsat": 100000000,
-      "message": "LNURLcash:mint.example:100000000:31bb938273fb9d05d8d068cc19935c4af6664028125c9315c601f507791cc59a",
-      "digest": "6c8d16235a93ac5271abd96db71a28cd75a07bb898e6425b200937156252e8d2",
-      "signature": "3fcf7e8b7dd9b8b105b782480c2f200d984bdf984508de232f8cace3b0aeee8c378d339a96bfea95926f4c3d6b374892f4f632e0662cd51117bd338930b66e1901",
-      "cs1": "cs1m18l8hazmamxutzpdhsfyqcteqpkvyhhucg5yduge03jkw8v9wa6xr0rfnn2ttl654jfh5c0ttxayf9a8kxtsxvtx4zytm6vufxzmxuxgp8slrsc"
+      "t": 1800000000,
+      "message": "LNURLcash:mint.example:100000000:31bb938273fb9d05d8d068cc19935c4af6664028125c9315c601f507791cc59a:1800000000",
+      "digest": "30e22dbaebed7e33bb053bfdcc46303a904ce5e68c9a12ce3c50b530941d3070",
+      "signature": "aea06caa6f4f810b21bd12f9133371a156963295a96314dacc7f496f97e4e4ff2976cafd92b5f07ce713713ac225c72cac8c6903a3194f12c006eb9d573804cf00",
+      "cs1": "cs1m146sxe2n0f7qskgdaztu3xvm359tfvv544933fkkv0aykl9lyunljjak2lkftturuuufhzwkzyhrjetyvdyp6xx20ztqqd6ua2uuqfncqddyayqqcmxjex"
     },
     {
       "domain": "moneyer.dev",
       "notePubkey": "9820be6eb2fd00e6dd739f029e58f61f4ae19a8ded723fc670db052285be2f80",
       "amountMsat": 1000,
-      "message": "LNURLcash:moneyer.dev:1000:9820be6eb2fd00e6dd739f029e58f61f4ae19a8ded723fc670db052285be2f80",
-      "digest": "713149cbe6e1d979ea35291df3de08cd853c9b570170fa150cd2e525d56ce44b",
-      "signature": "247a8237b0fea97588635a082934c26baf8d91373ef065ac6b13adcf766daa356d20116f687ef7ef7f10d1117581c5df74b6fb36aec23d77ecb6e5945c349f7501",
-      "cs1": "cs10n1y3agydasl65htzrrtgyzjdxzdwhcmyfh8mcxttrtzwku7and4g6k6gq3da58aal00ugdzyt4s8za7a9klvm2as3awlktdev5ts6f7agpqctnrd"
-    }
-  ],
-  "legacyCertificates": [
-    {
-      "superseded": true,
-      "notePubkey": "9820be6eb2fd00e6dd739f029e58f61f4ae19a8ded723fc670db052285be2f80",
-      "amountMsat": 1000,
-      "message": "LNURLcash:1000:9820be6eb2fd00e6dd739f029e58f61f4ae19a8ded723fc670db052285be2f80",
-      "digest": "43c45f2f838dd0c23b6998375951ae41cfed5138d991dd48efe64cbd81447506",
-      "signature": "768640b7b53f8bffd443ffc2e40b2fc1598f8e2f9f79472b16e99f94cffd44d3668b040a40ddbdaa3cbd8be0ebdf0942cc67cbd2d567754f3132518f7815e55101",
-      "cs1": "cs10n1w6rypda4879ll4zrllpwgze0c9vclr30nau5w2ckax0efnlagnfkdzcypfqdm0d28j7chc8tmuy59nr8e0fd2em4fucny5v00q2725gphc7x6r"
+      "t": 1800000000,
+      "message": "LNURLcash:moneyer.dev:1000:9820be6eb2fd00e6dd739f029e58f61f4ae19a8ded723fc670db052285be2f80:1800000000",
+      "digest": "5563e16cfb8b8c524963447f08fcc97a2b01adaa7ea33a055dab368546bf94cf",
+      "signature": "a115183635f3f9100c50b7eab88346ecb37d07859cccf1ba350486286ec3f5f619beec1712c30eb421c64e43fae7f8b013a094b12397c1f37e33b835ca032db100",
+      "cs1": "cs10n15y23sd3470u3qrzskl4t3q6xajeh6pu9nnx0rw34qjrzsmkr7hmpn0hvzufvxr45y8ryusl6ulutqyaqjjcj897p7dlr8wp4egpjmvgqddyayqq0px4t5"
     },
     {
-      "superseded": true,
-      "notePubkey": "be099b4e43dd97e630fb08aa70be58101d7d3f9016244624e6a02ac570ea5493",
-      "amountMsat": 21000,
-      "message": "LNURLcash:21000:be099b4e43dd97e630fb08aa70be58101d7d3f9016244624e6a02ac570ea5493",
-      "digest": "6dfad098245b97bdb5c0b584acb86abee5444b4070c60e7f2589132125cd72d5",
-      "signature": "9b54e6a24e60aa3c45941c0e782bca031aab13326669bea6e6d62211a11747787463efb4b4de5a7a4fb6371ac045534d803954c6daf7f522de13a51e3d5ba3f100",
-      "cs1": "cs210n1nd2wdgjwvz4rc3v5rs88s272qvd2kyejve5mafhx6c3prgghgau8gcl0kj6dukn6f7mrwxkqg4f5mqpe2nrd4al4yt0p8fg784d68ugq8y0988"
+      "domain": "mint.example",
+      "notePubkey": "9820be6eb2fd00e6dd739f029e58f61f4ae19a8ded723fc670db052285be2f80",
+      "amountMsat": 1000,
+      "t": 1800000001,
+      "message": "LNURLcash:mint.example:1000:9820be6eb2fd00e6dd739f029e58f61f4ae19a8ded723fc670db052285be2f80:1800000001",
+      "digest": "3564db95d22b93108d1ec41da9a77694853cb10448ea388d1d9f3fa40d63f060",
+      "signature": "22767aaf46913a235fb75232a95febd05ef454fe8886523f3acb404e0b7534f8044195cebe50cfef2fc35691f811912c3487128708be406b64472b2c2d5a79cf01",
+      "cs1": "cs10n1yfm84t6xjyazxhah2ge2jhlt6p00g4873zr9y0e6edqyuzm4xnuqgsv4e6l9pnl09lp4dy0czxgjcdy8z2rs30jqddjyw2ev94d8nncpddyayqgxp9yh3"
     }
   ],
   "addressProofs": [
@@ -2341,18 +2336,28 @@
     },
     {
       "type": "cs1",
-      "value": "cs1r2zgdat7gdfdlpl4pwxzrpx44md07fatnmh0vnyj9tnvzh4ucdwk2xydhw2qxge5f5kpswh7s4kmg3ryg3ywe74eqzgu34a22za84dsp9l9vst",
+      "value": "cs1k9gsg3jryu9cdupzqey3uz87xn27ya2ux0hg6uvf460g85n43m7jxhcy4j672wrmez3ke4z60tkpajdhfxx293eyjv4d39r3u97yyeqpddyayqq7jdxfp",
       "why": "legacy fixed cs HRP carries no amount"
     },
     {
       "type": "cs1",
-      "value": "cs10n1r2zgdat7gdfdlpl4pwxzrpx44md07fatnmh0vnyj9tnvzh4ucdwk2xydhw2qxge5f5kpswh7s4kmg3ryg3ywe74eqzgu34a22za84dsyp60e7e",
+      "value": "cs10n1k9gsg3jryu9cdupzqey3uz87xn27ya2ux0hg6uvf460g85n43m7jxhcy4j672wrmez3ke4z60tkpajdhfxx293eyjv4d39r3u97yyeqyddyayqqc6updk",
       "why": "a recovery-id above 3"
     },
     {
       "type": "cs1",
-      "value": "cs10n1r2zgdat7gdfdlpl4pwxzrpx44md07fatnmh0vnyj9tnvzh4ucdwk2xydhw2qxge5f5kpswh7s4kmg3ryg3ywe74eqzgu34a22za84ds48u3kh",
-      "why": "64 bytes, not 65"
+      "value": "cs10n1r2zgdat7gdfdlpl4pwxzrpx44md07fatnmh0vnyj9tnvzh4ucdwk2xydhw2qxge5f5kpswh7s4kmg3ryg3ywe74eqzgu34a22za84dspnxe2v3",
+      "why": "65 bytes: a certificate from before t (luds fd80cdd), which a current wallet refuses"
+    },
+    {
+      "type": "cs1",
+      "value": "cs10n1k9gsg3jryu9cdupzqey3uz87xn27ya2ux0hg6uvf460g85n43m7jxhcy4j672wrmez3ke4z60tkpajdhfxx293eyjv4d39r3u97yyertf8fqqdgvqf2",
+      "why": "68 bytes: no recovery-id"
+    },
+    {
+      "type": "cs1",
+      "value": "cs10n1k9gsg3jryu9cdupzqey3uz87xn27ya2ux0hg6uvf460g85n43m7jxhcy4j672wrmez3ke4z60tkpajdhfxx293eyjv4d39r3u97yyeqpddyayqqqpupp3g",
+      "why": "70 bytes, not 69"
     },
     {
       "type": "cx1",

@@ -77,7 +77,10 @@ console.log(`ok   compliant mock passes (${good.results.length} checks), and the
 
 // A held melt must never look spent before settlement, and a failed melt
 // restores the same value. Every lookup form observes the retained state:
-// the spend, the note's hex h, its cp1, and h, p's older name.
+// the spend, the note's hex h and its cp1. Since luds
+// fd80cdd a pending or burned note answers worth 0, the callback answers
+// "pending" or "already in use", and the melt's verify follows it to
+// settled or Not found.
 const lifecycleMint = await createMockMint({hashLookup: true, meltNeverSettles: true})
 try {
   const k1 = bytesToHex(randomBytes(32))
@@ -85,33 +88,51 @@ try {
   const cp1 = encodeCp1(bearerNote(hexToBytes(h)).outputKey)
   lifecycleMint.state.creditNote(k1, 3000)
   const lookup = query => fetch(`${lifecycleMint.url}/w?${query}`).then(r => r.json())
-  const forms = [`p=${h}`, `p=${cp1}`, `h=${h}`, `k1=${k1}`, `k1=${bearerSpend(hexToBytes(k1))}`]
-  for (const query of forms.slice(0, 3)) {
+  const get = url => fetch(url).then(r => r.json())
+  const forms = [`p=${h}`, `p=${cp1}`, `k1=${k1}`, `k1=${bearerSpend(hexToBytes(k1))}`]
+  for (const query of forms.slice(0, 2)) {
     const live = await lookup(query)
     assert.equal(live.maxWithdrawable, 3000)
     assert.equal('k1' in live, false)
   }
-  const melt = () => fetch(`${lifecycleMint.url}/w/cb?k1=${k1}&pr=mock-invoice`).then(r => r.json())
-  assert.equal((await melt()).status, 'OK')
-  for (const query of forms) {
-    assert.deepEqual(await lookup(query), {status: 'ERROR', reason: 'pending'})
+  const worthZero = body => {
+    assert.equal(body.tag, 'withdrawRequest')
+    assert.equal(body.minWithdrawable, 0)
+    assert.equal(body.maxWithdrawable, 0)
+    assert.equal('c' in body, false)
   }
+  const melt = (pr = 'mock-invoice') => get(`${lifecycleMint.url}/w/cb?k1=${k1}&pr=${pr}`)
+  const rotate = () => get(`${lifecycleMint.url}/w/cb?k1=${k1}&p1=${encodeCp1(bearerNote(randomBytes(32)).outputKey)}`)
+  const first = await melt()
+  assert.equal(first.status, 'OK')
+  assert.match(first.verify, /\/verify\/[0-9a-f]{32}$/)
+  assert.equal(first.verify.includes(h), false)
+  assert.deepEqual(await melt(), first, 'a retried melt gets its original answer')
+  for (const query of forms) worthZero(await lookup(query))
+  assert.deepEqual(await rotate(), {status: 'ERROR', reason: 'pending'})
+  assert.equal((await get(first.verify)).settled, false)
   lifecycleMint.state.failMelt(k1)
+  assert.deepEqual(await get(first.verify), {status: 'ERROR', reason: 'Not found'})
   assert.equal((await lookup(`p=${cp1}`)).maxWithdrawable, 3000)
-  assert.equal((await melt()).status, 'OK')
+  const second = await melt()
+  assert.equal(second.status, 'OK')
+  assert.notEqual(second.verify, first.verify, 'a new melt gets a new verify')
   lifecycleMint.state.settleMelt(k1)
-  for (const query of forms) {
-    assert.deepEqual(await lookup(query), {status: 'ERROR', reason: 'already in use'})
-  }
-  assert.deepEqual(await lookup(`p=${bytesToHex(randomBytes(32))}`), {status: 'ERROR', reason: 'Unknown note.'})
+  const settled = await get(second.verify)
+  assert.equal(settled.settled, true)
+  assert.match(settled.preimage, /^[0-9a-f]{64}$/)
+  for (const query of forms) worthZero(await lookup(query))
+  assert.deepEqual(await rotate(), {status: 'ERROR', reason: 'already in use'})
+  assert.deepEqual(await lookup(`p=${bytesToHex(randomBytes(32))}`), {status: 'ERROR', reason: 'unknown note'})
   assert.equal(lifecycleMint.state.noteState(k1), 'burned')
-  console.log('ok   lookups by spend, h and cp1 follow live, pending, restored and retained spent states')
+  console.log('ok   lookups by spend, h and cp1 follow live, pending, restored and spent states, and verify follows the melt')
 } finally {
   await lifecycleMint.close()
 }
 
-// The other legal spelling of withdrawLink: the lnurlw:// scheme form. The
-// grader must take both, and say which it saw.
+// The other spelling of withdrawLink: the lnurlw:// scheme form. A WALLET
+// still takes it, so it is no failure, but since luds fd80cdd withdrawLink
+// is the https:// URL, so it is named as a soft finding.
 const plain = await grade({withdrawLinkForm: 'lnurlw'})
 if (plain.failed > 0) {
   console.error('a mint with an lnurlw:// withdrawLink failed grading:')
@@ -121,13 +142,13 @@ if (plain.failed > 0) {
   process.exit(1)
 }
 const forms = [good, plain].map(
-  r => r.results.find(x => x.name.startsWith('advertises a withdrawLink'))?.detail ?? ''
+  r => r.results.find(x => x.name.startsWith('advertises a withdrawLink')) ?? {}
 )
-if (!forms[0].includes('plain URL form') || !forms[1].includes('lnurlw:// form')) {
+if (!forms[0].detail?.includes('plain URL form') || forms[0].status !== 'pass' || !forms[1].detail?.includes('lnurlw:// form') || forms[1].status !== 'warn') {
   console.error(`the grader did not report the withdrawLink form: ${JSON.stringify(forms)}`)
   process.exit(1)
 }
-console.log('ok   lnurlw:// withdrawLink passes, and both forms are named in the report')
+console.log('ok   an lnurlw:// withdrawLink passes with a soft finding, and both forms are named in the report')
 
 const bad = await grade({echoWrongK1: true})
 if (bad.failed === 0) {
@@ -152,7 +173,7 @@ const gradeMintFlow = async mockOptions => {
     const quote = await (
       await fetch(`${mint.url}/p/cb?amount=${gross}&comment=${comment}`)
     ).json()
-    const paymentHash = quote.verify.split('/').pop()
+    const paymentHash = mint.state.paymentHashOfVerify(quote.verify)
     await fetch(`${mint.url}/_test/settle?payment_hash=${paymentHash}`)
     const report = createReport()
     await gradeMintedValue(`${mint.url}/w?k1=${k1}`, report, {
@@ -175,33 +196,32 @@ if (exact.failed > 0) {
 }
 console.log('ok   formula-exact mint passes the minted-value check')
 
-// The reference mint ceilings its fee to a whole sat on purpose, and the
-// draft does not say whether that is right. Grading it as a failure would
-// be this repo picking a side, so the check takes a band - but the band
-// has to have a far edge, or it grades nothing at all.
+// Since luds fd80cdd the credit is rounded down to whole satoshis. A fee
+// ceilinged to a whole sat, as the reference mint charges it, gives the
+// same note for a whole-satoshi payment; an msat-exact credit is too large.
 const rounded = await gradeMintFlow({roundFeeToSat: true})
 if (rounded.failed > 0) {
-  console.error('a mint ceilinging its fee to a whole sat FAILED - that is what the reference does:')
+  console.error('a mint ceilinging its fee to a whole sat FAILED - for a whole-satoshi payment that is the rounded-down credit:')
   for (const r of rounded.results.filter(r => r.status === 'fail')) {
     console.error(`  FAIL ${r.name} - ${r.detail}`)
   }
   process.exit(1)
 }
-console.log('ok   sat-ceilinged fee accepted, as the reference mint charges it')
+console.log('ok   sat-ceilinged fee accepted, the same note as the rounded-down credit')
 
 const greedy = await gradeMintFlow({roundFeeToSat: true, extraFeeMsat: 1})
 if (greedy.failed === 0) {
-  console.error('a mint taking a msat beyond the ceilinged fee PASSED - the band grades nothing')
+  console.error('a mint taking a msat beyond the fee PASSED - the check grades nothing')
   process.exit(1)
 }
-console.log('ok   a msat past the band still caught')
+console.log('ok   a msat past the fee still caught')
 
-const generous = await gradeMintFlow({extraFeeMsat: -1})
-if (generous.failed === 0) {
-  console.error('a mint crediting more than it advertised PASSED - the band has no near edge')
+const msatExact = await gradeMintFlow({msatExactCredit: true})
+if (msatExact.failed === 0) {
+  console.error('a mint crediting msat-exact PASSED - since luds fd80cdd the credit is rounded down to whole satoshis')
   process.exit(1)
 }
-console.log('ok   crediting more than the formula still caught')
+console.log('ok   an msat-exact credit caught')
 
 // The two split refusals LUD-25 spells out. Both need a fee-advertising
 // mint to bite at all, so they are graded against one, and each must name
@@ -333,68 +353,18 @@ if (statusOf(unpublished, SIGNATURE_CHECK) !== 'fail') {
 }
 console.log('ok   a signature under an unpublished key still caught')
 
-// Certifying is a SHOULD (luds 6e865b1): a mint issuing no certificates
-// at all warns, and never fails.
+// Certifying is a MUST since luds fd80cdd: a mint issuing no certificates
+// fails, and still gives the grader its value back.
 const unsigned = await grade({signatures: false})
 for (const name of [SIGNATURE_CHECK, EVERY_CERTIFICATE]) {
-  if (statusOf(unsigned, name) !== 'warn' || !/SHOULD/.test(detailOf(unsigned, name))) {
-    die(`an uncertified output did not warn on "${name}": ${statusOf(unsigned, name)} ${detailOf(unsigned, name)}`)
+  if (statusOf(unsigned, name) !== 'fail' || !/MUST/.test(detailOf(unsigned, name))) {
+    die(`an uncertified output did not fail "${name}": ${statusOf(unsigned, name)} ${detailOf(unsigned, name)}`)
   }
 }
-if (unsigned.failed > 0) die('a mint issuing no certificates FAILED the grade - certifying is a SHOULD')
 conserved(unsigned, 'a mint issuing no certificates')
-console.log('ok   a mint issuing no certificates warns, and never fails')
+console.log('ok   a mint issuing no certificates fails')
 
-// Certificates are named c and c2 since luds 50d740a. A mint sending only
-// the old sig/sig2 is, to a current wallet, a mint sending no certificate:
-// it warns, never fails, and the report names the old spelling. A mint
-// sending both, as one mid-transition does, is graded on c and passes.
-const oldNames = await grade({certificateNames: 'sig'})
-for (const name of [SIGNATURE_CHECK, EVERY_CERTIFICATE]) {
-  if (statusOf(oldNames, name) !== 'warn' || !/50d740a/.test(detailOf(oldNames, name))) {
-    die(`certificates sent only as sig/sig2 did not warn, naming the old spelling, on "${name}": ${statusOf(oldNames, name)} ${detailOf(oldNames, name)}`)
-  }
-}
-if (oldNames.failed > 0) die('a mint certifying only as sig/sig2 FAILED the grade - certifying is a SHOULD')
-conserved(oldNames, 'a mint certifying only as sig/sig2')
-console.log('ok   certificates sent only as sig/sig2 warn as uncertified, and are named')
 
-const bothNames = await grade({certificateNames: 'both'})
-for (const name of [SIGNATURE_CHECK, EVERY_CERTIFICATE]) {
-  if (statusOf(bothNames, name) !== 'pass') {
-    die(`a mint sending c and sig both did not pass "${name}": ${statusOf(bothNames, name)} ${detailOf(bothNames, name)}`)
-  }
-}
-const warnings = report => report.results.filter(r => r.status === 'warn').map(r => r.name).sort().join()
-if (bothNames.failed > 0 || warnings(bothNames) !== warnings(await grade({}))) {
-  die('a mint sending c and sig both was faulted for the extra sig')
-}
-console.log('ok   a mint sending certificates as both c and sig passes clean')
-
-// ...but a certificate that is there must be over hex(Q). One over a bearer
-// note's h is the pre-taproot message, and a wallet checking it offline
-// rejects a good note.
-const overH = await grade({certificateOverH: true})
-for (const name of [SIGNATURE_CHECK, 'a certificate on the informational GET verifies over hex(Q)', EVERY_CERTIFICATE]) {
-  if (!caughtBy(overH, name)) die(`a certificate over h rather than hex(Q) was not caught by "${name}"`)
-}
-if (!/pre-taproot/.test(detailOf(overH, SIGNATURE_CHECK))) {
-  die(`the report does not name the certificate over h for what it is: ${detailOf(overH, SIGNATURE_CHECK)}`)
-}
-conserved(overH, 'a mint certifying over h')
-console.log('ok   a certificate over h rather than hex(Q) caught, and named')
-
-// The message before luds 92abbb3 named no domain, so a certificate one mint
-// issued vouched for the same note at any other mint on the same key.
-const noDomain = await grade({certificateWithoutDomain: true})
-for (const name of [SIGNATURE_CHECK, EVERY_CERTIFICATE]) {
-  if (!caughtBy(noDomain, name)) die(`a certificate without the domain was not caught by "${name}"`)
-}
-if (!/without the domain/.test(detailOf(noDomain, SIGNATURE_CHECK))) {
-  die(`the report does not name the certificate without a domain for what it is: ${detailOf(noDomain, SIGNATURE_CHECK)}`)
-}
-conserved(noDomain, 'a mint certifying without the domain')
-console.log('ok   a certificate without the domain caught, and named')
 
 // The key path, which the compliant mock serves: a cp1 is credited, a ck1
 // bound to its domain spends it, and the certificates cover it too.
@@ -731,7 +701,7 @@ const gradeBound = async (mockOptions = {}) => {
       await fetch(`${mint.url}/p/cb?amount=21000&comment=${h}&h=${h}`)
     ).json()
     if (quote.status === 'ERROR') die(`the mock refused a well-formed h: ${quote.reason}`)
-    const paymentHash = quote.verify.split('/').pop()
+    const paymentHash = mint.state.paymentHashOfVerify(quote.verify)
     await fetch(`${mint.url}/_test/settle?payment_hash=${paymentHash}`)
     const preimage = mint.state.invoices.get(paymentHash).preimage
     const report = createReport()
@@ -784,7 +754,7 @@ console.log('ok   a bound mint credits the wallet\'s own hash, and the preimage 
     if (pending.settled !== false || pending.mint?.sig !== undefined) {
       die('the receipt mock signed before settlement')
     }
-    const paymentHash = quote.verify.split('/').pop()
+    const paymentHash = mint.state.paymentHashOfVerify(quote.verify)
     await fetch(`${mint.url}/_test/settle?payment_hash=${paymentHash}`)
     const settled = await (await fetch(quote.verify)).json()
     if (
@@ -839,7 +809,7 @@ console.log('ok   a quote sold against a live note id caught')
     ).json()
     if (quote.status === 'ERROR') die(`the mock refused an upper-case h: ${quote.reason}`)
     if (quote.mintToHash !== true) die('an upper-case h was taken without the quote saying it was bound')
-    const paymentHash = quote.verify.split('/').pop()
+    const paymentHash = mint.state.paymentHashOfVerify(quote.verify)
     await fetch(`${mint.url}/_test/settle?payment_hash=${paymentHash}`)
     const note = await (await fetch(`${mint.url}/w?k1=${secret}`)).json()
     if (note.status === 'ERROR') {
@@ -920,11 +890,6 @@ if (!caughtBy(oldWording, SPENT_CHECK)) {
   die('a burned note answered "Note already spent." PASSED - LUD-25 fixes it as "already in use"')
 }
 console.log('ok   a burned note answered in the old wording caught')
-
-// Keep the old fixture name accepted as a compatible alias, but stop
-// describing the intended spent response as a privacy violation.
-const revealsSpent = await grade({hashLookup: 'revealsSpent'})
-if (revealsSpent.failed > 0) die('the legacy revealsSpent alias failed the revised contract')
 
 const acceptsBoth = await grade({hashLookup: 'acceptsBoth'})
 if (!caughtBy(acceptsBoth, LOOKUP_CHECK)) {
@@ -1051,3 +1016,24 @@ if (!caughtBy(absentOnly, MINT_TO_HASH_CHECK)) {
   die('a mint falling back only when no comment was sent PASSED - the grader is blind')
 }
 console.log('ok   a mint falling back when no comment was sent at all caught')
+
+// luds fd80cdd: one misbehaving mock per new rule, each caught by the check
+// that names it. A rule no mock breaks is a check nobody has seen fail.
+for (const [options, check, what, status = 'fail'] of [
+  [{certificateTime: 'none'}, EVERY_CERTIFICATE, 'a 65-byte certificate without t'],
+  [{certificateTime: 'future'}, EVERY_CERTIFICATE, 'a certificate signed ahead of the clock'],
+  [{certificateTime: 'unsigned'}, EVERY_CERTIFICATE, 'a certificate whose t is not signed'],
+  [{goneAtInfo: 'error'}, 'reports a spent note distinguishably from an unknown one', 'a burned note answered as an error at the informational GET'],
+  [{unknownReason: 'Unknown note.'}, 'reports an unknown note distinguishably', 'an uncredited note answered "Unknown note."'],
+  [{payRequestMintPubkey: false}, 'publishes mintPubkey on the mint payRequest (LUD-25)', 'a mint payRequest without mintPubkey'],
+  [{noteInfoPayLink: false}, 'informational GET echoes the k1 it was queried with', 'a withdrawRequest without payLink'],
+  [{verifyByPaymentHash: true}, 'issues an invoice for the amount requested', 'a verify URL named by the payment hash'],
+  [{acceptsSubSatSplit: true}, 'refuses a split whose amount is not whole satoshis', 'a split of a fraction of a satoshi accepted'],
+  [{noStore: false}, 'answers with Cache-Control: no-store where spends travel', 'responses without Cache-Control: no-store', 'warn']
+]) {
+  const report = await grade(options)
+  if (statusOf(report, check) !== status) {
+    die(`${what} was not graded ${status} on "${check}": ${statusOf(report, check)} ${detailOf(report, check)}`)
+  }
+  console.log(`ok   ${what} caught (${status})`)
+}

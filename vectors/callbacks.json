@@ -1,7 +1,7 @@
 {
   "version": 1,
   "spec": "LUD-25 draft (lnurl/luds#301)",
-  "description": "The mutating callback. Every operation is a GET on the `callback` from the note's own withdrawRequest response. `h`/`h2` are hashes of secrets the WALLET generates - never the SERVICE - so the SERVICE never sees, generates or persists a replacement note's spend secret. Query parameter ORDER is not significant; the expected query below is one valid serialisation and implementations should compare parsed parameters, honouring repeats.",
+  "description": "The mutating callback. Every operation is a GET on the `callback` from the note's own withdrawRequest response. `p1`/`p2` name notes whose secrets the WALLET generates - never the SERVICE - here by a bearer note's hex h - so the SERVICE never sees, generates or persists a replacement note's spend secret. Query parameter ORDER is not significant; the expected query below is one valid serialisation and implementations should compare parsed parameters, honouring repeats.",
   "cases": [
     {
       "name": "melt",
@@ -32,7 +32,7 @@
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
+        "p1": "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
       },
       "expectQuery": [
         [
@@ -40,7 +40,7 @@
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
         [
-          "h",
+          "p1",
           "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
         ]
       ]
@@ -54,8 +54,8 @@
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
         "amountMsat": 5000,
-        "h": "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6",
-        "h2": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6",
+        "p2": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "expectQuery": [
         [
@@ -67,11 +67,11 @@
           "5000"
         ],
         [
-          "h",
+          "p1",
           "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
         ],
         [
-          "h2",
+          "p2",
           "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
         ]
       ]
@@ -86,8 +86,8 @@
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ],
         "amountMsat": 5000,
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
-        "h2": "e0e77a507412b120f6ede61f62295b1a7b2ff19d3dcc8f7253e51663470c888e"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p2": "e0e77a507412b120f6ede61f62295b1a7b2ff19d3dcc8f7253e51663470c888e"
       },
       "expectQuery": [
         [
@@ -103,11 +103,11 @@
           "5000"
         ],
         [
-          "h",
+          "p1",
           "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
         ],
         [
-          "h2",
+          "p2",
           "e0e77a507412b120f6ede61f62295b1a7b2ff19d3dcc8f7253e51663470c888e"
         ]
       ],
@@ -123,7 +123,7 @@
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
         ],
-        "h": "e0e77a507412b120f6ede61f62295b1a7b2ff19d3dcc8f7253e51663470c888e"
+        "p1": "e0e77a507412b120f6ede61f62295b1a7b2ff19d3dcc8f7253e51663470c888e"
       },
       "expectQuery": [
         [
@@ -139,7 +139,7 @@
           "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
         ],
         [
-          "h",
+          "p1",
           "e0e77a507412b120f6ede61f62295b1a7b2ff19d3dcc8f7253e51663470c888e"
         ]
       ],
@@ -153,7 +153,7 @@
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
+        "p1": "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
       },
       "expectQuery": [
         [
@@ -165,7 +165,7 @@
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
         [
-          "h",
+          "p1",
           "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
         ]
       ],
@@ -198,33 +198,33 @@
       "why": "LUD-25: pr MUST NOT be combined with amount"
     },
     {
-      "name": "rotate without h",
+      "name": "rotate without p1",
       "op": "rotate",
       "params": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ]
       },
-      "why": "h is required whenever pr is absent - a SERVICE must never generate the secret"
+      "why": "p1 is required whenever pr is absent - a SERVICE must never generate the secret"
     },
     {
-      "name": "split without h2",
+      "name": "split without p2",
       "op": "split",
       "params": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
         "amountMsat": 5000,
-        "h": "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
+        "p1": "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
       },
-      "why": "h2 is required whenever amount is present"
+      "why": "p2 is required whenever amount is present"
     },
     {
       "name": "no k1 at all",
       "op": "rotate",
       "params": {
         "k1": [],
-        "h": "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
+        "p1": "4ca14526b2751b640d549ce7caf8ac39438592211a0ec370064d57666a682ad6"
       },
       "why": "nothing to burn"
     }

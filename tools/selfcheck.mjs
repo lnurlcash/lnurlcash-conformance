@@ -9,7 +9,7 @@
 import {readdirSync, readFileSync} from 'node:fs'
 import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
-import {bech32, bech32m, base64urlnopad} from '@scure/base'
+import {bech32, bech32m, base64urlnopad, createBase58check} from '@scure/base'
 import {sha256, sha512} from '@noble/hashes/sha2.js'
 import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {hmac} from '@noble/hashes/hmac.js'
@@ -82,9 +82,8 @@ check('every vector file declares a version and a spec', () => {
   }
 })
 
-// ---- signatures ----
-
-const sig = load('signature.json')
+// The bound-mint receipt (mint-to-hash.json) signs LNURLcash:<amount>:<h> by
+// the fixed test mint key 11..11.
 const noteId = k1 => bytesToHex(sha256(hexToBytes(k1)))
 const digestOf = (k1, amountMsat) =>
   sha256(
@@ -95,162 +94,7 @@ const digestOf = (k1, amountMsat) =>
       ])
     )
   )
-
-check('every signature case recomputes its own message and digest', () => {
-  for (const c of sig.cases) {
-    if (c.message === null) continue
-    assert(
-      c.message === `LNURLcash:${c.amountMsat}:${noteId(c.k1)}`,
-      `${c.name}: message does not match`
-    )
-    assert(c.noteId === noteId(c.k1), `${c.name}: noteId does not match`)
-    assert(
-      c.digest === bytesToHex(digestOf(c.k1, c.amountMsat)),
-      `${c.name}: digest does not match`
-    )
-  }
-})
-
-check('every signature case verifies exactly as declared', () => {
-  const verify = (k1, amountMsat, sigHex, pubHex) => {
-    let bytes
-    try {
-      bytes = hexToBytes(sigHex)
-    } catch {
-      return false
-    }
-    if (bytes.length !== 65) return false
-    let digest
-    try {
-      digest = digestOf(k1, amountMsat)
-    } catch {
-      return false
-    }
-    const leading = new Uint8Array([bytes[64], ...bytes.subarray(0, 64)])
-    for (const candidate of [leading, bytes]) {
-      try {
-        if (bytesToHex(secp256k1.recoverPublicKey(candidate, digest, {prehash: false})) === pubHex.toLowerCase()) {
-          return true
-        }
-      } catch {
-        // wrong ordering
-      }
-    }
-    return false
-  }
-  for (const c of sig.cases) {
-    assert(
-      verify(c.k1, c.amountMsat, c.signature, c.mintPubkey) === c.valid,
-      `${c.name}: expected valid=${c.valid}`
-    )
-  }
-})
-
-check('the signature set covers both recovery-id orderings and refusal cases', () => {
-  assert(sig.cases.some(c => c.valid && /trailing/.test(c.name)), 'no trailing case')
-  assert(sig.cases.some(c => c.valid && /leading/.test(c.name)), 'no leading case')
-  assert(sig.cases.filter(c => !c.valid).length >= 6, 'too few refusal cases')
-})
-
-check('every rotation case verifies against exactly the keys it publishes', () => {
-  const verify = (k1, amountMsat, sigHex, pubkeys) => {
-    let bytes
-    try {
-      bytes = hexToBytes(sigHex)
-    } catch {
-      return false
-    }
-    if (bytes.length !== 65) return false
-    const digest = digestOf(k1, amountMsat)
-    const leading = new Uint8Array([bytes[64], ...bytes.subarray(0, 64)])
-    for (const candidate of [leading, bytes]) {
-      try {
-        const recovered = bytesToHex(
-          secp256k1.recoverPublicKey(candidate, digest, {prehash: false})
-        )
-        if (pubkeys.some(p => p.toLowerCase() === recovered)) return true
-      } catch {
-        // wrong ordering
-      }
-    }
-    return false
-  }
-  const rotation = sig.rotation
-  assert(rotation && Array.isArray(rotation.cases), 'no rotation block')
-  for (const c of rotation.cases) {
-    assert(Array.isArray(c.mintPubkeys) && c.mintPubkeys.length > 0, `${c.name}: no mintPubkeys`)
-    assert(c.message === `LNURLcash:${c.amountMsat}:${noteId(c.k1)}`, `${c.name}: message does not match`)
-    assert(c.noteId === noteId(c.k1), `${c.name}: noteId does not match`)
-    assert(
-      c.digest === bytesToHex(digestOf(c.k1, c.amountMsat)),
-      `${c.name}: digest does not match`
-    )
-    assert(
-      verify(c.k1, c.amountMsat, c.signature, c.mintPubkeys) === c.valid,
-      `${c.name}: expected valid=${c.valid}`
-    )
-  }
-})
-
-check('the rotation pair turns on the published list and nothing else', () => {
-  const cases = sig.rotation.cases
-  const good = cases.find(c => c.valid && c.mintPubkeys.length > 1 && c.k1 === cases[0].k1)
-  const bad = cases.find(c => !c.valid && c.signature === good.signature)
-  assert(good && bad, 'no pair sharing a signature across two published lists')
-  assert(
-    bad.mintPubkeys.length < good.mintPubkeys.length,
-    'the invalid case does not publish a shorter list'
-  )
-  assert(
-    !bad.mintPubkeys.includes(sig.rotation.previousPubkey),
-    'the invalid case still publishes the previous key'
-  )
-  assert(
-    !sig.rotation.cases.some(c => c.mintPubkeys.includes(sig.rotation.currentPubkey) === false),
-    'every rotation case must publish the current key'
-  )
-})
-
-// ---- derivation ----
-
-const derivation = load('derivation.json')
-
-check('every derived secret recomputes from its own seed', () => {
-  const root = seed => hmac(sha256, utf8ToBytes(derivation.scheme.rootKey), seed)
-  for (const c of derivation.cases) {
-    const k1 = bytesToHex(
-      hmac(sha256, root(hexToBytes(c.seedHex)), utf8ToBytes(`${c.host}:${c.index}`))
-    )
-    assert(k1 === c.k1, `${c.name}: k1 does not recompute`)
-    assert(c.noteId === noteId(c.k1), `${c.name}: noteId does not match k1`)
-    assert(/^[0-9a-f]{64}$/.test(c.k1), `${c.name}: k1 is not 32 bytes of lowercase hex`)
-  }
-})
-
-check('every derivation case states a real BIP39 mnemonic and its seed', () => {
-  for (const c of derivation.cases) {
-    assert(validateMnemonic(c.mnemonic, wordlist), `${c.name}: mnemonic fails BIP39 validation`)
-    assert(
-      bytesToHex(mnemonicToSeedSync(c.mnemonic)) === c.seedHex,
-      `${c.name}: seedHex is not the passphrase-less BIP39 seed of the mnemonic`
-    )
-  }
-})
-
-check('derived secrets are distinct across index, host and seed', () => {
-  const seen = new Map()
-  for (const c of derivation.cases) {
-    const prior = seen.get(c.k1)
-    assert(!prior, `${c.name}: collides with ${prior}`)
-    seen.set(c.k1, c.name)
-  }
-  const byHost = derivation.cases.filter(c => c.host === 'mint.example' && c.index === 0)
-  assert(byHost.length >= 2, 'no two seeds derive at the same host and index')
-  const ported = derivation.cases.find(c => /:\d+$/.test(c.host))
-  assert(ported, 'no case exercises a host carrying a port')
-  const indices = derivation.cases.map(c => c.index)
-  assert(indices.includes(19) && indices.includes(20), 'the gap-limit boundary is not covered')
-})
+const TEST_MINT_PUBKEY = bytesToHex(secp256k1.getPublicKey(hexToBytes('11'.repeat(32)), true))
 
 // ---- bech32 ----
 
@@ -296,8 +140,8 @@ check('every retry case follows the declared identity', () => {
   const key = req =>
     JSON.stringify([
       [...req.k1].sort(),
-      req.h ?? null,
-      req.h2 ?? null,
+      req.p1 ?? null,
+      req.p2 ?? null,
       req.amount ?? null
     ])
   for (const c of retried.cases) {
@@ -307,9 +151,9 @@ check('every retry case follows the declared identity', () => {
     )
     for (const side of [c.recorded, c.retry]) {
       assert(Array.isArray(side.k1) && side.k1.length > 0, `${c.name}: a side names no inputs`)
-      assert(/^[0-9a-f]{64}$/.test(side.h), `${c.name}: h is not a 32-byte hex id`)
-      if (side.h2 !== undefined) {
-        assert(/^[0-9a-f]{64}$/.test(side.h2), `${c.name}: h2 is not a 32-byte hex id`)
+      assert(/^[0-9a-f]{64}$/.test(side.p1), `${c.name}: p1 is not a 32-byte hex id`)
+      if (side.p2 !== undefined) {
+        assert(/^[0-9a-f]{64}$/.test(side.p2), `${c.name}: p2 is not a 32-byte hex id`)
       }
     }
     const expected = key(c.recorded) === key(c.retry) ? 'replay' : 'double-spend'
@@ -327,13 +171,13 @@ check('the retry set pins every way a request can differ', () => {
     'nothing states that the inputs are a set rather than a sequence'
   )
   assert(
-    replays.some(c => c.recorded.h2 !== undefined) &&
-      replays.some(c => c.recorded.h2 === undefined),
+    replays.some(c => c.recorded.p2 !== undefined) &&
+      replays.some(c => c.recorded.p2 === undefined),
     'the replay cases do not cover both a split and a rotate'
   )
   for (const [what, differs] of [
-    ['h', c => c.recorded.h !== c.retry.h],
-    ['h2', c => (c.recorded.h2 ?? null) !== (c.retry.h2 ?? null)],
+    ['p1', c => c.recorded.p1 !== c.retry.p1],
+    ['p2', c => (c.recorded.p2 ?? null) !== (c.retry.p2 ?? null)],
     ['amount', c => (c.recorded.amount ?? null) !== (c.retry.amount ?? null)],
     ['the input set', c => [...c.recorded.k1].sort().join() !== [...c.retry.k1].sort().join()]
   ]) {
@@ -343,8 +187,8 @@ check('the retry set pins every way a request can differ', () => {
     )
   }
   assert(
-    refusals.some(c => c.recorded.h2 !== undefined && c.retry.h2 === undefined),
-    'nothing states that an absent h2 is not the same as a present one'
+    refusals.some(c => c.recorded.p2 !== undefined && c.retry.p2 === undefined),
+    'nothing states that an absent p2 is not the same as a present one'
   )
 })
 
@@ -493,7 +337,7 @@ check('the optional bound receipt is tied to the quote and authenticates the not
   const pending = receipt.unsettled
   const settled = receipt.settled
   assert(receipt.optional === true, 'the additive receipt is not marked optional')
-  assert(receipt.keyEstablishment.payRequest.mintPubkey === sig.mintPubkey, 'the receipt key is unavailable before payment')
+  assert(receipt.keyEstablishment.payRequest.mintPubkey === TEST_MINT_PUBKEY, 'the receipt key is unavailable before payment')
   assert(quote.mintToHash === true, 'the receipt quote is not explicitly bound')
   assert(quote.mint.h === settlement.h, 'the quote commits a different h')
   assert(Number.isSafeInteger(quote.mint.amount) && quote.mint.amount > 0, 'the quote amount is not positive integer msat')
@@ -512,12 +356,12 @@ check('the optional bound receipt is tied to the quote and authenticates the not
   for (const candidate of [leading, bytes]) {
     try {
       recovered = bytesToHex(secp256k1.recoverPublicKey(candidate, digest, {prehash: false}))
-      if (recovered === sig.mintPubkey) break
+      if (recovered === TEST_MINT_PUBKEY) break
     } catch {
       // try the other recoverable-signature ordering
     }
   }
-  assert(recovered === sig.mintPubkey, 'the receipt signature does not authenticate the bound note')
+  assert(recovered === TEST_MINT_PUBKEY, 'the receipt signature does not authenticate the bound note')
 
   const invalid = new Map(receipt.invalid.map(c => [c.name, c]))
   assert(invalid.get('quote commits a different h').quote.mint.h !== quote.mint.h, 'no wrong-h case')
@@ -803,7 +647,10 @@ check('the settlement table pins its own precedence', () => {
 const fees = load('fees.json')
 const proportional = (g, ppm) =>
   Math.floor(g / 1e6) * ppm + Math.floor(((g % 1e6) * ppm) / 1e6)
-const applyFee = (g, f) => Math.max(0, g - f.baseFeeMsat - proportional(g, f.feePpm))
+const applyFee = (g, f) => {
+  const net = g - f.baseFeeMsat - proportional(g, f.feePpm)
+  return net <= 0 ? 0 : Math.floor(net / 1000) * 1000
+}
 const grossUp = (net, f) => {
   if (net <= 0) return 0
   let hi = net + f.baseFeeMsat
@@ -843,7 +690,8 @@ check('every gross-up expectation is the true minimum', () => {
   for (const c of fees.grossUp) {
     assert(grossUp(c.netMsat, c.fee) === c.expect, `${c.netMsat}: expected ${c.expect}`)
     if (c.netMsat > 0) {
-      assert(applyFee(c.expect, c.fee) === c.netMsat, `${c.netMsat}: does not net back`)
+      assert(applyFee(c.expect, c.fee) >= c.netMsat, `${c.netMsat}: does not net back`)
+      if (c.netMsat % 1000 === 0) assert(applyFee(c.expect, c.fee) === c.netMsat, `${c.netMsat}: overshoots a whole-sat net`)
       assert(applyFee(c.expect - 1, c.fee) < c.netMsat, `${c.netMsat}: not minimal`)
     }
   }
@@ -853,7 +701,8 @@ check('the gross-up round trip holds for every listed fee and amount', () => {
   for (const fee of fees.grossUpRoundTrip.fees) {
     for (const net of fees.grossUpRoundTrip.netAmountsMsat) {
       const gross = grossUp(net, fee)
-      assert(applyFee(gross, fee) === net, `${net} with ${JSON.stringify(fee)}: nets ${applyFee(gross, fee)}`)
+      assert(applyFee(gross, fee) >= net, `${net} with ${JSON.stringify(fee)}: nets ${applyFee(gross, fee)}`)
+      if (net % 1000 === 0) assert(applyFee(gross, fee) === net, `${net} with ${JSON.stringify(fee)}: overshoots to ${applyFee(gross, fee)}`)
       assert(applyFee(gross - 1, fee) < net, `${net} with ${JSON.stringify(fee)}: not minimal`)
     }
   }
@@ -879,11 +728,11 @@ check('every callback case is consistent with its declared parameters', () => {
       JSON.stringify(k1s) === JSON.stringify(c.params.k1),
       `${c.name}: k1 list does not match`
     )
-    if (c.params.h) {
-      assert(query.some(([k, v]) => k === 'h' && v === c.params.h), `${c.name}: h missing`)
+    if (c.params.p1) {
+      assert(query.some(([k, v]) => k === 'p1' && v === c.params.p1), `${c.name}: p1 missing`)
     }
-    if (c.params.h2) {
-      assert(query.some(([k, v]) => k === 'h2' && v === c.params.h2), `${c.name}: h2 missing`)
+    if (c.params.p2) {
+      assert(query.some(([k, v]) => k === 'p2' && v === c.params.p2), `${c.name}: p2 missing`)
     }
     if (c.params.amountMsat !== undefined) {
       assert(
@@ -1191,6 +1040,7 @@ const decodeAmountSuffix = suffix => {
   const amount = Number(match[1]) * AMOUNT_MSAT_PER_UNIT[match[2] ?? '']
   return Number.isSafeInteger(amount) ? amount : null
 }
+// A cs1 since luds fd80cdd: r || s || recovery-id || u32 t, 69 bytes.
 const decodeCertificate = value => {
   if (typeof value !== 'string') return null
   const lower = value.toLowerCase()
@@ -1198,8 +1048,10 @@ const decodeCertificate = value => {
   if (sep < 3 || !lower.startsWith('cs')) return null
   const amountMsat = decodeAmountSuffix(lower.slice(2, sep))
   if (amountMsat === null) return null
-  const signature = decode2(lower.slice(0, sep), value, 65)
-  return signature && signature[64] <= 3 ? {amountMsat, signature} : null
+  const payload = decode2(lower.slice(0, sep), value, 69)
+  if (!payload || payload[64] > 3) return null
+  const t = new DataView(payload.buffer, payload.byteOffset).getUint32(65, false)
+  return {amountMsat, signature: payload.slice(0, 65), t}
 }
 const lsmDigest = message =>
   sha256(sha256(cat(utf8ToBytes('Lightning Signed Message:'), utf8ToBytes(message))))
@@ -1338,27 +1190,29 @@ check('part2: every certificate is the mint key over its domain, amount and Q', 
     'mint key pair'
   )
   for (const c of part2.certificates) {
-    assert(c.message === `LNURLcash:${c.domain}:${c.amountMsat}:${c.notePubkey}`, `${c.amountMsat}: message`)
+    assert(c.message === `LNURLcash:${c.domain}:${c.amountMsat}:${c.notePubkey}:${c.t}`, `${c.amountMsat}: message`)
     assert(bytesToHex(lsmDigest(c.message)) === c.digest, `${c.amountMsat}: digest`)
     const decoded = decodeCertificate(c.cs1)
     assert(decoded && decoded.amountMsat === c.amountMsat, `${c.amountMsat}: cs1 amount`)
+    assert(decoded.t === c.t, `${c.amountMsat}: cs1 t`)
     assert(bytesToHex(decoded.signature) === c.signature, `${c.amountMsat}: cs1 signature`)
     assert(bytesToHex(recoverX(decoded.signature, hexToBytes(c.digest))) === mintX, `${c.amountMsat}: recovers to the mint key`)
-    // bound to its domain: the same signature recovers elsewhere to another key
-    const other = lsmDigest(`LNURLcash:${elsewhere(c.domain)}:${c.amountMsat}:${c.notePubkey}`)
+    // bound to its domain and its t: the same signature recovers to another key under either changed
+    const other = lsmDigest(`LNURLcash:${elsewhere(c.domain)}:${c.amountMsat}:${c.notePubkey}:${c.t}`)
     assert(bytesToHex(recoverX(decoded.signature, other)) !== mintX, `${c.amountMsat}: verifies at ${elsewhere(c.domain)} too`)
+    const later = lsmDigest(`LNURLcash:${c.domain}:${c.amountMsat}:${c.notePubkey}:${c.t + 1}`)
+    assert(bytesToHex(recoverX(decoded.signature, later)) !== mintX, `${c.amountMsat}: verifies at another t too`)
   }
   const [first] = part2.certificates
   assert(
     part2.certificates.some(c => c.notePubkey === first.notePubkey && c.amountMsat === first.amountMsat && c.domain !== first.domain),
     'no certificate for the same note and amount at a second domain'
   )
-  for (const c of part2.legacyCertificates) {
-    assert(c.superseded === true, 'a legacy certificate is not marked superseded')
-    assert(c.message === `LNURLcash:${c.amountMsat}:${c.notePubkey}`, `legacy ${c.amountMsat}: message`)
-    const decoded = decodeCertificate(c.cs1)
-    assert(decoded && bytesToHex(recoverX(decoded.signature, lsmDigest(c.message))) === mintX, `legacy ${c.amountMsat}: recovers`)
-  }
+  assert(
+    part2.certificates.some(c => c.notePubkey === first.notePubkey && c.amountMsat === first.amountMsat && c.domain === first.domain && c.t !== first.t),
+    'no certificate for the same note, amount and domain at a second t'
+  )
+
 })
 
 check("part2: every address proof is by the share's own key, over action, domain, lowercased username and cx1", () => {
@@ -1602,10 +1456,12 @@ check('spec-vectors: lud26 key_path_spend signs with the negated key of an odd-y
 })
 
 const checkCertificate = (label, c, domain, qHex, mintPubkey) => {
-  assert(c.message === `LNURLcash:${domain}:${c.amount_msat}:${qHex}`, `${label}: message`)
+  assert(Number.isInteger(c.t) && c.t >= 0 && c.t < 2 ** 32, `${label}: t`)
+  assert(c.message === `LNURLcash:${domain}:${c.amount_msat}:${qHex}:${c.t}`, `${label}: message`)
   assert(bytesToHex(lsmDigest(c.message)) === c.digest, `${label}: digest`)
   const decoded = decodeCertificate(c.cs1)
   assert(decoded && decoded.amountMsat === c.amount_msat && bytesToHex(decoded.signature) === c.signature, `${label}: cs1`)
+  assert(decoded.t === c.t, `${label}: cs1 t`)
   assert(bytesToHex(recoverX(decoded.signature, hexToBytes(c.digest))) === mintPubkey.slice(2), `${label}: recovers`)
 }
 
@@ -1636,7 +1492,222 @@ check('spec-vectors: lud25 bearer note recomputes, and its certificate is over h
   const url = new URL(v.note_url.replace(/^lnurlw:/, 'https:'))
   checkCertificate('bearer certificate', v.certificate, url.hostname, v.Q, LUDS_25.certificates.mintPubkey)
   assert(url.searchParams.get('k1') === v.preimage && url.searchParams.get('c') === v.certificate.cs1, 'certified note URL')
-  assert(!url.searchParams.has('sig'), 'the certified note URL still carries the pre-50d740a sig')
+})
+
+check('spec-vectors: lud25 timelock_note recomputes, and each spend gets its verdict from the CLTV rule', () => {
+  const v = LUDS_25.timelock_note
+  const sk = hexToBytes(v.sk)
+  assert(bytesToHex(sha256(utf8ToBytes('LUD-25 test vector timelock key'))) === v.sk, 'timelock key label')
+  // <T> OP_CHECKLOCKTIMEVERIFY OP_DROP <pk> OP_CHECKSIG, T a minimal CScriptNum
+  const T = []
+  for (let n = v.T; n > 0; n = Math.floor(n / 256)) T.push(n % 256)
+  if (T[T.length - 1] & 0x80) T.push(0)
+  const leaf = cat(Uint8Array.of(T.length), Uint8Array.from(T), Uint8Array.of(0xb1, 0x75, 0x20), schnorr.getPublicKey(sk), Uint8Array.of(0xac))
+  assert(bytesToHex(leaf) === v.leaf, 'leaf')
+  assert(bytesToHex(outputKeyOf(leaf, hexToBytes(v.control_block))) === v.Q, 'Q from leaf and control block')
+  assert(encodeCp1(hexToBytes(v.Q)) === v.cp1, 'cp1')
+  assert(v.spends.some(s => s.locktime >= v.T) && v.spends.some(s => s.locktime < v.T), 'spends do not straddle T')
+  for (const s of v.spends) {
+    const d = decodeSpend(s.cw1)
+    assert(d && d.kind === 'script' && d.locktime === s.locktime && d.sequence === s.sequence, `${s.locktime}: cw1 header`)
+    assert(bytesToHex(d.script) === v.leaf && bytesToHex(d.outputKey) === v.Q, `${s.locktime}: cw1 opens another note`)
+    const sighash = scriptPathSighash(hexToBytes(v.Q), v.domain, leaf, s.locktime, s.sequence)
+    assert(bytesToHex(sighash) === s.sighash, `${s.locktime}: sighash`)
+    assert(d.witness.length === 1 && schnorr.verify(d.witness[0], sighash, schnorr.getPublicKey(sk)), `${s.locktime}: signature`)
+    for (const [clock, verdict] of Object.entries(s.expect)) {
+      // CLTV: the claimed nLockTime reaches T, nSequence enables it, and the claim is due by the SERVICE's clock
+      const accepted = s.locktime >= v.T && s.sequence !== 0xffffffff && Number(clock) >= s.locktime
+      assert(verdict === (accepted ? 'accepted' : 'refused'), `${s.locktime} at ${clock}: ${verdict}`)
+    }
+  }
+})
+
+check('spec-vectors: lud25 domains are the withdrawLink host, lowercased, A-label, without port, userinfo or trailing dot', () => {
+  const cases = Object.entries(LUDS_25.domains.cases)
+  assert(cases.length >= 5, 'too few domain cases')
+  for (const [link, domain] of cases) {
+    let url = link
+    if (/^lnurl1/i.test(url)) url = new TextDecoder().decode(bech32.fromWords(bech32.decode(url.toLowerCase(), 2000).words))
+    url = url.replace(/^lnurlw:\/\//i, 'https://')
+    assert(spendDomainOf(url) === domain, `${link}: the grader reads ${spendDomainOf(url)}`)
+    assert(domain === domain.toLowerCase() && !domain.endsWith('.') && !domain.includes(':') && /^[\x21-\x7e]+$/.test(domain), `${link}: ${domain} is not canonical`)
+  }
+})
+
+check('spec-vectors: lud25 fees follow from the formula, and the grader parses them the same', () => {
+  const f = LUDS_25.fees
+  for (const c of f.parse) {
+    const got = readFeeAdvertisement(JSON.stringify([['text/plain', c.text_plain]]))
+    const read = got.unknown ? null : {base_fee_msat: got.fee?.baseFeeMsat ?? 0, fee_ppm: got.fee?.feePpm ?? 0}
+    assert(JSON.stringify(read) === JSON.stringify(c.expect), `${c.text_plain}: the grader reads ${JSON.stringify(read)}`)
+  }
+  for (const c of f.mint) {
+    const credit = applyFee(c.amount_msat, {baseFeeMsat: c.base_fee_msat, feePpm: c.fee_ppm})
+    assert(credit === c.credited_msat && credit % 1000 === 0, `mint ${c.amount_msat}: ${credit}`)
+  }
+  for (const c of f.split) {
+    assert(c.base_fee_msat % 1000 === 0, 'split: base fee not whole sats')
+    if (c.error) {
+      assert(c.amount_msat % 1000 !== 0 || c.value_in_msat - c.amount_msat - c.base_fee_msat <= 0, `split ${c.amount_msat}: no reason to refuse`)
+      if (c.error === 'insufficient value') assert(c.value_in_msat - c.amount_msat - c.base_fee_msat <= 0, `split ${c.amount_msat}: is coverable`)
+    } else {
+      assert(c.amount_msat % 1000 === 0 && c.p1_msat === c.amount_msat, `split ${c.amount_msat}: p1`)
+      assert(c.p2_msat === c.value_in_msat - c.amount_msat - c.base_fee_msat, `split ${c.amount_msat}: p2`)
+    }
+  }
+  for (const c of f.merge) {
+    const sum = c.values_in_msat.reduce((a, b) => a + b, 0)
+    assert(c.value_out_msat === sum + (c.values_in_msat.length - 1) * c.base_fee_msat, 'merge: value_out = value_in + (#in - #out) * base')
+  }
+})
+
+check('spec-vectors: lud25 transcripts hold together: every certificate, spend, value and reason', () => {
+  const v = LUDS_25
+  const domain = v.certificates.domain
+  const mintX = v.certificates.mintPubkey.slice(2)
+  const steps = v.transcripts.steps
+  assert(steps.every(s => (s.request && s.response) || (s.event && !s.request)), 'a step is neither a request nor an event')
+  const certificateOk = (cs1, qHex, value) => {
+    const d = decodeCertificate(cs1)
+    return d && d.amountMsat === value && bytesToHex(recoverX(d.signature, lsmDigest(`LNURLcash:${domain}:${value}:${qHex}:${d.t}`))) === mintX
+  }
+  const outstanding = new Map()
+  const burned = new Set()
+  const pending = new Set()
+  const fixed = ['unknown note', 'already in use', 'pending']
+  for (const [i, step] of steps.entries()) {
+    if (step.event) {
+      for (const q of pending) burned.add(q)
+      pending.clear()
+      continue
+    }
+    const label = `step ${i}`
+    const r = step.response
+    if (r.status === 'ERROR') assert(fixed.includes(r.reason), `${label}: ${r.reason} is not a fixed reason`)
+    const url = step.request.startsWith('GET http') ? new URL(step.request.slice(4)) : null
+    if (!url) continue
+    const k1s = url.searchParams.getAll('k1')
+    const qs = k1s.map(k1 => {
+      const d = decodeSpend(k1)
+      assert(d, `${label}: ${k1} is no spend`)
+      if (d.kind === 'key') assert(schnorr.verify(d.signature, keyPathSighash(d.outputKey, domain), d.outputKey), `${label}: a ck1 that does not verify`)
+      return bytesToHex(d.outputKey)
+    })
+    if (r.tag === 'withdrawRequest') {
+      const q = qs[0]
+      const gone = burned.has(q) || pending.has(q)
+      if (!outstanding.has(q) && !gone) outstanding.set(q, r.maxWithdrawable)
+      const value = gone ? 0 : outstanding.get(q)
+      assert(r.minWithdrawable === value && r.maxWithdrawable === value, `${label}: worth ${value}`)
+      assert(gone ? r.c === undefined : certificateOk(r.c, q, value), `${label}: certificate`)
+      assert(r.payLink && r.mintPubkey === v.certificates.mintPubkey, `${label}: payLink and mintPubkey`)
+      continue
+    }
+    if (r.tag === 'payRequest') {
+      assert(r.mintPubkey === v.certificates.mintPubkey && r.commentAllowed >= 64, `${label}: mint payRequest`)
+      continue
+    }
+    if (url.searchParams.has('p')) {
+      assert(r.reason === 'unknown note', `${label}: an uncredited p`)
+      continue
+    }
+    if (r.status === 'ERROR') {
+      if (r.reason === 'pending') assert(qs.some(q => pending.has(q)), `${label}: pending, but nothing is`)
+      if (r.reason === 'already in use') assert(qs.some(q => burned.has(q)), `${label}: already in use, but nothing is burned`)
+      continue
+    }
+    if (url.searchParams.has('pr')) {
+      assert(r.verify === '<verify>', `${label}: a melt without its verify`)
+      if (!burned.has(qs[0])) pending.add(qs[0])
+      outstanding.delete(qs[0])
+      continue
+    }
+    // a rotate, split or merge: its outputs and their certificates; a retry changes nothing
+    const p1 = decodeNoteRef(url.searchParams.get('p1'))
+    const p2 = url.searchParams.has('p2') ? decodeNoteRef(url.searchParams.get('p2')) : null
+    if (qs.every(q => burned.has(q))) {
+      assert(certificateOk(r.c, p1, outstanding.get(p1)), `${label}: the retry does not re-certify p1`)
+      continue
+    }
+    const valueIn = qs.reduce((sum, q) => sum + outstanding.get(q), 0)
+    const base = 1000
+    const amount = url.searchParams.has('amount') ? Number(url.searchParams.get('amount')) : null
+    const out1 = amount ?? valueIn + (qs.length - 1) * base
+    assert(certificateOk(r.c, p1, out1), `${label}: p1 worth ${out1}`)
+    outstanding.set(p1, out1)
+    if (p2) {
+      const out2 = valueIn - amount - base
+      assert(certificateOk(r.c2, p2, out2), `${label}: p2 worth ${out2}`)
+      outstanding.set(p2, out2)
+    }
+    for (const q of qs) {
+      outstanding.delete(q)
+      burned.add(q)
+    }
+  }
+  assert(burned.size >= 4 && pending.size === 0, 'the transcript does not end with every spent note burned')
+})
+
+check('spec-vectors: lud26 descriptors carry each chain and share, with a BIP-380 checksum', () => {
+  const INPUT = "0123456789()[],'/*abcdefgh@:$%{}IJKLMNOPQRSTUVWXYZ&+-.;<=>?!^_|~ijklmnopqrstuvwxyzABCDEFGH`#\"\\ "
+  const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+  const GEN = [0xf5dee51989n, 0xa9fdca3312n, 0x1bab10e32dn, 0x3706b1677an, 0x644d626ffdn]
+  const polymod = (c, val) => {
+    const c0 = c >> 35n
+    c = ((c & 0x7ffffffffn) << 5n) ^ BigInt(val)
+    GEN.forEach((g, i) => {
+      if ((c0 >> BigInt(i)) & 1n) c ^= g
+    })
+    return c
+  }
+  const checksum = desc => {
+    let c = 1n
+    const groups = []
+    for (const ch of desc) {
+      const pos = INPUT.indexOf(ch)
+      assert(pos >= 0, `${desc}: ${ch}`)
+      c = polymod(c, pos & 31)
+      groups.push(pos >> 5)
+      if (groups.length === 3) {
+        c = polymod(c, groups[0] * 9 + groups[1] * 3 + groups[2])
+        groups.length = 0
+      }
+    }
+    if (groups.length) c = polymod(c, groups.reduce((a, g) => a * 3 + g, 0))
+    for (let i = 0; i < 8; i++) c = polymod(c, 0)
+    c ^= 1n
+    return Array.from({length: 8}, (_, j) => CHARSET[Number((c >> BigInt(5 * (7 - j))) & 31n)]).join('')
+  }
+  assert(checksum('raw(deadbeef)') === '89f8spxm', 'BIP-380 example')
+  const b58 = createBase58check(sha256)
+  const split = desc => {
+    const [body, sum] = desc.split('#')
+    assert(sum === checksum(body), `${body}: checksum`)
+    return body
+  }
+  for (const dv of LUDS_26.derivation) {
+    const master = masterOf(hexToBytes(dv.seed))
+    for (const a of dv.accounts) {
+      for (const [chain, c] of [[0, a.wallet], [1, a.change]]) {
+        const body = split(c.descriptor)
+        const m = body.match(/^rawtr\(([1-9A-HJ-NP-Za-km-z]+)\/(.+)\/\*\)$/)
+        assert(m, `${body}: shape`)
+        const x = b58.decode(m[1])
+        assert(bytesToHex(x.slice(0, 4)) === '0488ade4' && x.slice(4, 13).every(b => b === 0), `${body}: not a depth-0 xprv`)
+        assert(bytesToHex(x.slice(13, 45)) === bytesToHex(master.chainCode) && bytesToHex(x.slice(46)) === bytesToHex(master.key), `${body}: not the seed's master`)
+        const steps = [139 + HARD, ...dv.d, a.account + HARD, chain].map(i => (i >= HARD ? `${i - HARD}h` : `${i}`)).join('/')
+        assert(m[2] === steps, `${body}: path`)
+      }
+      for (const s of a.shareable) {
+        const body = split(s.descriptor)
+        const m = body.match(/^rawtr\(([1-9A-HJ-NP-Za-km-z]+)\/\*\)$/)
+        assert(m, `${body}: shape`)
+        const x = b58.decode(m[1])
+        assert(bytesToHex(x.slice(0, 4)) === '0488b21e' && x.slice(4, 13).every(b => b === 0), `${body}: not a depth-0 xpub`)
+        assert(bytesToHex(x.slice(13, 45)) === s.chaincode && bytesToHex(x.slice(45)) === s.P, `${body}: not the share's cx1`)
+      }
+    }
+  }
 })
 
 check("spec-vectors: lud26 registration proofs verify under each share's x(P), bound to domain and cx1", () => {

@@ -19,7 +19,6 @@ export type HashLookup =
   | 'answersUnknown'
   | 'hidesSpent'
   /** Legacy alias for true: spent hashes are now distinguishable. */
-  | 'revealsSpent'
   | 'acceptsBoth'
 
 /** where a mint claims it accepts an `h` on its pay callback */
@@ -40,16 +39,36 @@ export interface MockMintOptions {
   signatureLayout?: SignatureLayout
   /**
    * Certify every note issued with a cs1 over hex(Q), a bearer note
-   * included (default). LUD-25 makes certifying a SHOULD; false withholds
-   * c/c2 everywhere, which the grader warns about and never fails.
+   * included (default). LUD-25 makes certifying a MUST (luds fd80cdd);
+   * false withholds c/c2 everywhere, which the grader fails.
    */
   signatures?: boolean
   /**
-   * The names certificates travel under: 'c' (default) is LUD-25 as of luds
-   * 50d740a, c and c2; 'sig' is the pre-50d740a sig/sig2 alone; 'both'
-   * sends each under both names, as a mint mid-transition does.
+   * The time a certificate carries (luds fd80cdd). 'now' (default) is
+   * compliant; 'none' signs the 65-byte form without t; 'future' signs an
+   * hour ahead of the clock; 'unsigned' carries t but signs without it.
    */
-  certificateNames?: 'c' | 'sig' | 'both'
+  certificateTime?: 'now' | 'none' | 'future' | 'unsigned'
+  /** The reason a spend of a burned note gets at the callback. Default "already in use". */
+  burnedReason?: string
+  /**
+   * How a burned or mid-melt note answers the informational GET: 'zero'
+   * (default, luds fd80cdd) a withdrawRequest worth 0 with no certificate;
+   * 'error' the earlier burnedReason or "pending" as errors. Non-compliant.
+   */
+  goneAtInfo?: 'zero' | 'error'
+  /** The reason an uncredited note gets. Default "unknown note" (luds fd80cdd). */
+  unknownReason?: string
+  /** Publish mintPubkey on the mint payRequest (default), a MUST since luds fd80cdd. */
+  payRequestMintPubkey?: boolean
+  /** Cache-Control: no-store on the withdraw endpoint and callback (default). */
+  noStore?: boolean
+  /** non-compliant: name verify URLs by the payment hash rather than an unguessable token */
+  verifyByPaymentHash?: boolean
+  /** non-compliant: accept a split amount that is not whole satoshis */
+  acceptsSubSatSplit?: boolean
+  /** non-compliant: credit msat-exact rather than rounded down to whole satoshis */
+  msatExactCredit?: boolean
   /**
    * The hosts a spend's signature may be bound to, as a list or a
    * comma-separated string. Unset, the hostname the mock was reached at.
@@ -61,14 +80,16 @@ export interface MockMintOptions {
    * shows; 'lnurlw' is the LUD-17 scheme form. Both are legal; test against both.
    */
   withdrawLinkForm?: WithdrawLinkForm
-  /** LUD-21 verify endpoint. Off means 404, not merely unadvertised. */
+  /**
+   * LUD-21 verify endpoint (default on). Off means 404, not merely
+   * unadvertised; a melt MUST carry verify since luds fd80cdd.
+   */
   verify?: boolean
   privateKey?: string
 
   /**
-   * Publish `payLink` on a note's informational GET - the way home for a
-   * holder who has nothing but the note. On by default, as the reference
-   * mint does it.
+   * Publish LUD-19 `payLink` on a note's informational GET (default), a
+   * MUST since luds fd80cdd: it tells a WALLET the link is a note.
    */
   noteInfoPayLink?: boolean
 
@@ -94,14 +115,12 @@ export interface MockMintOptions {
   meltAlwaysFails?: boolean
   /** non-compliant: generate the replacement secret SERVICE-side and hand it back */
   serverGeneratedSecrets?: boolean
-  /** ceiling the mint fee to a whole sat, as dni's lnurl-mint does; compliant */
+  /** ceiling the mint fee to a whole sat, as dni's lnurl-mint does; the same note as the rounded-down credit */
   roundFeeToSat?: boolean
-  /** withhold this many msat on top of the fee, landing outside the compliant band */
+  /** withhold this many msat on top of the fee */
   extraFeeMsat?: number
   /** non-compliant: accept a split with no p2, generating the change note instead of refusing */
   acceptsMissingP2?: boolean
-  /** the older name of acceptsMissingP2 */
-  acceptsMissingH2?: boolean
   /** non-compliant: split without taking the base fee out of change, and so without its floor */
   splitIgnoresBaseFee?: boolean
   /** delay before responding, in milliseconds */
@@ -135,8 +154,6 @@ export interface MockMintOptions {
   replayMatchesStrings?: boolean
   /** the reason a p1/p2 naming a note already in use gets; LUD-25 fixes "already in use" */
   alreadyInUseReason?: string
-  /** non-compliant: certify a bearer note over its h, the pre-taproot message, not hex(Q) */
-  certificateOverH?: boolean
   /** non-compliant: refuse a cp1 wherever one may go, as a mint without key-path notes does */
   refusesCp1Outputs?: boolean
   /** non-compliant: accept a cp1 whose Q is not the x coordinate of a curve point */
@@ -191,7 +208,7 @@ export interface MockMintOptions {
   retriedMutation?: RetriedMutation
   /**
    * The informational lookup by `?p=` (a cp1, or a bearer note's hex h;
-   * `?h=` is read as its older name), which LUD-25 makes a MUST. `true` is
+   * which LUD-25 makes a MUST. `true` is
    * conforming; string values reproduce distinct non-compliant responses,
    * and false an older SERVICE the grader fails.
    */
@@ -393,8 +410,12 @@ export interface MockMintState {
     options?: {previousKey?: boolean}
   ): string | undefined
   noteState(k1: string): NoteState | null
+  /** Resolve the melt in flight on a note: settled burns it and its verify reports settled. */
   settleMelt(k1: string): void
+  /** Fail the melt in flight on a note: the note is restored and its verify answers Not found. */
   failMelt(k1: string): void
+  /** The payment hash behind a verify URL this mock handed out, or null. */
+  paymentHashOfVerify(verifyUrl: string): string | null
   /**
    * Settle an invoice this mock issued, as its node would: a mint quote's
    * note, an address payment's share note (at `creditedTo`) or an address

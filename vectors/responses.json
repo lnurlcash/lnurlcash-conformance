@@ -4,7 +4,7 @@
   "description": "Classifying a SERVICE response. The distinction that matters for funds is definitive-rejection versus ambiguous-outcome: a parsed {\"status\":\"ERROR\"} means the request was processed and refused, while a transport failure, an unparseable body, or a 200 that does not confirm means the mutation MAY have landed - and for rotate/split/merge the WALLET-generated secrets are then the only copy of the outputs, so they must ride the error rather than be discarded. A confirmed mutation missing a signature the output or caller requires is its own outcome: it definitely landed, so the secrets matter more than ever. `op` says which call each case is driven through - a melt is the one mutation with no signature to return.",
   "outcomes": {
     "ok": "the operation is confirmed",
-    "unverifiable": "the mutation is confirmed but a cp1 output came back without its required cs1 certificate, or a legacy hash output came back without the raw signature a strict caller required. The note EXISTS at the output the WALLET disclosed, so keep its secret even while reporting the missing proof",
+    "unverifiable": "the mutation is confirmed but an output came back without its cs1 certificate, which a SERVICE MUST return for every note it issues, a bearer note included (luds fd80cdd). The note EXISTS at the output the WALLET disclosed, so keep its secret even while reporting the missing proof",
     "pending": "this k1 has another operation in flight (a melt); retry shortly",
     "spent": "the SERVICE is authoritative that the note is already burned; a holder may lock it as spent",
     "unknown": "the SERVICE does not recognise this note; surface it, do not silently lock it",
@@ -13,111 +13,82 @@
   },
   "cases": [
     {
-      "name": "plain success",
+      "name": "success without a certificate",
       "op": "mutation",
       "http": 200,
       "body": {
         "status": "OK"
       },
-      "expect": "ok",
-      "why": "a bare OK is the conforming answer for a plain hash output since the Part 2 rewrite: the note is real, the WALLET keeps its secret, and nobody the holder hands it to can check it offline, which is what a plain note is. Only a cp1 output is owed a certificate"
+      "expect": "unverifiable",
+      "why": "every output is owed a cs1 certificate in c, a bearer note included (luds fd80cdd); without one the note it names cannot be verified offline. The note exists at the output the WALLET disclosed"
     },
     {
-      "name": "cp1 output confirmed without a certificate",
+      "name": "success with its certificate",
       "op": "mutation",
-      "output": "cp1",
       "http": 200,
       "body": {
-        "status": "OK"
+        "status": "OK",
+        "c": "cs210n14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2c6xzu2e"
+      },
+      "expect": "ok",
+      "signature": "cs210n14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2c6xzu2e"
+    },
+    {
+      "name": "split success with both certificates",
+      "op": "split",
+      "http": 200,
+      "body": {
+        "status": "OK",
+        "c": "cs210n14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2c6xzu2e",
+        "c2": "cs210n1ehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumngyuulcn"
+      },
+      "expect": "ok",
+      "signature": "cs210n14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2c6xzu2e",
+      "changeSignature": "cs210n1ehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumnwdehxumngyuulcn"
+    },
+    {
+      "name": "a split that certifies only its first output",
+      "op": "split",
+      "http": 200,
+      "body": {
+        "status": "OK",
+        "c": "cs210n14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2c6xzu2e"
       },
       "expect": "unverifiable",
-      "why": "a cp1 output is owed a cs1 certificate in c; without one the note it names cannot be verified offline, which is the whole reason to hold a cp1 note. The note exists at the key the WALLET disclosed"
+      "why": "the change is owed its certificate in c2 exactly as the first output is in c; the change is not a lesser note"
     },
     {
-      "name": "cp1 output certified",
-      "op": "mutation",
-      "output": "cp1",
+      "name": "melt success with its verify",
+      "op": "melt",
       "http": 200,
       "body": {
         "status": "OK",
-        "c": "cs14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2atdv6a53"
+        "verify": "https://mint.example/verify/9c0b1f5e2d7a4c38b6e1d0f2a7c5e9b3"
       },
       "expect": "ok",
-      "signature": "cs14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2atdv6a53"
+      "why": "OK on a melt means the payment is in flight, NOT that the note is confirmed spent. A melt mints nothing, so it has no signature to return; it carries LUD-21 verify (luds fd80cdd), which the WALLET follows to settled or Not found instead of repeating its spend"
     },
     {
-      "name": "cp1 output certified under both names",
-      "op": "mutation",
-      "output": "cp1",
-      "http": 200,
-      "body": {
-        "status": "OK",
-        "c": "cs14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2atdv6a53",
-        "sig": "cs14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2atdv6a53"
-      },
-      "expect": "ok",
-      "signature": "cs14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2atdv6a53",
-      "why": "a SERVICE moving from the pre-50d740a name may send the certificate as both c and sig; c is the one a WALLET reads, and the extra sig is harmless"
-    },
-    {
-      "name": "a split to a cp1 change that certifies only its first output",
-      "op": "split",
-      "change": "cp1",
-      "http": 200,
-      "body": {
-        "status": "OK",
-        "c": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
-      },
-      "expect": "unverifiable",
-      "why": "the change is a cp1 note and is owed its certificate in c2 exactly as the first output would be; the change is not a lesser note"
-    },
-    {
-      "name": "success with an offline-verification signature",
-      "op": "mutation",
-      "http": 200,
-      "body": {
-        "status": "OK",
-        "c": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
-      },
-      "expect": "ok",
-      "signature": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
-    },
-    {
-      "name": "split success with both signatures",
-      "op": "split",
-      "http": 200,
-      "body": {
-        "status": "OK",
-        "c": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
-        "c2": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
-      },
-      "expect": "ok",
-      "signature": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
-      "changeSignature": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
-    },
-    {
-      "name": "a split that signs only its first output",
-      "op": "split",
-      "http": 200,
-      "body": {
-        "status": "OK",
-        "c": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
-      },
-      "expect": "ok",
-      "signature": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
-      "why": "both outputs are legacy hash notes; tolerant callers can retain a landed output without proof, while a strict caller may require both raw Part 1 signatures"
-    },
-    {
-      "name": "melt success with a LUD-21 style proof",
+      "name": "melt success with an echoed pr",
       "op": "melt",
       "http": 200,
       "body": {
         "status": "OK",
         "pr": "lnbc210n1pjq",
-        "verify": "https://mint.example/verify/abc"
+        "verify": "https://mint.example/verify/9c0b1f5e2d7a4c38b6e1d0f2a7c5e9b3"
       },
       "expect": "ok",
-      "why": "OK on a melt means the payment is in flight, NOT that the note is confirmed spent. A melt mints nothing, so it has no signature to return and none is required"
+      "why": "an echoed pr is harmless and ignored"
+    },
+    {
+      "name": "melt success without verify",
+      "op": "melt",
+      "http": 200,
+      "body": {
+        "status": "OK"
+      },
+      "expect": "ok",
+      "why": "a melt MUST carry verify, but the OK still confirms the melt was accepted: the payment is in flight either way. Reading it as an error would have the holder retry a melt that landed; the WALLET has to follow it with the informational GET instead"
     },
     {
       "name": "pending",
@@ -131,7 +102,29 @@
       "why": "the exact reason string LUD-25 specifies for a k1 mid-melt"
     },
     {
-      "name": "already spent",
+      "name": "already in use",
+      "op": "mutation",
+      "http": 200,
+      "body": {
+        "status": "ERROR",
+        "reason": "already in use"
+      },
+      "expect": "spent",
+      "why": "the exact reason LUD-25 fixes for a spend that opens a burned note at the callback"
+    },
+    {
+      "name": "unknown note",
+      "op": "mutation",
+      "http": 200,
+      "body": {
+        "status": "ERROR",
+        "reason": "unknown note"
+      },
+      "expect": "unknown",
+      "why": "the exact reason LUD-25 fixes for a note the SERVICE never credited (luds fd80cdd)"
+    },
+    {
+      "name": "already spent, older wording",
       "op": "mutation",
       "http": 200,
       "body": {
@@ -141,7 +134,7 @@
       "expect": "spent"
     },
     {
-      "name": "unknown note",
+      "name": "unknown note, older wording",
       "op": "mutation",
       "http": 200,
       "body": {

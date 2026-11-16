@@ -12,7 +12,8 @@
         "maxSendable": 100000000,
         "metadata": "[[\"text/plain\",\"a mint\"],[\"text/identifier\",\"mint@mint.example\"]]",
         "commentAllowed": 64,
-        "withdrawLink": "lnurlw://mint.example/w"
+        "withdrawLink": "lnurlw://mint.example/w",
+        "mintPubkey": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
       },
       "withdrawLink": "lnurlw://mint.example/w",
       "commentAllowed": 64,
@@ -27,7 +28,8 @@
         "maxSendable": 100000000,
         "metadata": "[[\"text/plain\",\"a mint\"],[\"text/identifier\",\"mint@mint.example\"]]",
         "commentAllowed": 64,
-        "withdrawLink": "https://mint.example/w"
+        "withdrawLink": "https://mint.example/w",
+        "mintPubkey": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
       },
       "withdrawLink": "https://mint.example/w",
       "commentAllowed": 64,
@@ -43,7 +45,8 @@
         "maxSendable": 100000000,
         "metadata": "[[\"text/plain\",\"a mint\"]]",
         "commentAllowed": 64,
-        "withdrawLink": "lnurlw://mintmintmintmintmintmintmintmintmintmintmintmintmintmi.onion/w"
+        "withdrawLink": "lnurlw://mintmintmintmintmintmintmintmintmintmintmintmintmintmi.onion/w",
+        "mintPubkey": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
       },
       "withdrawLink": "lnurlw://mintmintmintmintmintmintmintmintmintmintmintmintmintmi.onion/w",
       "commentAllowed": 64,
@@ -59,7 +62,8 @@
         "maxSendable": 100000000,
         "metadata": "[[\"text/plain\",\"a mint\"],[\"text/plain\",\"Mint fees: 1000,2000\"]]",
         "commentAllowed": 64,
-        "withdrawLink": "lnurlw://mint.example/w"
+        "withdrawLink": "lnurlw://mint.example/w",
+        "mintPubkey": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
       },
       "withdrawLink": "lnurlw://mint.example/w",
       "commentAllowed": 64,
@@ -105,9 +109,23 @@
         "minSendable": 1000,
         "maxSendable": 100000000,
         "metadata": "[[\"text/plain\",\"a broken mint\"]]",
-        "withdrawLink": "lnurlw://mint.example/w"
+        "withdrawLink": "lnurlw://mint.example/w",
+        "mintPubkey": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
       },
       "why": "current LUD-25 draft: minting is unavailable unless commentAllowed can carry exactly the 64-character hash commitment"
+    },
+    {
+      "name": "minting payRequest without mintPubkey",
+      "body": {
+        "tag": "payRequest",
+        "callback": "https://mint.example/p/cb",
+        "minSendable": 1000,
+        "maxSendable": 100000000,
+        "metadata": "[[\"text/plain\",\"a mint\"]]",
+        "commentAllowed": 64,
+        "withdrawLink": "https://mint.example/w"
+      },
+      "why": "luds fd80cdd: a SERVICE MUST publish mintPubkey in its mint payRequest, so a WALLET knows the key before it pays and can check the certificate of the note it mints"
     }
   ],
   "mintCallback": {
@@ -230,6 +248,39 @@
         },
         "settled": false,
         "preimage": null
+      }
+    ],
+    "melt": [
+      {
+        "name": "melt in flight",
+        "body": {
+          "status": "OK",
+          "settled": false,
+          "preimage": null,
+          "pr": "lnbc210n1pjq"
+        },
+        "outcome": "in-flight",
+        "why": "the note is pending: the informational GET answers 0 and the callback answers pending"
+      },
+      {
+        "name": "melt settled",
+        "body": {
+          "status": "OK",
+          "settled": true,
+          "preimage": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "pr": "lnbc210n1pjq"
+        },
+        "outcome": "settled",
+        "why": "the note is burned; the preimage is the receipt"
+      },
+      {
+        "name": "melt failed, note restored",
+        "body": {
+          "status": "ERROR",
+          "reason": "Not found"
+        },
+        "outcome": "failed",
+        "why": "luds fd80cdd: a melt verify answers LUD-21 Not found once the payment failed and the note is outstanding again. For a URL the SERVICE handed out for a melt, nothing else answers Not found"
       }
     ],
     "rejected": [

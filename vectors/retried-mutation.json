@@ -4,11 +4,11 @@
   "description": "What counts as a retry of a mutation, and what is still a double-spend attempt. Every mutation in LUD-25 is a GET, and HTTP stacks retry a GET when the connection they used is dropped, so a SERVICE sees the byte-identical request twice and the second one arrives with its inputs already burned. A SERVICE that answers the retry as an already-spent input tells the holder the mutation never happened, and the holder discards the only copy of a secret the SERVICE really did mint a note against. Replaying the original success is therefore a MUST. The replay path is a read: it burns nothing, mints nothing and moves no balance, and returns the same signature or signatures. Anything that is NOT a retry and names a burned input is refused exactly as an ordinary double-spend is, with the same reason string, so no oracle appears for whoever is holding a burned secret.",
   "identity": [
     "the same input k1 set, compared as a SET: a merge naming the same notes in a different order is the same merge",
-    "the same h",
-    "the same h2, present or absent alike",
+    "the same p1",
+    "the same p2, present or absent alike",
     "the same amount, present or absent alike"
   ],
-  "provenance": "Recorded, never inferred. A SERVICE links the burned inputs to the outputs they minted and matches against that. Matching on \"a note exists at h\" alone would let anyone holding a burned k1 and any outstanding note id pull a success out of the SERVICE.",
+  "provenance": "Recorded, never inferred. A SERVICE links the burned inputs to the outputs they minted and matches against that. Matching on \"a note exists at p1\" alone would let anyone holding a burned k1 and any outstanding note id pull a success out of the SERVICE.",
   "outcomes": {
     "replay": "the original success, byte for byte: the same status, the same c and c2 where the outputs had any, and no balance moved",
     "double-spend": "refused exactly as any other attempt to spend a burned secret, with the reason string unchanged"
@@ -20,13 +20,13 @@
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "retry": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "outcome": "replay"
     },
@@ -36,16 +36,16 @@
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
-        "h2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
         "amount": 5000
       },
       "retry": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
-        "h2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
         "amount": 5000
       },
       "outcome": "replay"
@@ -57,14 +57,14 @@
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "retry": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "outcome": "replay"
     },
@@ -75,51 +75,51 @@
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "retry": {
         "k1": [
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "outcome": "replay",
       "note": "the inputs are a set, not a sequence: this is the same merge"
     },
     {
-      "name": "the same input with a different h",
+      "name": "the same input with a different p1",
       "recorded": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "retry": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "967ebe35961d9404b393547bc6758397ddf39c46a8bf479cab1a644f9c9b2560"
+        "p1": "967ebe35961d9404b393547bc6758397ddf39c46a8bf479cab1a644f9c9b2560"
       },
       "outcome": "double-spend",
       "note": "this is the ordinary double-spend attempt, and the existing refusal covers it unchanged"
     },
     {
-      "name": "a split retried with a different h2",
+      "name": "a split retried with a different p2",
       "recorded": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
-        "h2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
         "amount": 5000
       },
       "retry": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
-        "h2": "967ebe35961d9404b393547bc6758397ddf39c46a8bf479cab1a644f9c9b2560",
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p2": "967ebe35961d9404b393547bc6758397ddf39c46a8bf479cab1a644f9c9b2560",
         "amount": 5000
       },
       "outcome": "double-spend"
@@ -130,36 +130,36 @@
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
-        "h2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
         "amount": 5000
       },
       "retry": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
-        "h2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
         "amount": 6000
       },
       "outcome": "double-spend",
       "note": "the same outputs for a different amount is not the same request; a SERVICE that replayed it would be asked to mint two different splits over one pair of ids"
     },
     {
-      "name": "a split retried with no h2 at all",
+      "name": "a split retried with no p2 at all",
       "recorded": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
-        "h2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
         "amount": 5000
       },
       "retry": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
         "amount": 5000
       },
       "outcome": "double-spend",
@@ -171,33 +171,33 @@
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "retry": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
         "amount": 5000
       },
       "outcome": "double-spend"
     },
     {
-      "name": "a split retried with h and h2 swapped",
+      "name": "a split retried with p1 and p2 swapped",
       "recorded": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
-        "h2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p2": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
         "amount": 5000
       },
       "retry": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
-        "h2": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
+        "p1": "49cc2209d036c94d6e522c73af1fb6332a22a86b8a7722613864f5616bcaa9e4",
+        "p2": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030",
         "amount": 5000
       },
       "outcome": "double-spend",
@@ -210,13 +210,13 @@
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "retry": {
         "k1": [
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "outcome": "double-spend"
     },
@@ -227,7 +227,7 @@
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "retry": {
         "k1": [
@@ -235,7 +235,7 @@
           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
         ],
-        "h": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
+        "p1": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d048c0030"
       },
       "outcome": "double-spend"
     }

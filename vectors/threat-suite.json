@@ -36,7 +36,7 @@
     "G": {
       "name": "locked notes",
       "status": "proposal",
-      "summary": "a second asset class, not a bearer variant: redemption requires an LUD-04 signature from the LUD-05/LUD-13 linkingKey registered at mint/rotate time, over the FULL redemption request (k1, h/h2, amount/pr), so logged signatures are not replayable. Scored separately per scenario as lockedNotes, because the trades differ by note type"
+      "summary": "a second asset class, not a bearer variant: redemption requires an LUD-04 signature from the LUD-05/LUD-13 linkingKey registered at mint/rotate time, over the FULL redemption request (k1, p1/p2, amount/pr), so logged signatures are not replayable. Scored separately per scenario as lockedNotes, because the trades differ by note type"
     }
   },
   "policy": {

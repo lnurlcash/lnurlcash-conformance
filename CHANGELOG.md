@@ -4,6 +4,106 @@ Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps
 may add or tighten checks that a previously-passing mint now fails; pin an
 exact version if you gate CI on the grade.
 
+## 0.17.0 - 2026-11-16
+
+**BREAKING: LUD-25 as of luds `fd80cdd`.** Every vector, the grader and the
+mock mint follow luds `d62df25`, `4da9530` and `fd80cdd`.
+
+What breaks for people's wallets and mints:
+
+- **Certificates carry a time.** A `cs1` is `r || s || recovery-id || u32 t`
+  (69 bytes) over `LNURLcash:<domain>:<amount_msat>:<hex(Q)>:<t>`. Every
+  certificate issued before is refused, a clean break: wallets fetch a fresh
+  one with the informational GET.
+- **Certifying is a MUST**, bearer notes included, and `mintPubkey` is on the
+  mint payRequest as well as the `withdrawRequest`. A wallet refuses a
+  `withdrawRequest` without one.
+- **A burned or mid-melt note answers the informational GET** as a
+  `withdrawRequest` worth `0` with no `c`, not an error. The callback still
+  answers `already in use` and `pending`.
+- **`unknown note`**, exactly, for a note the mint never credited, at the
+  informational GET and the callback.
+- **A melt's `OK` carries LUD-21 `verify`**, the same on a retry, answering
+  `settled: false`, `settled: true` with the preimage, or `Not found` once the
+  payment failed and the note is restored. **Every `verify` URL is
+  unguessable**, never derived from the invoice's payment hash.
+- **LUD-19 `payLink`** is required on the `withdrawRequest`.
+- **Fees round down.** The credit is rounded down to whole satoshis,
+  `base_fee_msat` is a multiple of 1000 (a base that is not reads as an
+  unknown fee), and a split amount is whole satoshis.
+- **`domain`** is the `withdrawLink` host lowercased, A-label, without port,
+  userinfo or trailing dot.
+
+Vectors:
+
+- `spec-vectors.json` mirrors luds `fd80cdd`: timed certificates, and the new
+  `timelock_note`, `domains`, `fees` and `transcripts` (steps are
+  `{request, response}` or `{event}`), and a BIP-386 `descriptor` per LUD-26
+  chain and share. The selfcheck re-derives each: the CLTV verdicts, the
+  canonical domain, the fee formula, a replay of the transcript's values and
+  certificates, and the BIP-380 checksums.
+- `part2.json` certificates carry `t`; one more certificate differs only in
+  `t`; the invalid `cs1` cases pin 65, 68 and 70 bytes.
+- `fees.json` rounds the credit down to whole satoshis; gross-up returns the
+  smallest gross netting at least the amount.
+- `withdraw-info.json` requires `payLink` and accepts a burned or mid-melt
+  note worth `0`; `pay-request.json` requires `mintPubkey` on a minting
+  payRequest and adds the melt `verify` outcomes (`in-flight`, `settled`,
+  `failed` on `Not found`); `responses.json` reads the exact `already in use`
+  and `unknown note`, a melt's `verify`, and an output without its
+  certificate as unverifiable, whatever kind of note it is.
+
+Grader:
+
+- New checks: `mintPubkey` on the mint payRequest; a `verify` URL that does
+  not carry the invoice's payment hash; `Cache-Control: no-store` on the
+  informational GET and the callback (warns); a split amount that is not
+  whole satoshis refused.
+- Certificates: 69 bytes, signed over `t`, no later than the grader's clock
+  (300 s of skew); the report gives their age; a 65-byte one is named. A
+  missing certificate fails.
+- The informational GET must carry `mintPubkey` and `payLink`; a spent note
+  must answer worth `0` with no `c` there and `already in use` at the
+  callback; an unknown note exactly `unknown note`.
+- `withdrawLink` in the `lnurlw://` form, or plain `http://` off an onion
+  service, warns.
+- The minted-value check wants the rounded-down credit exactly. A fee
+  ceilinged to a whole sat passes for a whole-satoshi payment; an msat-exact
+  credit fails.
+- Split probes use whole-satoshi amounts; the base-fee probe leaves change of
+  exactly the base fee and wants `insufficient value`.
+
+Mock mint:
+
+- Compliant by default with all of the above. New defects, each caught by the
+  self-grade: `certificateTime` (`none`, `future`, `unsigned`), `goneAtInfo:
+  'error'`, `unknownReason`, `payRequestMintPubkey: false`,
+  `noteInfoPayLink: false`, `noStore: false`, `verifyByPaymentHash`,
+  `acceptsSubSatSplit`, `msatExactCredit`.
+- `verify` URLs are random tokens; a retried melt gets its original answer;
+  `settleMelt`/`failMelt` drive the melt's `verify`; `/_test/settle` takes a
+  verify token as well as a payment hash, and `state.paymentHashOfVerify()`
+  maps one to the other.
+- Fake invoices decode, with the payment hash as BOLT-11's `p` field and an
+  all-zero signature.
+- A note funded through a test hook (`/_test/credit`, `state.creditNote`) is
+  certified for the host the mock is reached at (or the first of `domains`),
+  where before the first request it was certified without one.
+
+Removed (deprecated):
+
+- The old wire names: `sig`/`sig2` for `c`/`c2`, `h`/`h2` for `p1`/`p2`, and
+  `?h=` for `?p=`. `callbacks.json` and `retried-mutation.json` now name
+  `p1`/`p2`. The mock's `certificateNames` and `acceptsMissingH2`, and the
+  `hashLookup: 'revealsSpent'` alias, are gone.
+- The superseded certificates: `part2.json`'s `legacyCertificates`, the
+  grader's diagnostics for a certificate without the domain or over a bearer
+  note's `h`, and the mock's `certificateWithoutDomain` and
+  `certificateOverH`.
+- The grader's fixed-message `ck1` rescue.
+- `signature.json` (certificates over `sha256(k1)`) and `derivation.json`
+  (HMAC note secrets).
+
 ## 0.16.2 - 2026-11-04
 
 **LUD-26 Lightning Address and address fee are graded.** 0.16.0 left them

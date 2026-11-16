@@ -74,9 +74,7 @@ to spend, which is exactly what the flag consented to.
 
 **Its key-path spends are bound to the mint graded.** Every `ck1` it signs
 commits to the note URL's own hostname, so a signature a mint under grade
-logs cannot be replayed at any other mint. It signs nothing over the
-deprecated fixed message except, as a last resort, to bring the value home
-from a mint that reads nothing else.
+logs cannot be replayed at any other mint. It signs nothing else.
 
 ## What these vectors do not cover
 

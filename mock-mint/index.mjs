@@ -11,7 +11,7 @@
 // Usable as a library (createMockMint) or standalone (npm start).
 
 import {createServer} from 'node:http'
-import {bech32m} from '@scure/base'
+import {bech32, bech32m} from '@scure/base'
 import {sha256, sha512} from '@noble/hashes/sha2.js'
 import {hmac} from '@noble/hashes/hmac.js'
 import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
@@ -42,13 +42,14 @@ const ser32 = value => {
 const noteId = k1 => bytesToHex(sha256(hexToBytes(k1)))
 
 // The Lightning-signed-message digest. A certificate signs
-// LNURLcash:<domain>:<amount>:<hex(Q)> (luds 92abbb3); the optional
-// bound-mint receipt keeps the LNURLcash:<amount>:<h> it has always signed.
+// LNURLcash:<domain>:<amount>:<hex(Q)>:<t> (luds fd80cdd; the domain since
+// 92abbb3); the optional bound-mint receipt keeps the LNURLcash:<amount>:<h>
+// it has always signed.
 const lsmDigestOf = message =>
   sha256(sha256(new Uint8Array([...utf8ToBytes(LSM_PREFIX), ...utf8ToBytes(message)])))
 const sigDigest = (subjectHex, amountMsat) => lsmDigestOf(`LNURLcash:${amountMsat}:${subjectHex}`)
-const certificateDigest = (domain, subjectHex, amountMsat) =>
-  lsmDigestOf(`LNURLcash:${domain}:${amountMsat}:${subjectHex}`)
+const certificateDigest = (domain, subjectHex, amountMsat, t = null) =>
+  lsmDigestOf(`LNURLcash:${domain}:${amountMsat}:${subjectHex}${t === null ? '' : `:${t}`}`)
 
 const nowSecs = () => Math.floor(Date.now() / 1000)
 
@@ -59,15 +60,14 @@ const encodeAmountHrp = msat =>
   msat % 100 === 0 ? `${msat / 100}n` : `${msat * 10}p`
 
 const fakeInvoice = (amountMsat, preimage) => {
-  // Not a real invoice: it is a syntactically valid human-readable part
-  // (which is all a WALLET parses to check the amount) plus deterministic
-  // filler in the data part. Nothing here is payable, and nothing should
-  // pretend otherwise - a conformance run must never be mistakable for a
-  // mainnet one.
-  // The filler keeps to the bech32 charset and, above all, holds no '1',
-  // or the human-readable part ends inside it and the amount reads as none.
-  const data = bytesToHex(sha256(hexToBytes(preimage))).replace(/[b-f]/g, 'q').replace(/1/g, 'p')
-  return `lnbc${encodeAmountHrp(amountMsat)}1${data}`
+  // Not a payable invoice: a valid human-readable part (which is all a
+  // WALLET parses to check the amount), a fixed timestamp, the payment hash
+  // as BOLT-11's `p` field, and an all-zero signature no node would accept.
+  // It decodes, so a grader can read its payment hash; nothing pays it, and
+  // a conformance run must never be mistakable for a mainnet one.
+  const hashWords = bech32.toWords(sha256(hexToBytes(preimage)))
+  const words = [...new Array(7).fill(0), 1, 1, 20, ...hashWords, ...new Array(104).fill(0)]
+  return bech32.encode(`lnbc${encodeAmountHrp(amountMsat)}`, words, 10_000)
 }
 
 const DEFAULTS = {
@@ -82,17 +82,39 @@ const DEFAULTS = {
   // signmessage output unreordered.
   signatureLayout: 'trailing',
   // Certify every note it issues with a cs1 over hex(Q), a bearer note
-  // included. LUD-25 makes that a SHOULD; false withholds c/c2
-  // entirely, as a SERVICE with no signer does.
+  // included. LUD-25 makes that a MUST (luds fd80cdd); false withholds c/c2
+  // entirely, as a SERVICE with no signer does. Non-compliant.
   signatures: true,
-  // How a burned note is answered, at the informational GET and the
-  // callback alike. LUD-25 fixes it as exactly "already in use" (luds
-  // 92abbb3), which a LUD-26 recovery scan counts as a used index; older
-  // mints said "Note already spent.". Non-compliant otherwise.
+  // The time a certificate carries (luds fd80cdd). 'now' is compliant;
+  // 'none' signs the 65-byte form without t, as every mint did before;
+  // 'future' signs an hour ahead of the clock; 'unsigned' carries t but
+  // signs the message without it. All but 'now' are non-compliant.
+  certificateTime: 'now',
+  // How a burned note is answered at the callback. LUD-25 fixes it as
+  // exactly "already in use"; older mints said "Note already spent.".
+  // Non-compliant otherwise.
   burnedReason: 'already in use',
-  // Certify over the superseded message without the domain, as every mint
-  // did before luds 92abbb3. Non-compliant.
-  certificateWithoutDomain: false,
+  // How a burned note, and one whose melt is in flight, is answered at the
+  // informational GET. 'zero' is LUD-25 since luds fd80cdd: a
+  // withdrawRequest worth 0 with no certificate. 'error' is the earlier
+  // answer, burnedReason and "pending" as errors. Non-compliant.
+  goneAtInfo: 'zero',
+  // The reason a note SERVICE never credited gets, at the informational GET
+  // and the callback. LUD-25 fixes it as exactly "unknown note" (luds
+  // fd80cdd); older mints said "Unknown note.". Non-compliant otherwise.
+  unknownReason: 'unknown note',
+  // Publish mintPubkey on the mint payRequest, a MUST since luds fd80cdd.
+  payRequestMintPubkey: true,
+  // Answer the withdraw endpoint and the callback with Cache-Control:
+  // no-store, which LUD-25 has a SERVICE do where spends travel (a SHOULD).
+  noStore: true,
+  // Name every verify URL by an unguessable token, as LUD-25 requires since
+  // luds fd80cdd. true names it by the invoice's payment hash instead, which
+  // anyone holding the invoice knows. Non-compliant.
+  verifyByPaymentHash: false,
+  // Accept a split whose amount is not whole satoshis. Non-compliant since
+  // luds fd80cdd.
+  acceptsSubSatSplit: false,
   // The hosts a spend's signature may be bound to. Unset, the mock takes
   // the hostname it was reached at, which is what a note URL for it names.
   domains: undefined,
@@ -104,11 +126,11 @@ const DEFAULTS = {
   // Run your client against both.
   withdrawLinkForm: 'plain',
   // LUD-21 verify endpoint. Off means 404, not merely unadvertised, so the
-  // mock can exercise current mints that provide no settlement polling.
+  // mock can exercise mints that provide no settlement polling. A melt
+  // MUST carry verify since luds fd80cdd, so off is non-compliant.
   verify: true,
-  // Publish `payLink` on a note's informational GET, the way home for a
-  // holder who has nothing but the note. On by default because the
-  // reference mint does it; turn it off for a mint that does not.
+  // Publish LUD-19 `payLink` on a note's informational GET, a MUST since
+  // luds fd80cdd: it tells a WALLET the link is a note. Off is non-compliant.
   noteInfoPayLink: true,
   // ---- misbehaviour ----
   // point `payLink` at a DIFFERENT origin, nominating a third party to
@@ -132,11 +154,13 @@ const DEFAULTS = {
   // non-compliant: generate the replacement secret SERVICE-side and hand
   // it back, the exposure LUD-25's p1/p2 exist to close
   serverGeneratedSecrets: false,
-  // non-compliant: round the total mint fee up to a whole sat, as a fee
-  // ceiling the mint fee to a whole sat, as dni's lnurl-mint does on
-  // purpose. Compliant: LUD-25 does not say whether the fee rounds, so
-  // the grader accepts anything between this and the msat-exact formula
+  // round the total mint fee up to a whole sat, as dni's lnurl-mint does.
+  // For a whole-satoshi gross that is the same as rounding the credit
+  // down, which LUD-25 requires since luds fd80cdd
   roundFeeToSat: false,
+  // non-compliant: keep the credit msat-exact rather than rounding it down
+  // to whole satoshis, as LUD-25 did before luds fd80cdd
+  msatExactCredit: false,
   // beyond the band: withhold this much on top of the ceilinged fee, the
   // one thing the minted-value check must still catch
   extraFeeMsat: 0,
@@ -162,11 +186,6 @@ const DEFAULTS = {
   ignoresTimeClaims: false,
   // over-strict: refuse every non-zero locktime, a past Unix time included
   refusesLocktimes: false,
-  // the names certificates travel under. 'c' is LUD-25 as of luds 50d740a
-  // (c, and c2 for a split's change); 'sig' is the pre-50d740a sig/sig2
-  // alone, which a current wallet reads as no certificate at all; 'both'
-  // sends each under both names, as a mint mid-transition does
-  certificateNames: 'c',
   // accept any ck1 whose Q is outstanding without checking its signature,
   // so a spend bound to another mint's domain, or to none, opens the note
   unverifiedCk1: false,
@@ -180,9 +199,6 @@ const DEFAULTS = {
   // the reason a p1/p2 naming a note already outstanding or burned gets.
   // LUD-25 fixes it as exactly "already in use"
   alreadyInUseReason: 'already in use',
-  // certify a bearer note over its h, the pre-taproot message, instead of
-  // over hex(Q)
-  certificateOverH: false,
   // refuse a cp1 wherever one may go, as a mint that never took up key
   // path notes does
   refusesCp1Outputs: false,
@@ -262,14 +278,13 @@ const DEFAULTS = {
   // LUD-25 "Checking a note without exposing it": answer the informational
   // GET by `?p=` (a cp1, or a bearer note's hex h) as well as by `?k1=`, so
   // a wallet can look a note up without putting its spend in a query
-  // string. LUD-25 makes this a MUST; `?h=` is still read as p's older name.
+  // string. LUD-25 makes this a MUST.
   //   true             - compliant
   //   'echoesK1'       - non-compliant: fills in k1, putting the secret back
   //                      on the wire the lookup existed to keep it off
   //   'answersUnknown' - non-compliant: answers for a hash it never
   //                      registered, instead of the unknown-note refusal
   //   'hidesSpent'     - non-compliant: hides a retained burned h as unknown
-  //   'revealsSpent'   - legacy alias for the now-compliant true behaviour
   //   'acceptsBoth'    - non-compliant: accepts k1 and h together
   // Set false only to model an older SERVICE, which the grader now fails.
   hashLookup: true,
@@ -418,8 +433,8 @@ export const createMockMint = async (options = {}) => {
   )
 
   // Every note is a taproot output key Q, stored under hex(Q), and nothing
-  // secret is ever kept: a bearer note's h is remembered only so the
-  // certificateOverH fixture can sign the pre-taproot message. lockedAt is
+  // secret is ever kept: a bearer note's h is remembered only for the
+  // bound-mint receipt. lockedAt is
   // when the mock credited the note, where a relative lock starts counting.
   const notes = new Map() // hex(Q) -> {amountMsat, state, lockedAt, h?}
   const invoices = new Map() // paymentHash -> {amountMsat, preimage, settled}
@@ -432,6 +447,16 @@ export const createMockMint = async (options = {}) => {
   // alone would let anyone holding a burned spend and any outstanding note
   // pull a success out of the mint.
   const swaps = new Map() // identity -> [{q, amountMsat, sig}]
+  // a melt's answer, by `${Q}|${pr}`, so a retry gets the same verify
+  const melts = new Map()
+  // verify token -> payment hash. Unguessable unless verifyByPaymentHash.
+  const verifyTokens = new Map()
+  const verifyTokenOf = paymentHash => {
+    for (const [token, hash] of verifyTokens) if (hash === paymentHash) return token
+    const token = opts.verifyByPaymentHash ? paymentHash : bytesToHex(randomBytes(16))
+    verifyTokens.set(token, paymentHash)
+    return token
+  }
   // Outputs a mint quote has already claimed: hex(Q) -> the payment hash of
   // the invoice that will credit it.
   const boundOutputs = new Map()
@@ -463,18 +488,16 @@ export const createMockMint = async (options = {}) => {
   // hand out for every note it issues. Undefined when signatures are off.
   // The domain a certificate names: the first the mock was told, or the
   // hostname the current request reached it at.
-  let certificateDomain = null
+  let certificateDomain = opts.domains ? asList(opts.domains)[0].toLowerCase() : '127.0.0.1'
   const certify = (qHex, amountMsat, {h = null, previousKey = opts.signWithPreviousKey} = {}) => {
     if (!opts.signatures) return undefined
     const key = previousKey && previousPriv ? previousPriv : priv
-    const subject = opts.certificateOverH && h ? h : qHex
-    // The older mints these two modes imitate signed before luds 92abbb3
-    // bound the domain, so they sign without it too.
-    const withoutDomain =
-      opts.certificateWithoutDomain || opts.certificateOverH || opts.signatureLayout === 'leading'
-    return encodeCs1(amountMsat, signWith(certificateDomain === null || withoutDomain
-      ? sigDigest(subject, amountMsat)
-      : certificateDigest(certificateDomain, subject, amountMsat), key))
+    const t = opts.certificateTime === 'none' ? null : nowSecs() + (opts.certificateTime === 'future' ? 3600 : 0)
+    const signature = signWith(
+      certificateDigest(certificateDomain, qHex, amountMsat, opts.certificateTime === 'unsigned' ? null : t),
+      key
+    )
+    return encodeCs1(amountMsat, signature, t)
   }
 
   // The optional bound-mint receipt keeps its own signature: raw hex over
@@ -678,7 +701,9 @@ export const createMockMint = async (options = {}) => {
     let fee = opts.baseFeeMsat + proportional
     if (opts.roundFeeToSat) fee = Math.ceil(fee / 1000) * 1000
     fee += opts.extraFeeMsat
-    return Math.max(0, gross - fee)
+    const net = Math.max(0, gross - fee)
+    // the credit is rounded down to whole satoshis (luds fd80cdd)
+    return opts.msatExactCredit ? net : Math.floor(net / 1000) * 1000
   }
 
   // The advertised minimum must survive the advertised fee: a minSendable
@@ -686,7 +711,7 @@ export const createMockMint = async (options = {}) => {
   // search for the smallest gross that still nets at least 1 msat -
   // applyFee is non-decreasing, so the minimum exists and is exact.
   const minSendableMsat = (() => {
-    let hi = opts.minSendableMsat + opts.baseFeeMsat + 1
+    let hi = opts.minSendableMsat + opts.baseFeeMsat + 1000
     while (applyFee(hi) < 1) hi *= 2
     let lo = 0
     while (lo < hi) {
@@ -725,13 +750,33 @@ export const createMockMint = async (options = {}) => {
     noteState(k1) {
       return notes.get(qOfK1(k1))?.state ?? null
     },
+    // settleMelt(k1) / failMelt(k1) resolve the melt in flight on a note,
+    // as its node would: settled burns it, failed restores it, and its
+    // verify answers settled or Not found accordingly.
+    // the payment hash behind a verify URL this mock handed out
+    paymentHashOfVerify(verifyUrl) {
+      return verifyTokens.get(String(verifyUrl).split('/').pop().toLowerCase()) ?? null
+    },
     settleMelt(k1) {
-      const note = notes.get(qOfK1(k1))
+      const q = qOfK1(k1)
+      const note = notes.get(q)
       if (note) note.state = 'burned'
+      for (const [key, body] of melts) {
+        if (!key.startsWith(`${q}|`)) continue
+        const invoice = invoices.get(verifyTokens.get(body.verify?.split('/').pop()))
+        if (invoice) invoice.settled = true
+      }
     },
     failMelt(k1) {
-      const note = notes.get(qOfK1(k1))
+      const q = qOfK1(k1)
+      const note = notes.get(q)
       if (note) note.state = 'outstanding'
+      for (const [key, body] of melts) {
+        if (!key.startsWith(`${q}|`)) continue
+        const invoice = invoices.get(verifyTokens.get(body.verify?.split('/').pop()))
+        if (invoice) invoice.failed = true
+        melts.delete(key)
+      }
     },
     // settle(paymentHash) settles an invoice this mock issued, as its node
     // would: a mint quote's note, an address payment's share note (its Q
@@ -770,7 +815,9 @@ export const createMockMint = async (options = {}) => {
       return send({status: 'OK', ...(k1 ? {k1} : {p}), amount, c: sig ?? null})
     }
     if (url.pathname === '/_test/settle') {
-      const hash = q.get('payment_hash')?.toLowerCase()
+      // the payment hash, or the verify token a quote handed out for it
+      const asked = q.get('payment_hash')?.toLowerCase()
+      const hash = asked ? verifyTokens.get(asked) ?? asked : null
       const invoice = hash ? settleInvoice(hash) : null
       if (!invoice) return fail('unknown payment hash')
       return send({status: 'OK', settled: true, ...(invoice.creditedTo ? {p: encodeCp1(invoice.creditedTo)} : {})})
@@ -786,6 +833,11 @@ export const createMockMint = async (options = {}) => {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`)
     const q = url.searchParams
+    // the domain every certificate this request issues names, test hooks
+    // included: they fund notes a caller then checks offline
+    certificateDomain = opts.domains
+      ? asList(opts.domains)[0].toLowerCase()
+      : url.hostname.toLowerCase().replace(/\.$/, '')
 
     // Test hooks answer before any misbehaviour is applied: they are fixture
     // plumbing, not part of the protocol under test, and a suite cannot set
@@ -845,14 +897,6 @@ export const createMockMint = async (options = {}) => {
 
     if (opts.slowMs) await new Promise(r => setTimeout(r, opts.slowMs))
     const send = (body, status = 200) => {
-      if (opts.certificateNames !== 'c' && body && typeof body === 'object') {
-        body = {...body}
-        for (const [now, before] of [['c', 'sig'], ['c2', 'sig2']]) {
-          if (!(now in body)) continue
-          body[before] = body[now]
-          if (opts.certificateNames === 'sig') delete body[now]
-        }
-      }
       if (opts.malformedJson) {
         res.writeHead(status, {'content-type': 'application/json'})
         res.end('{ this is not json')
@@ -860,15 +904,13 @@ export const createMockMint = async (options = {}) => {
       }
       res.writeHead(status, {
         'content-type': 'application/json',
-        'access-control-allow-origin': '*'
+        'access-control-allow-origin': '*',
+        ...(opts.noStore && (url.pathname === '/w' || url.pathname === '/w/cb') ? {'cache-control': 'no-store'} : {})
       })
       res.end(JSON.stringify(body))
     }
     const fail = reason => send({status: 'ERROR', reason})
     const origin = `http://${req.headers.host}`
-    certificateDomain = opts.domains
-      ? asList(opts.domains)[0].toLowerCase()
-      : new URL(origin).hostname.toLowerCase()
 
     // ---- LUD-16 payRequest (minting) ----
     // Both shapes are in the wild. A Lightning Address mint lives under
@@ -949,7 +991,7 @@ export const createMockMint = async (options = {}) => {
         // baseline mock remains byte-for-byte unchanged when receipts are
         // off; a real node-key signer can alternatively be recovered from
         // the BOLT-11 invoice itself.
-        ...(opts.mintReceipt && opts.verify && opts.signatures
+        ...(opts.payRequestMintPubkey || (opts.mintReceipt && opts.verify && opts.signatures)
           ? {mintPubkey: pubkey}
           : {})
       })
@@ -1081,7 +1123,7 @@ export const createMockMint = async (options = {}) => {
       const pr = fakeInvoice(amount, preimage)
       invoices.set(paymentHash, {amountMsat: net, preimage, settled: false, pr, share: name})
       const body = {pr, disposable: false}
-      if (opts.verify) body.verify = `${origin}/verify/${paymentHash}`
+      if (opts.verify) body.verify = `${origin}/verify/${verifyTokenOf(paymentHash)}`
       return send(body)
     }
 
@@ -1211,7 +1253,7 @@ export const createMockMint = async (options = {}) => {
       // preimage-backed behaviour when commentAllowed is deliberately off.
       const verifySafe =
         !(opts.commentAllowed >= 64) || Boolean(boundTo) || opts.verifyOnUnnamedMint
-      if (opts.verify && verifySafe) body.verify = `${origin}/verify/${paymentHash}`
+      if (opts.verify && verifySafe) body.verify = `${origin}/verify/${verifyTokenOf(paymentHash)}`
       // Appended last, and only when the quote really was bound, so a
       // mock that was never told about any of this answers byte for byte
       // what it always answered.
@@ -1229,14 +1271,16 @@ export const createMockMint = async (options = {}) => {
     }
 
     // ---- LUD-21 verify ----
-    const verifyMatch = url.pathname.match(/^\/verify\/([0-9a-f]{64})$/i)
+    const verifyMatch = url.pathname.match(/^\/verify\/([0-9a-f]{32,64})$/i)
     if (verifyMatch) {
       if (!opts.verify) {
         res.writeHead(404, {'content-type': 'application/json'})
         return res.end(JSON.stringify({status: 'ERROR', reason: 'Not found.'}))
       }
-      const invoice = invoices.get(verifyMatch[1].toLowerCase())
-      if (!invoice) return fail('Unknown payment hash.')
+      // LUD-21's Not found: no such payment, or a melt whose payment failed
+      // and whose note is outstanding again (luds fd80cdd)
+      const invoice = invoices.get(verifyTokens.get(verifyMatch[1].toLowerCase()))
+      if (!invoice || invoice.failed) return fail('Not found')
       const body = {
         status: 'OK',
         settled: invoice.settled,
@@ -1285,31 +1329,34 @@ export const createMockMint = async (options = {}) => {
     if (url.pathname === '/w') {
       const k1 = q.has('k1') ? q.get('k1').trim() : null
       // The lookup that keeps the spend off the wire: `p` names the note by
-      // its cp1 or a bearer note's hex h, and `h` is p's older name. Only
+      // its cp1 or a bearer note's hex h. Only
       // ever read here, never at the callback, where p1/p2 name NEW notes.
-      const asked = q.has('p') ? q.get('p').trim() : q.has('h') ? q.get('h').trim() : null
-      if (k1 !== null && asked !== null && opts.hashLookup !== 'acceptsBoth') return fail('Unknown note.')
+      const asked = q.has('p') ? q.get('p').trim() : null
+      if (k1 !== null && asked !== null && opts.hashLookup !== 'acceptsBoth') return fail('Specify exactly one of k1 or p.')
       if (k1 === null && asked !== null && opts.hashLookup) {
         const qHex = outputOf(asked)
-        if (!qHex) return fail('Unknown note.')
+        if (!qHex) return fail(opts.unknownReason)
         const held = notes.get(qHex)
         const invent = opts.hashLookup === 'answersUnknown' && !held
         if (!invent) {
-          if (!held) return fail('Unknown note.')
+          if (!held) return fail(opts.unknownReason)
           if (held.state === 'burned') {
-            return fail(opts.hashLookup === 'hidesSpent' ? 'Unknown note.' : opts.burnedReason)
+            if (opts.hashLookup === 'hidesSpent') return fail(opts.unknownReason)
+            if (opts.goneAtInfo === 'error') return fail(opts.burnedReason)
           }
-          if (held.state === 'pending') return fail('pending')
+          if (held.state === 'pending' && opts.goneAtInfo === 'error') return fail('pending')
         }
-        const value = held?.amountMsat ?? 21000
-        const sig = held ? certify(qHex, value, {h: held.h}) : undefined
+        // a burned or mid-melt note is worth 0, uncertified (luds fd80cdd)
+        const gone = held && held.state !== 'outstanding'
+        const value = gone ? 0 : held?.amountMsat ?? 21000
+        const sig = held && !gone ? certify(qHex, value, {h: held.h}) : undefined
         return send({
           tag: 'withdrawRequest',
           callback: `${origin}/w/cb`,
           // k1 is omitted: a wallet asking by p already holds the spend,
           // or it asks on behalf of someone who does.
           ...(opts.hashLookup === 'echoesK1' ? {k1: 'c'.repeat(64)} : {}),
-          minWithdrawable: 0,
+          minWithdrawable: value,
           maxWithdrawable: value + opts.lieAboutValue,
           defaultDescription: 'an LNURLcash note',
           // Keep the mock's optional way-home extension identical for
@@ -1326,29 +1373,34 @@ export const createMockMint = async (options = {}) => {
           ...(sig ? {c: sig} : {})
         })
       }
-      if (!k1) return fail('Unknown note.')
+      if (!k1) return fail('Specify exactly one of k1 or p.')
       const spend = spendOf(k1)
-      if (!spend) return fail('Unknown note.')
+      if (!spend) return fail('That k1 is no spend.')
       const note = notes.get(spend.q)
-      if (!note) return fail('Unknown note.')
+      if (!note) return fail(opts.unknownReason)
       // LUD-25: the spend is verified in full before anything is said, so
       // a holder checking a note learns whether the spend it holds really
       // opens it. A script path's own reason is safe to pass on.
       if (!opts.infoSkipsVerification) {
         const verdict = opens(spend, note)
-        if (!verdict.ok) return fail(verdict.specific ? verdict.reason : 'Unknown note.')
+        if (!verdict.ok) return fail(verdict.specific ? verdict.reason : 'That spend does not open the note.')
       }
-      if (note.state === 'burned') return fail(opts.burnedReason)
-      if (note.state === 'pending') return fail('pending')
-      const sig = certify(spend.q, note.amountMsat, {h: note.h})
+      if (opts.goneAtInfo === 'error') {
+        if (note.state === 'burned') return fail(opts.burnedReason)
+        if (note.state === 'pending') return fail('pending')
+      }
+      // a burned or mid-melt note is worth 0, uncertified (luds fd80cdd)
+      const gone = note.state !== 'outstanding'
+      const value = gone ? 0 : note.amountMsat
+      const sig = gone ? undefined : certify(spend.q, note.amountMsat, {h: note.h})
       return send({
         tag: 'withdrawRequest',
         callback: `${origin}/w/cb`,
         // echoed as it came, so a wallet can copy it straight into a note
         // URL or the callback
         k1: opts.echoWrongK1 ? 'f'.repeat(64) : k1,
-        minWithdrawable: 0,
-        maxWithdrawable: note.amountMsat + opts.lieAboutValue,
+        minWithdrawable: value,
+        maxWithdrawable: value + opts.lieAboutValue,
         defaultDescription: 'an LNURLcash note',
         // Optional way-home extension used by consumer policy tests. A holder
         // with nothing but a note can then reach the document carrying this
@@ -1371,9 +1423,8 @@ export const createMockMint = async (options = {}) => {
       const k1s = q.getAll('k1').map(s => s.trim())
       const pr = q.get('pr')
       const amountRaw = q.get('amount')
-      // p1/p2, or h/h2, their older names
-      const p1 = q.get('p1') ?? q.get('h')
-      const p2 = q.get('p2') ?? q.get('h2')
+      const p1 = q.get('p1')
+      const p2 = q.get('p2')
 
       if (k1s.length === 0) return fail('Missing k1.')
       if (opts.acceptsOversizedMerge && k1s.length > 20) return send({status: 'OK'})
@@ -1388,7 +1439,7 @@ export const createMockMint = async (options = {}) => {
       if (pr && amountRaw) return fail('pr must not be combined with amount.')
 
       // The notes to credit, checked before anything is resolved so a bad
-      // one never burns anything. opts.acceptsMissingH2 (or its newer name)
+      // one never burns anything. opts.acceptsMissingP2
       // is the misbehaviour where a SERVICE fills in the change note itself
       // rather than refusing: whoever runs the mint is then a prior holder
       // of half the split.
@@ -1401,7 +1452,7 @@ export const createMockMint = async (options = {}) => {
           out2 = outputOf(p2)
           if (!out2 && p2 !== null) return fail('missing p2')
           if (!out2) {
-            if (!opts.acceptsMissingH2 && !opts.acceptsMissingP2) return fail('missing p2')
+            if (!opts.acceptsMissingP2) return fail('missing p2')
             out2 = bearer(randomBytes(32)).q
           }
         }
@@ -1412,7 +1463,7 @@ export const createMockMint = async (options = {}) => {
       const found = []
       for (const [i, spend] of spends.entries()) {
         const note = notes.get(spend.q)
-        if (!note) return fail('Invalid or already spent k1.')
+        if (!note) return fail(opts.unknownReason)
         const verdict = opens(spend, note)
         if (!verdict.ok) return fail(verdict.specific ? verdict.reason : 'Invalid or already spent k1.')
         found.push({q: inputs[i], note})
@@ -1440,6 +1491,12 @@ export const createMockMint = async (options = {}) => {
           }
           return send(replay)
         }
+      }
+
+      // A retried melt, the same note into the same pr, pending or settled,
+      // gets its original answer and the same verify (luds fd80cdd).
+      if (opts.retriedMutation === 'replay' && pr && melts.has(`${inputs[0]}|${pr}`)) {
+        return send(melts.get(`${inputs[0]}|${pr}`))
       }
 
       // a burned note is "already in use" at the callback too (LUD-25)
@@ -1471,25 +1528,27 @@ export const createMockMint = async (options = {}) => {
         // must never be conflated with it: by the time a melt proof exists
         // the note that funded it is already burned.
         const meltPreimage = bytesToHex(randomBytes(32))
-        if (opts.verify) {
-          const paymentHash = noteId(meltPreimage)
-          body.pr = pr
-          body.verify = `${origin}/verify/${paymentHash}`
-          invoices.set(paymentHash, {
-            amountMsat: note.amountMsat,
-            preimage: meltPreimage,
-            settled: false,
-            pr
-          })
-        }
+        const paymentHash = noteId(meltPreimage)
+        invoices.set(paymentHash, {
+          amountMsat: note.amountMsat,
+          preimage: meltPreimage,
+          settled: false,
+          pr
+        })
+        // a melt MUST carry verify (luds fd80cdd), and a retry gets it again
+        if (opts.verify) body.verify = `${origin}/verify/${verifyTokenOf(paymentHash)}`
+        melts.set(`${inputs[0]}|${pr}`, body)
         if (!opts.meltNeverSettles) {
           // a real melt settles asynchronously; the note is only burned
           // once the outgoing payment actually does
           setTimeout(() => {
-            if (opts.meltAlwaysFails) note.state = 'outstanding'
-            else {
+            const inv = invoices.get(paymentHash)
+            if (opts.meltAlwaysFails) {
+              note.state = 'outstanding'
+              if (inv) inv.failed = true
+              melts.delete(`${inputs[0]}|${pr}`)
+            } else {
               note.state = 'burned'
-              const inv = invoices.get(noteId(meltPreimage))
               if (inv) inv.settled = true
             }
           }, 20)
@@ -1518,6 +1577,8 @@ export const createMockMint = async (options = {}) => {
         if (!Number.isFinite(amount) || amount <= 0 || amount >= total) {
           return fail('Invalid amount.')
         }
+        // luds fd80cdd: a split amount MUST be whole satoshis
+        if (amount % 1000 !== 0 && !opts.acceptsSubSatSplit) return fail('amount must be whole satoshis')
         // LUD-25: a fee-advertising SERVICE deducts base_fee_msat from
         // every split's CHANGE - never from the requested amount - so a
         // holder cannot dodge per-melt costs by splitting into dust. A
