@@ -10,22 +10,21 @@ npm install --save-dev lnurlcash-conformance
 Plain JSON in vectors/, loadable from any language, listed in
 vectors/index.json:
 
-signature.json       offline verification, both recovery-id orderings
-derivation.json      deterministic note secrets from a BIP39 seed
 cash-derivation.json LUD-25 m/139' note secrets, plus BIP-32 vector 1
 spec-vectors.json    luds' own 25-vectors.json and 26-vectors.json as lud25/lud26, same shape,
-                     every value checked against a copy of the luds files
+                     every value checked against a copy of the luds files: a timelocked
+                     note, domain canonicalisation, fees, a transcript, descriptors
 spends.json          the taproot model: bearer notes, ck1 per domain, a 3-leaf tree and its
                      verdicts, a CHECKSIG leaf's sighash, time claims, leaf policy, bad cw1s
 part2.json           LUD-26 key-path notes: BIP-32 wallet/change/share keys under
                      S = m/139'/d1..d4, cp1, ck1=Q||BIP340 sig over the domain-bound
-                     sighash, cs1 over domain and hex(Q), 65-byte cx1, register/update/
+                     sighash, timed 69-byte cs1 over domain, hex(Q) and t, 65-byte cx1, register/update/
                      unregister proofs; legacy = the superseded tweaks, for sweeping only
 bech32.json          LUD-01 encoding
 url-admission.json   which URLs may be fetched (https, or http to loopback/.onion)
 input-resolution.json bech32, LUD-17, Lightning Address, bare domain
 note-url.json        parsing/building note URLs
-fees.json            fee advertisement, application, gross-up, overflow case
+fees.json            fee advertisement, application (rounded down to whole sats), gross-up, overflow case
 bolt11.json          amount extraction, invoice equality
 callbacks.json       exact query per operation
 responses.json       classifying replies incl. ambiguous outcomes
@@ -54,10 +53,13 @@ internal key and depth; any other script is refused as unverifiable.
 
 Misbehaviour flags: dropAfterMutation, unconfirmedMutation, malformedJson,
 echoWrongK1, lieAboutValue, signatureLayout=leading, signatures=false,
-certificateOverH, serverGeneratedSecrets, meltNeverSettles, meltAlwaysFails,
+serverGeneratedSecrets, meltNeverSettles, meltAlwaysFails,
 slowMs, sunset, baseFeeMsat, feePpm, verify=false, withdrawLinkForm=lnurlw
 (the lnurlw:// spelling of withdrawLink; default is the plain https://, as
-lnurl-mint). The taproot rules: leafVersionUnchecked, opSuccessUnchecked,
+LUD-25 says since luds fd80cdd; graded as a warning). luds fd80cdd:
+certificateTime=none|future|unsigned, goneAtInfo=error, unknownReason=<text>,
+payRequestMintPubkey=false, noteInfoPayLink=false, noStore=false,
+verifyByPaymentHash, acceptsSubSatSplit, msatExactCredit. The taproot rules: leafVersionUnchecked, opSuccessUnchecked,
 ignoresTimeClaims (true, or blockHeight/future/blockCount/relative),
 refusesLocktimes, unverifiedCk1, infoSkipsVerification, replayMatchesStrings,
 alreadyInUseReason=<text>, refusesCp1Outputs, acceptsOffCurveCp1,
@@ -105,7 +107,7 @@ softly: a mint publishing none of them loses nothing, a published field of
 the wrong shape warns, and a signature under a key the mint publishes in
 previousPubkeys is accepted as its own.
 
---spend grades LUD-25 as of luds 50d740a. Besides the rotate, split, merge,
+--spend grades LUD-25 as of luds fd80cdd. Besides the rotate, split, merge,
 retry and refusal checks it moves the value through a three-leaf script tree
 (a hashlock at leaf version 0xc0, the same at 0xc2, a hashlock with
 OP_SUCCESS80) and a key-path note, and requires: the 0xc2 and OP_SUCCESS
@@ -113,10 +115,14 @@ leaves refused; block-height, future, block-count and unelapsed relative time
 claims refused and a past locktime accepted; a ck1 for another domain refused
 at the callback and the informational GET; the right-domain ck1 accepted; a
 p1 naming a burned note refused as exactly "already in use"; a retry respelt
-(preimage vs full cw1, h vs cp1) replayed. A missing cs1 warns (SHOULD); a
-cs1 not over hex(Q) fails. Certificates are read from c and c2 only; a mint
-sending only the pre-50d740a sig/sig2 is graded uncertified (warns), and one
-sending both names passes. Value always comes home.
+(preimage vs full cw1, h vs cp1) replayed; a spent note worth 0 with no c at
+the informational GET and "already in use" at the callback; an uncredited one
+exactly "unknown note"; mintPubkey and payLink on the withdrawRequest; split
+amounts in whole sats. A missing cs1 fails (MUST); so does a cs1 not over
+hex(Q), one without t, or one with t ahead of the grader's clock.
+Certificates are read from c and c2 only; a mint sending only the pre-50d740a
+sig/sig2 is graded uncertified (fails), and one sending both names passes.
+Value always comes home.
 
 --address grades a LUD-26 registered Lightning Address: no commentAllowed,
 a plain payment with no comment, mint@'s withdrawLink and Mint fees, +tag
@@ -164,17 +170,19 @@ time     nLockTime 0, or a Unix time (>= 500000000) not in the future;
 
 ## Certificates, canonically
 
-message = "LNURLcash:" + domain + ":" + amount_msat + ":" + hex(Q)   // every note
-          (without domain before luds 92abbb3: read as legacy, never issued)
+message = "LNURLcash:" + domain + ":" + amount_msat + ":" + hex(Q) + ":" + t   // every note
+          (t, the Unix time of signing, since luds fd80cdd; the domain since
+          92abbb3. The 65-byte forms before are refused: a clean break)
 digest  = sha256(sha256("Lightning Signed Message:" + message))
 sig     = 65 bytes, r || s || recovery_id (wire format)
-cs1     bech32m, hrp "cs" + BOLT-11 amount (cs10n = 1000 msat), over sig
+cs1     bech32m, hrp "cs" + BOLT-11 amount (cs10n = 1000 msat), over sig || u32be(t), 69 bytes
 pubkey  = mintPubkey, 33-byte compressed, hex
 wire    JSON "c" (and "c2" for a split's change) on the informational GET and
         every rotate, split or merge; note URL ...?k1=<spend>&c=<cs1>. These
         were sig, sig2 and &sig= before luds 50d740a
 fees    "Mint fees: <base_msat>,<ppm>[,<address_fee_msat>]" anywhere in the
-        text/plain entry; values end at whitespace (fees.json)
+        text/plain entry; values end at whitespace; base a multiple of 1000;
+        the credit is rounded down to whole sats (fees.json)
 
 Recover from digest with NO further hashing (prehash off). Verifiers MUST
 also accept recovery_id || r || s. Library layouts differ:

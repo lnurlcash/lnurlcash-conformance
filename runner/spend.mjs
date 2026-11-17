@@ -125,7 +125,9 @@ export const bearerNote = h => {
 
 // The bare lowercase hostname a spend at `url` is bound to: never the
 // scheme, never the port.
-export const spendDomainOf = url => new URL(url).hostname.toLowerCase()
+// The host of the URL, lowercased, in A-label form (WHATWG URL does the
+// IDNA step and drops port and userinfo), without a trailing dot (luds fd80cdd).
+export const spendDomainOf = url => new URL(url).hostname.toLowerCase().replace(/\.$/, '')
 
 export const spendPrevout = domain => {
   if (!domain) throw new Error('a spend domain is required')

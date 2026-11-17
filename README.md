@@ -37,18 +37,16 @@ npm install --save-dev lnurlcash-conformance
 They are plain JSON — load them from any language, no dependency required:
 
 ```js
-const cases = JSON.parse(readFileSync('vectors/signature.json', 'utf8')).cases
-for (const c of cases) {
-  assert.equal(verify(c.k1, c.amountMsat, c.signature, c.mintPubkey), c.valid)
+const {lud25} = JSON.parse(readFileSync('vectors/spec-vectors.json', 'utf8'))
+for (const c of lud25.certificates.cases) {
+  assert.equal(recoverMintPubkey(c.cs1, lud25.certificates.domain, lud25.certificates.Q), lud25.certificates.mintPubkey)
 }
 ```
 
 | File | Covers |
 | --- | --- |
-| `signature.json` | offline verification, both recovery-id orderings, malformed input |
-| `derivation.json` | deterministic note secrets from a BIP39 seed |
 | `cash-derivation.json` | LUD-25's seed-recoverable note secrets under `m/139'`, with BIP-32's own vector 1 |
-| `spec-vectors.json` | lnurl/luds' own `25-vectors.json` and `26-vectors.json`, rebuilt from the primitives in their exact shape as `lud25` and `lud26`: key-path spends with every `SigMsg` field, domain-bound certificates, a bearer note from `h` to `cw1`, LUD-26 derivation of wallet, change and share notes, and register/update/unregister proofs |
+| `spec-vectors.json` | lnurl/luds' own `25-vectors.json` and `26-vectors.json`, rebuilt from the primitives in their exact shape as `lud25` and `lud26`: key-path spends with every `SigMsg` field, timed domain-bound certificates, a bearer note from `h` to `cw1`, a timelocked note, `domain` canonicalisation, mint fees, a transcript of every operation, LUD-26 derivation of wallet, change and share notes with their descriptors, and register/update/unregister proofs |
 | `spends.json` | the unified taproot model: bearer notes, `ck1`s across domains, a three-leaf script tree with its control blocks and verdicts, a `CHECKSIG` leaf's script-path sighash, time claims, leaf policy, malformed `cw1`s and the short forms |
 | `part2.json` | LUD-26 key-path notes: plain BIP-32 wallet, change and share keys under `S = m/139'/d1..d4`, every note's domain-bound `ck1`, share notes from the 65-byte `cx1` alone, domain-bound `cs1` certificates, register/update/unregister proofs, and the superseded tweak schemes a wallet still sweeps |
 | `bech32.json` | LUD-01 encoding, round trips, corrupted checksums |
@@ -99,15 +97,23 @@ must survive:
 | `--echoWrongK1` | answers the informational GET with a different `k1` |
 | `--lieAboutValue=N` | reports a `maxWithdrawable` it never signed |
 | `--signatureLayout=leading` | emits the recovery id at the other end |
-| `--signatures=false` | certifies nothing. LUD-25 has a mint certify every note with a `cs1` over `hex(Q)` as a SHOULD, so the grader warns |
-| `--certificateOverH` | certifies a bearer note over its `h`, the pre-taproot message, instead of `hex(Q)` |
+| `--signatures=false` | certifies nothing. LUD-25 has a mint certify every note with a `cs1` over `hex(Q)` (a MUST since luds `fd80cdd`), so the grader fails it |
+| `--certificateTime=none\|future\|unsigned` | certifies in the 65-byte form without `t`, an hour ahead of the clock, or with a `t` the signature does not cover |
+| `--goneAtInfo=error` | answers a burned or mid-melt note at the informational GET with an error, as before luds `fd80cdd`, rather than a `withdrawRequest` worth `0` |
+| `--unknownReason=<text>` | answers an uncredited note with some reason other than LUD-25's exact `unknown note` |
+| `--payRequestMintPubkey=false` | leaves `mintPubkey` off the mint payRequest |
+| `--noteInfoPayLink=false` | leaves LUD-19 `payLink` off the `withdrawRequest` |
+| `--noStore=false` | answers the withdraw endpoint and callback without `Cache-Control: no-store` (warns) |
+| `--verifyByPaymentHash` | names `verify` URLs by the invoice's payment hash, which anyone holding the invoice knows |
+| `--acceptsSubSatSplit` | accepts a split amount that is not whole satoshis |
+| `--msatExactCredit` | credits the msat-exact amount instead of rounding it down to whole satoshis |
 | `--serverGeneratedSecrets` | hands back a secret it generated: the exposure `p1`/`p2` exist to close |
 | `--meltNeverSettles` | holds every melt in flight, so notes stay `pending` |
 | `--meltAlwaysFails` | fails every payment, restoring the note |
 | `--slowMs=N` | delays every response |
 | `--sunset` | refuses anything that grows its liabilities |
 | `--baseFeeMsat=N --feePpm=N` | advertises and withholds a mint fee |
-| `--roundFeeToSat` | rounds the withheld fee up to a whole sat — the note mints short of the formula |
+| `--roundFeeToSat` | rounds the withheld fee up to a whole sat, as lnurl-mint does: for a whole-satoshi payment, the same note as the rounded-down credit |
 | `--verifyLeaksEarly` | serves a preimage before settlement, falsely claiming payment proof before payment happened |
 | `--retriedMutation=refuse` | deliberately answers an identical mutation retry as already spent instead of replaying its original success |
 | `--replayMatchesStrings` | matches a retry on the raw `k1`/`p1`/`p2` strings, so the same spend spelt another way is refused as already spent |
@@ -134,7 +140,8 @@ capability cannot misuse it.
 
 The lookup by `p` (a `cp1`, or a bearer note's hex `h`; `?h=` is still read as
 its older name) keeps the spend off the wire but reports spent state:
-`--hashLookup=true` distinguishes a burned note from an unknown one. The older
+`--hashLookup=true` answers a burned note worth `0` and an unknown one
+`unknown note`. The older
 `--hashLookup=revealsSpent` spelling remains an alias for this compliant behaviour.
 
 The mock keys every note by its taproot output key `Q` and verifies every
@@ -150,8 +157,8 @@ conforming default explicit. Optional fields stay absent unless requested:
 
 | Flag | What it does |
 | --- | --- |
-| `--verify=false` | provides no LUD-21 endpoint at all, rather than merely leaving it unadvertised |
-| `--withdrawLinkForm=lnurlw` | spells `withdrawLink` as `lnurlw://host/w` instead of the plain `https://host/w` the reference mint emits. Both are legal; a client has to take both |
+| `--verify=false` | provides no LUD-21 endpoint at all, rather than merely leaving it unadvertised. A melt MUST carry `verify` since luds `fd80cdd`, so this is a mint wallets cannot follow a melt on |
+| `--withdrawLinkForm=lnurlw` | spells `withdrawLink` as `lnurlw://host/w` instead of the plain `https://host/w`. Since luds `fd80cdd` `withdrawLink` is the `https://` URL, so the grader warns, but a client still has to take both |
 | `--name --description --contact --tosUrl --motd --version` | mint info on the experimental discovery endpoint: who runs this, how to reach them, the terms, and what the operator wants holders to know today |
 | `--baseFeeMsat --feePpm` | also publishes `fees: {baseFeeMsat, feePpm}` on that endpoint, the structured twin of the fee line in the payRequest metadata |
 | `--stats` | serves `GET /stats`: what the mint owes, what is in flight, what the node holds, and the coverage between them |
@@ -195,8 +202,10 @@ Read-only by default: resolves the payRequest, checks the `withdrawLink`
 (either legal spelling, and the report says which one the mint uses),
 the fee advertisement, invoice amounts, mandatory `commentAllowed: 64`,
 pre-invoice rejection of missing or malformed mint comments (a `cp1` whose
-key is not on the curve among them), whether an unknown note is reported
-distinguishably from a spent one, and the experimental mint address.
+key is not on the curve among them), `mintPubkey` on the mint payRequest, a
+LUD-21 `verify` URL that does not carry the invoice's payment hash, an
+unknown note answered exactly `unknown note`, and the experimental mint
+address.
 
 Current LUD-25 minting is always comment-bound. The wallet names the note it
 is buying as `comment=cp1<Q>`, or as a bearer note's hex `h`, and the payment
@@ -255,12 +264,10 @@ One check needs a real payment, which the runner cannot make on its own.
 Given a freshly minted, never-rotated note and what its mint invoice was
 paid at, it compares the note's value against the advertised fee:
 
-LUD-25 says nothing about whether that fee rounds, and the two live
-implementations differ. dni's lnurl-mint ceilings it to a whole sat on
-purpose, so the mint is never short a sat; moneyer withholds the
-msat-exact amount. Both pass. The check grades the range between them and
-names which it saw, and a msat outside it either way fails - a mint taking
-more than the ceilinged fee, or crediting more than it advertised.
+Since luds `fd80cdd` the credit is the formula rounded down to whole
+satoshis. A fee ceilinged to a whole sat, as lnurl-mint charges it, gives the
+same note for a whole-satoshi payment; an msat-exact credit is too large and
+fails, as does a mint taking more than it advertised.
 
 ```bash
 npx lnurlcash-conform mint@example.com --note='lnurlw://...?k1=...' --paid=500000
@@ -286,15 +293,19 @@ npx lnurlcash-conform mint@example.com --note='lnurlw://...?k1=...' --spend
 It burns the note it is given and prints where the value ended up. The
 note's `k1` may be any spend of it: a bearer note's 64-hex preimage, a `ck1`
 or a `cw1`. It grades LUD-25 as of the unified taproot model (luds
-`6e865b1`), where every note is a taproot output key `Q`, with the
-derivation purposes and certificate names of luds `50d740a`: certificates
-are read from `c` and `c2`, and a mint that also sends the older `sig` and
-`sig2` is not faulted for it.
+`6e865b1`), where every note is a taproot output key `Q`, as of luds
+`fd80cdd`: certificates are read from `c` and `c2`, every note must carry
+one, and each is the 69-byte `cs1` over `LNURLcash:<domain>:<amount>:<hex(Q)>:<t>`
+with `t` no later than the grader's clock (the report gives its age). A mint
+that also sends the older `sig` and `sig2` is not faulted for it.
 
 On the note as given it checks that the informational GET is idempotent,
-echoes the queried `k1` and ignores the URL's own `amount`; that a lookup by
-`p` answers by the note's `cp1` and by its hex `h`, with no `k1` in the reply,
-and tells a spent note from an unknown one; that a rotate with no `p1` and a
+echoes the queried `k1`, carries `mintPubkey` and LUD-19 `payLink`, and
+ignores the URL's own `amount`; that it and the callback answer `Cache-Control:
+no-store` (warns); that a lookup by `p` answers by the note's `cp1` and by its
+hex `h`, with no `k1` in the reply; that a spent note answers worth `0` with no
+certificate there and `already in use` at the callback, and an unknown one
+`unknown note`; that a rotate with no `p1` and a
 split with no `p2` are refused; that a rotate returns no secret; that split
 and merge conserve value, exactly under LUD-25's fee algebra when the fee is
 known; and that a retried mutation is answered with the original success,
@@ -304,8 +315,9 @@ cannot be spent again. It probes the shapes a mint must refuse atomically:
 one note named twice in a merge, in the same or two spellings (a careless mint
 counts it twice, minting money from nothing); a `p1` naming the burned note
 it was given, which must be refused as exactly `already in use`; a split
-whose `p1` and `p2` name one note; a split leaving change short of the base
-fee (`insufficient value`); and the callback replayed as a POST and as an
+whose `p1` and `p2` name one note; a split amount that is not whole
+satoshis; a split leaving no change once the base fee comes out (`insufficient
+value`); and the callback replayed as a POST and as an
 OPTIONS preflight, since the mutating endpoint must answer GET only.
 
 Then it moves the value through two notes of its own. The first is a

@@ -20,6 +20,7 @@ import {
   isXOnlyPoint,
   keyPathSpend,
   scriptTree,
+  spendDomainOf,
   tweakSecretKey
 } from './spend.mjs'
 import {encodeCx1, freshShare, registrationMessage, signRegistration} from './share.mjs'
@@ -53,20 +54,38 @@ const recoversTo = (digest, sig, pubkeyHex) => {
   return false
 }
 
-// A certificate: cs1 over "LNURLcash:<domain>:<amount_msat>:<hex(Q)>". Every
-// note has a public Q, a bearer note included, so this is the one message a
-// certificate signs (luds 6e865b1), bound to the mint's domain since luds
-// 92abbb3. `subjectHex` is hex(Q), or a bearer note's h when the grader is
-// naming the pre-taproot mistake; a null `domain` is the superseded message
-// without one, which the grader only ever names as a mistake.
-const verifyCertificate = (subjectHex, amountMsat, sig, mintPubkeyHex, domain = null) =>
-  recoversTo(
-    signedMessageDigest(
-      domain === null ? `LNURLcash:${amountMsat}:${subjectHex}` : `LNURLcash:${domain}:${amountMsat}:${subjectHex}`
-    ),
-    sig,
-    mintPubkeyHex
-  )
+// A certificate: cs1 over "LNURLcash:<domain>:<amount_msat>:<hex(Q)>:<t>",
+// bound to the mint's domain (luds 92abbb3) and to its time of signing
+// (luds fd80cdd). A null `t` is the message before fd80cdd, which the
+// grader only ever names as a mistake.
+const certificateMessage = (qHex, amountMsat, domain, t) =>
+  t === null ? `LNURLcash:${domain}:${amountMsat}:${qHex}` : `LNURLcash:${domain}:${amountMsat}:${qHex}:${t}`
+const verifyCertificate = (qHex, amountMsat, sig, mintPubkeyHex, domain, t = null) =>
+  recoversTo(signedMessageDigest(certificateMessage(qHex, amountMsat, domain, t)), sig, mintPubkeyHex)
+
+const wholeSats = msat => Math.floor(msat / 1000) * 1000
+
+// The payment hash of a BOLT-11 invoice, hex, or null: the first `p` tagged
+// field of the data part (52 data words of 5 bits).
+const paymentHashOf = pr => {
+  try {
+    const {words} = bech32.decode(String(pr).toLowerCase(), 10_000)
+    let i = 7 // the timestamp
+    while (i + 3 <= words.length - 104) {
+      const tag = words[i]
+      const len = words[i + 1] * 32 + words[i + 2]
+      if (tag === 1 && len === 52) return bytesToHex(Uint8Array.from(bech32.fromWordsUnsafe(words.slice(i + 3, i + 3 + 52)) ?? []).slice(0, 32))
+      i += 3 + len
+    }
+  } catch {
+    // not an invoice the grader can read
+  }
+  return null
+}
+
+// How far ahead of the grader's clock a t may be before it is a mint signing
+// the future rather than two clocks disagreeing.
+const CLOCK_SKEW_S = 300
 
 // cs1 and cx1 are bech32m. cs1 has a variable HRP: "cs" plus the amount
 // under BOLT-11's amount rules. Longer than BIP-173's 90 characters by
@@ -92,6 +111,8 @@ const amountSuffixMsat = suffix => {
   return Number.isSafeInteger(amount) ? amount : null
 }
 
+// A cs1: r || s || recovery-id || u32 t, 69 bytes (luds fd80cdd). The
+// 65-byte form before it decodes with t null, so it can be named.
 const decodeCertificate = value => {
   if (typeof value !== 'string') return null
   const lower = value.trim().toLowerCase()
@@ -99,8 +120,13 @@ const decodeCertificate = value => {
   if (sep < 3 || !lower.startsWith('cs')) return null
   const amountMsat = amountSuffixMsat(lower.slice(2, sep))
   if (amountMsat === null) return null
-  const signature = decodeCash(lower.slice(0, sep), lower, 65)
-  return signature ? {amountMsat, signature} : null
+  const payload = decodeCash(lower.slice(0, sep), lower, 69)
+  if (payload) {
+    const t = new DataView(payload.buffer, payload.byteOffset).getUint32(65, false)
+    return {amountMsat, signature: payload.slice(0, 65), t}
+  }
+  const legacy = decodeCash(lower.slice(0, sep), lower, 65)
+  return legacy ? {amountMsat, signature: legacy, t: null} : null
 }
 
 // An x that is on no curve point: the cp1 of it names a note nobody could
@@ -248,12 +274,16 @@ export const invoiceAmountMsat = pr => {
 // cannot overflow at realistic amounts - see the fees vectors.
 const proportionalFee = (gross, ppm) =>
   Math.floor(gross / 1e6) * ppm + Math.floor(((gross % 1e6) * ppm) / 1e6)
-export const applyMintFee = (gross, fee) =>
-  Math.max(0, gross - (fee?.baseFeeMsat ?? 0) - proportionalFee(gross, fee?.feePpm ?? 0))
+// The credit is rounded down to whole satoshis (luds fd80cdd).
+export const applyMintFee = (gross, fee) => {
+  const net = gross - (fee?.baseFeeMsat ?? 0) - proportionalFee(gross, fee?.feePpm ?? 0)
+  return net <= 0 ? 0 : Math.floor(net / 1000) * 1000
+}
 
 // "Mint fees: <base>,<ppm>[,<address fee>...]" anywhere in a text/plain
 // entry, its values plain base-10 integers ending at whitespace (luds
-// 92e430f). The third value is LUD-26's address fee per registration.
+// 92e430f), the base a multiple of 1000 (luds fd80cdd). The third value is
+// LUD-26's address fee per registration.
 const MINT_FEES_TOKEN = /Mint fees:\s*(\S*)/
 const plainInteger = value =>
   /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : null
@@ -278,7 +308,8 @@ export const readFeeAdvertisement = metadata => {
     const values = match[1].split(',')
     const baseFeeMsat = plainInteger(values[0] ?? '')
     const feePpm = plainInteger(values[1] ?? '')
-    if (baseFeeMsat === null || feePpm === null || feePpm >= 1_000_000) {
+    // base_fee_msat MUST be a multiple of 1000 (luds fd80cdd)
+    if (baseFeeMsat === null || feePpm === null || feePpm >= 1_000_000 || baseFeeMsat % 1000 !== 0) {
       return {fee: null, unknown: true, entry: entry[1]}
     }
     const addressFeeMsat = values.length > 2 ? plainInteger(values[2]) : null
@@ -360,7 +391,26 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
       `withdrawLink has an unexpected scheme: ${link}`
     )
     assert(isAllowedUrl(fromLud17(link)), `withdrawLink is not fetchable: ${link}`)
+    // luds fd80cdd: the https:// URL (http:// for an onion service); a
+    // WALLET still accepts lnurlw://, so this is not a failure
+    if (form === 'lnurlw:// form') {
+      throw soft(`${link} (${form}) - withdrawLink is the https:// URL of the withdrawRequest endpoint since luds fd80cdd; wallets still accept lnurlw://`)
+    }
+    // loopback is development, as LUD-17 resolution treats it here too
+    const linkHost = /^http:\/\//i.test(link) ? new URL(link).hostname.toLowerCase() : null
+    if (linkHost && !linkHost.endsWith('.onion') && !['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(linkHost)) {
+      throw soft(`${link} - plain http:// is for an onion service only`)
+    }
     return `${link} (${form})`
+  })
+
+  // a LUD-26 Lightning Address is not the mint payRequest; mint@ is
+  if (!registeredAddress) await report.check('publishes mintPubkey on the mint payRequest (LUD-25)', async () => {
+    assert(
+      isCompressedPubkey(pay.mintPubkey),
+      `no 33-byte compressed mintPubkey (got ${JSON.stringify(pay.mintPubkey)}) - a SERVICE MUST publish it in its mint payRequest, so a WALLET knows the key before it pays (luds fd80cdd)`
+    )
+    return pay.mintPubkey
   })
 
   await report.check('metadata parses, and any fee advertisement is valid', async () => {
@@ -409,6 +459,13 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
     }
     if (body.verify) {
       assert(isAllowedUrl(body.verify), `verify URL is not fetchable: ${body.verify}`)
+      // luds fd80cdd: every verify URL is unguessable, never derived from pr
+      // or its payment hash, which the payee and anyone shown the invoice know
+      const hash = paymentHashOf(body.pr)
+      assert(
+        !hash || !body.verify.toLowerCase().includes(hash),
+        `the verify URL carries the invoice's payment hash - anyone holding the invoice can poll it and read the preimage; it MUST be unguessable (luds fd80cdd)`
+      )
       verifyUrl = body.verify
     }
     return `${amount} msat${body.verify ? ', with LUD-21 verify' : ''}`
@@ -440,8 +497,8 @@ export const gradeMint = async (payUrl, report, {registeredAddress = false} = {}
     assert(body.status === 'ERROR', `a note that cannot exist was accepted: ${JSON.stringify(body).slice(0, 120)}`)
     assert(typeof body.reason === 'string' && body.reason.length > 0, 'ERROR carried no reason')
     assert(
-      /unknown|not found/i.test(body.reason),
-      `reason ${JSON.stringify(body.reason)} does not identify the note as unknown - a holder cannot tell this apart from "already spent"`
+      body.reason === 'unknown note',
+      `reason ${JSON.stringify(body.reason)} - a note SERVICE never credited MUST be answered exactly "unknown note" (luds fd80cdd), the fixed string a WALLET and a LUD-26 recovery scan act on`
     )
     return body.reason
   })
@@ -1327,31 +1384,15 @@ export const gradeMintedValue = async (noteUrl, report, {mintFee = null, paidMsa
     const feeText = mintFee
       ? `${mintFee.baseFeeMsat} msat + ${mintFee.feePpm} ppm`
       : 'no advertised fee'
-    // LUD-25 gives the fee as base plus a ppm cut and says nothing about
-    // rounding, and the two live implementations read that differently:
-    // dni's lnurl-mint - the reference, and what every public mint but
-    // moneyer runs - ceilings the fee to a whole sat on purpose, moneyer
-    // is msat-exact. Grading either as a failure would be this repo
-    // picking a side the draft has not picked. So the compliant answer is
-    // a band: the formula is the most a holder can be credited, the
-    // sat-ceilinged fee the least. Anything outside is still wrong, which
-    // is what this check is for.
-    const exactFee = paidMsat - exact
-    const ceilinged = Math.max(0, paidMsat - Math.ceil(exactFee / 1000) * 1000)
+    // Since luds fd80cdd the credit is the formula rounded down to whole
+    // satoshis, which settles the two readings the draft left open: a fee
+    // ceilinged to a whole sat (lnurl-mint) gives the same note for a
+    // whole-satoshi payment, an msat-exact credit (moneyer) a larger one.
     assert(
-      info.maxWithdrawable <= exact,
-      `paid ${paidMsat} msat against ${feeText}: the note holds ${info.maxWithdrawable} msat, more than the ${exact} the formula allows`
+      info.maxWithdrawable === exact,
+      `paid ${paidMsat} msat against ${feeText}: the note holds ${info.maxWithdrawable} msat, not the ${exact} the formula gives rounded down to whole satoshis${info.maxWithdrawable > exact ? ' - an msat-exact credit is no longer conformant' : ''}`
     )
-    assert(
-      info.maxWithdrawable >= ceilinged,
-      `paid ${paidMsat} msat against ${feeText}: the note holds ${info.maxWithdrawable} msat, short of ${ceilinged} - beyond even a fee ceilinged to a whole sat`
-    )
-    const how =
-      info.maxWithdrawable === exact
-        ? 'msat-exact'
-        : info.maxWithdrawable === ceilinged
-          ? 'fee ceilinged to a whole sat, as the reference mint does'
-          : 'inside the band'
+    const how = 'rounded down to whole satoshis'
     return `${paidMsat} msat paid -> ${info.maxWithdrawable} msat note (${feeText}, ${how})`
   })
 }
@@ -1455,8 +1496,8 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   const given = k1 ? decodeSpend(k1) : null
   assert(given, 'that note carries no spend: its k1 must be a 64-hex preimage, a ck1 or a cw1')
   // A signature in a spend is bound to the domain of the note's own URL:
-  // its lowercase hostname, never the scheme or the port.
-  const domain = url.hostname.toLowerCase()
+  // its host, lowercased, A-label, without port, userinfo or trailing dot.
+  const domain = spendDomainOf(url.href)
   const originalQ = bytesToHex(given.outputKey)
   // The note given, in every spelling the grader can name it by: its cp1,
   // and its hex h when it is a bearer note given by its preimage.
@@ -1469,23 +1510,23 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   // amount and any certificate (c, or sig before luds 50d740a) are claims
   // the informational GET ignores anyway.
   const base = new URL(url)
-  for (const key of ['k1', 'amount', 'c', 'sig', 'p', 'h']) base.searchParams.delete(key)
+  for (const key of ['k1', 'amount', 'c', 'p']) base.searchParams.delete(key)
   const infoBy = (key, value) => {
     const u = new URL(base)
     u.searchParams.set(key, value)
     return get(u)
   }
   const lookup = spend => infoBy('k1', spend)
+  // A burned or mid-melt note answers the informational GET worth 0, not
+  // with an error (luds fd80cdd): live means an answer with value in it.
+  const isLive = body => body.status !== 'ERROR' && Number(body.maxWithdrawable) > 0
+  const whyNotLive = body => (body.status === 'ERROR' ? body.reason : `worth ${body.maxWithdrawable}`)
   const lookupRef = ref => infoBy('p', ref)
 
-  // Every bearer note the grader makes, so a certificate over its h (the
-  // pre-taproot message) can be named for what it is.
-  const hOfQ = new Map(given.h ? [[originalQ, bytesToHex(given.h)]] : [])
   const freshBearer = () => {
     const preimage = randomBytes(32)
     const h = sha256(preimage)
     const q = bytesToHex(bearerNote(h).outputKey)
-    hOfQ.set(q, bytesToHex(h))
     return {k1: bytesToHex(preimage), h: bytesToHex(h), q, cp1: encodeCp1(hexToBytes(q))}
   }
   // A bearer note's full cw1, the long form of its 64-hex preimage.
@@ -1506,15 +1547,9 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   // graded where it arrives when a check is about it, and all together at
   // the end.
   const certificates = []
-  // LUD-25 names a certificate `c` (and a split's change `c2`) since luds
-  // 50d740a; before that it was `sig`/`sig2`. The grader reads only the
-  // current name, so a mint sending only the old one is graded uncertified,
-  // and says why. A mint still sending the old name alongside the new one
-  // (a transition) is not faulted for it.
+  // LUD-25 names a certificate `c`, and a split's change `c2`.
   const noteCertificate = (where, body, qHex, amountMsat, {change = false} = {}) => {
-    const cert = body?.[change ? 'c2' : 'c'] ?? null
-    const legacy = body?.[change ? 'sig2' : 'sig'] ?? null
-    certificates.push({where, sig: cert, legacyOnly: cert === null && legacy !== null, qHex, amountMsat})
+    certificates.push({where, sig: body?.[change ? 'c2' : 'c'] ?? null, qHex, amountMsat})
   }
 
   let info
@@ -1528,6 +1563,14 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     assert(
       String(info.k1 ?? '').toLowerCase() === k1.toLowerCase(),
       'the response k1 differs from the one queried - it must be the spend itself, echoed, never a derived id'
+    )
+    assert(
+      isCompressedPubkey(info.mintPubkey),
+      'no 33-byte compressed mintPubkey - a SERVICE MUST publish it in its withdrawRequest response, and a WALLET MUST refuse one without it (luds fd80cdd)'
+    )
+    assert(
+      typeof info.payLink === 'string' && isAllowedUrl(info.payLink),
+      'no payLink - the withdrawRequest MUST carry LUD-19 payLink to the mint payRequest, which tells a WALLET the link is a note (luds fd80cdd)'
     )
     noteCertificate('the informational GET of the note given', info, originalQ, info.maxWithdrawable)
     return `${info.maxWithdrawable} msat`
@@ -1552,15 +1595,16 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   // signature is genuine, not that a wallet should accept the new key -
   // LUD-25 puts that decision with the holder.
   const signers = () => [info.mintPubkey, ...previousPubkeys].filter(isCompressedPubkey)
-  const describeSigner = signedBy =>
-    signedBy === info.mintPubkey
+  const describeSigner = (signedBy, t = null) =>
+    (signedBy === info.mintPubkey
       ? 'verified offline'
-      : `verified offline against a previous signing key (${signedBy.slice(0, 16)}...)`
+      : `verified offline against a previous signing key (${signedBy.slice(0, 16)}...)`) +
+    (t === null ? '' : `, signed ${Math.max(0, Math.floor(Date.now() / 1000) - t)} s ago`)
   const unverified = () =>
     previousPubkeys.length > 0
       ? 'the certificate verifies against neither the advertised mintPubkey nor any published previous key'
       : 'the certificate does not verify against the advertised mintPubkey'
-  // Is `sig` a cs1 for this note at this value? {signedBy} or {problem}.
+  // Is `sig` a cs1 for this note at this value? {signedBy, t} or {problem}.
   const judgeCertificate = (sig, qHex, amountMsat) => {
     if (!isCompressedPubkey(info.mintPubkey)) {
       return {problem: 'a certificate with no 33-byte compressed mintPubkey advertised verifies against nothing'}
@@ -1572,21 +1616,24 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     if (certificate.amountMsat !== amountMsat) {
       return {problem: `the cs1 says ${certificate.amountMsat} msat but the note is worth ${amountMsat} msat`}
     }
-    const signedBy = signers().find(key => verifyCertificate(qHex, amountMsat, certificate.signature, key, domain))
-    if (signedBy) return {signedBy}
-    if (signers().some(key => verifyCertificate(qHex, amountMsat, certificate.signature, key))) {
+    const signedBy =
+      certificate.t !== null && signers().find(key => verifyCertificate(qHex, amountMsat, certificate.signature, key, domain, certificate.t))
+    if (signedBy) {
+      const ahead = certificate.t - Math.floor(Date.now() / 1000)
+      if (ahead > CLOCK_SKEW_S) {
+        return {problem: `the cs1 is signed at t = ${certificate.t}, ${ahead} s ahead of the grader's clock - a SERVICE MUST NOT sign a t ahead of its own clock`}
+      }
+      return {signedBy, t: certificate.t}
+    }
+    if (signers().some(key => verifyCertificate(qHex, amountMsat, certificate.signature, key, domain))) {
       return {
         problem:
-          'the cs1 signs the superseded message without the domain - since luds 92abbb3 a certificate signs LNURLcash:<domain>:<amount_msat>:<hex(Q)>, so a wallet checking this one offline rejects it'
+          certificate.t === null
+            ? 'the cs1 is the 65-byte form without t - since luds fd80cdd a certificate signs LNURLcash:<domain>:<amount_msat>:<hex(Q)>:<t> and carries u32 t, so a wallet checking this one offline rejects it'
+            : 'the cs1 carries t but signs the message without it - LNURLcash:<domain>:<amount_msat>:<hex(Q)>:<t> since luds fd80cdd'
       }
     }
-    const h = hOfQ.get(qHex)
-    if (h && [domain, null].some(d => signers().some(key => verifyCertificate(h, amountMsat, certificate.signature, key, d)))) {
-      return {
-        problem:
-          "the cs1 signs the bearer note's h, the pre-taproot message - LUD-25 certifies every note over hex(Q), so a wallet checking this one offline rejects it"
-      }
-    }
+    if (certificate.t === null) return {problem: 'the cs1 is 65 bytes, with no t - since luds fd80cdd it is r || s || recovery-id || u32 t'}
     return {problem: unverified()}
   }
 
@@ -1598,6 +1645,25 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       `value changed between two informational GETs: ${value} then ${again.maxWithdrawable}`
     )
     return 'idempotent'
+  })
+
+  // Spends travel in these URLs: a cached response is a copy of the spend
+  // somewhere the holder never sees (luds fd80cdd, Security considerations).
+  await report.check('answers with Cache-Control: no-store where spends travel', async () => {
+    const lookupRes = await fetch(url.toString(), {signal: AbortSignal.timeout(15_000)})
+    await lookupRes.text()
+    const cb = new URL(info.callback)
+    cb.searchParams.set('k1', freshBearer().k1)
+    const callbackRes = await fetch(cb.toString(), {signal: AbortSignal.timeout(15_000)})
+    await callbackRes.text()
+    const missing = [
+      ['the informational GET', lookupRes],
+      ['the callback', callbackRes]
+    ].filter(([, res]) => !/(^|,)\s*no-store\s*(,|$)/i.test(res.headers.get('cache-control') ?? ''))
+    if (missing.length > 0) {
+      throw soft(`${missing.map(([where]) => where).join(' and ')} without Cache-Control: no-store - a SERVICE SHOULD send it where spends travel in the URL`)
+    }
+    return 'no-store on both'
   })
 
   await report.check('ignores the amount in the note URL', async () => {
@@ -1709,13 +1775,13 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   })
 
   await report.check('refuses a split with no p2', async () => {
-    const body = await call({k1s: [current], amount: Math.max(1, Math.floor(value / 2)), p1: freshBearer().h})
+    const body = await call({k1s: [current], amount: Math.max(1000, wholeSats(value / 2)), p1: freshBearer().h})
     assert(
       body.status === 'ERROR',
       'accepted a split with only one output - the change note has nowhere to go but a SERVICE-generated one'
     )
     const still = await lookup(current)
-    assert(still.status !== 'ERROR', `a refused split burned the note anyway: ${still.reason}`)
+    assert(isLive(still), `a refused split burned the note anyway: ${whyNotLive(still)}`)
     return body.reason
   })
 
@@ -1739,7 +1805,10 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     assert(after.maxWithdrawable === value, `value changed across a rotate: ${value} -> ${after.maxWithdrawable}`)
 
     const dead = await lookup(k1)
-    assert(dead.status === 'ERROR', 'the rotated-away note is still spendable')
+    assert(
+      dead.status !== 'ERROR' && dead.maxWithdrawable === 0,
+      `the rotated-away note must answer worth 0, got ${JSON.stringify(dead).slice(0, 120)}`
+    )
     return 'burned the old note, minted the new'
   })
 
@@ -1752,34 +1821,41 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     const first = certificates.find(c => c.where === 'the first rotate')
     if (!first) throw soft('the rotate did not complete, so there is no output to check')
     if (first.sig === null) {
-      if (first.legacyOnly) throw soft('the rotate returned its certificate only as sig, the name before luds 50d740a; LUD-25 names it c')
-      throw soft('the rotate returned no certificate - LUD-25 says a SERVICE SHOULD certify every note, a bearer note included')
+      throw new Error('the rotate returned no certificate - a SERVICE MUST certify every note, a bearer note included (luds fd80cdd)')
     }
     const verdict = judgeCertificate(first.sig, first.qHex, first.amountMsat)
     assert(verdict.signedBy, verdict.problem)
-    return `cs1 over hex(Q), ${describeSigner(verdict.signedBy)}`
+    return `cs1 over hex(Q), ${describeSigner(verdict.signedBy, verdict.t)}`
   })
 
   await report.check('reports a spent note distinguishably from an unknown one', async () => {
     if (!lookupOffered) throw soft('the lookup by p is not offered')
-    for (const [spelling, ref] of originalRefs) {
-      const burned = await lookupRef(ref)
-      // LUD-25 fixes the answer for a burned note as exactly "already in
-      // use" (luds 92abbb3): a LUD-26 recovery scan counts that, and only
-      // that, as a used index, so a mint saying anything else hides notes
-      // from a wallet restoring its seed
+    // A burned note answers the informational GET as a withdrawRequest
+    // worth 0 with no certificate, as LUD-03 allows (luds fd80cdd): a LUD-26
+    // recovery scan counts any note as a used index, 0 included, and a plain
+    // LUD-03 wallet reads it as nothing left rather than as an error.
+    const zero = (body, by) => {
       assert(
-        burned.status === 'ERROR' && burned.reason === 'already in use',
-        `a spent note asked for by its ${spelling} must be answered "already in use", got ${JSON.stringify(burned)}`
+        body.status !== 'ERROR' && body.tag === 'withdrawRequest',
+        `a spent note asked for by ${by} must be answered as a withdrawRequest worth 0, got ${JSON.stringify(body).slice(0, 120)}`
       )
+      assert(body.minWithdrawable === 0 && body.maxWithdrawable === 0, `a spent note asked for by ${by} is worth ${body.minWithdrawable}-${body.maxWithdrawable}, not 0`)
+      assert(body.c === undefined || body.c === null, `a spent note asked for by ${by} came with a certificate - one attests the note outstanding`)
     }
+    for (const [spelling, ref] of originalRefs) zero(await lookupRef(ref), `its ${spelling}`)
+    zero(await lookup(k1), 'its spend')
+    // ...and the callback still refuses it, with the fixed reason
+    const again = await call({k1s: [k1], p1: freshBearer().cp1})
+    assert(
+      again.status === 'ERROR' && again.reason === 'already in use',
+      `a spend of a burned note at the callback must be refused "already in use", got ${JSON.stringify(again)}`
+    )
     const unknown = await lookupRef(freshBearer().h)
     assert(
-      unknown.status === 'ERROR' && typeof unknown.reason === 'string' &&
-        /unknown|not found/i.test(unknown.reason) && unknown.reason !== 'already in use',
-      `an unregistered note must be identified as unknown, got ${JSON.stringify(unknown)}`
+      unknown.status === 'ERROR' && unknown.reason === 'unknown note',
+      `an uncredited note must be answered exactly "unknown note" (luds fd80cdd), got ${JSON.stringify(unknown)}`
     )
-    return 'spent and unknown notes are distinguishable without disclosing a spend'
+    return 'a spent note is worth 0 at the informational GET and "already in use" at the callback; an unknown one is "unknown note"'
   })
 
   // The informational GET hands out the queried note's certificate, so a
@@ -1790,12 +1866,11 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     const body = await lookup(current)
     assert(body.status !== 'ERROR', `informational GET refused: ${body.reason}`)
     if (body.c === undefined || body.c === null) {
-      if (typeof body.sig === 'string') throw soft('a certificate is offered only as sig, the name before luds 50d740a; LUD-25 names it c')
-      return 'no certificate offered here'
+      throw new Error('no certificate for an outstanding note - SERVICE returns one on the informational GET (luds fd80cdd)')
     }
     const verdict = judgeCertificate(body.c, currentQ, body.maxWithdrawable)
     assert(verdict.signedBy, verdict.problem)
-    return `cs1 for the queried note, ${describeSigner(verdict.signedBy)}`
+    return `cs1 for the queried note, ${describeSigner(verdict.signedBy, verdict.t)}`
   })
 
   // The still-alive probe the adversarial checks below share: a compliant
@@ -1803,7 +1878,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   // spendable afterwards, and worth what it was.
   const assertStillLive = async () => {
     const still = await lookup(current)
-    assert(still.status !== 'ERROR', `the refusal burned the note anyway: ${still.reason}`)
+    assert(isLive(still), `the refusal burned the note anyway: ${whyNotLive(still)}`)
     assert(still.maxWithdrawable === value, `the refusal changed the note's value: ${value} -> ${still.maxWithdrawable}`)
   }
 
@@ -1865,8 +1940,8 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   })
 
   await report.check('refuses a split whose p1 equals p2', async () => {
-    const half = Math.floor(value / 2)
-    if (half < 1) throw soft('note too small to attempt')
+    const half = wholeSats(value / 2)
+    if (half < 1000) throw soft('note too small to attempt')
     const twin = freshBearer()
     const probes = [
       ['the same h twice', twin.h, twin.h],
@@ -1899,21 +1974,34 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
         .then(res => res.arrayBuffer())
         .catch(() => {})
       const still = await lookup(current)
-      assert(still.status !== 'ERROR', `a ${method} request burned the note - the mutating callback must answer GET only`)
+      assert(isLive(still), `a ${method} request burned the note - the mutating callback must answer GET only`)
       const output = await lookup(fresh.k1)
       assert(output.status === 'ERROR', `a ${method} request minted its output - the mutating callback must answer GET only`)
     }
     return 'POST and OPTIONS left the note untouched'
   })
 
+  await report.check('refuses a split whose amount is not whole satoshis', async () => {
+    if (value < 3000) throw soft('note too small to attempt')
+    const amount = wholeSats(value / 2) + 500
+    const body = await call({k1s: [current], amount, p1: freshBearer().h, p2: freshBearer().h})
+    assert(
+      body.status === 'ERROR',
+      `accepted a split of ${amount} msat - a split amount MUST be whole satoshis (luds fd80cdd), or a note worth a fraction of a satoshi exists that no Lightning payment can ever melt`
+    )
+    await assertStillLive()
+    return body.reason
+  })
+
   await report.check('refuses a split whose change cannot cover the base fee', async () => {
     if (knownBaseFee === null) throw soft('fee unknown - pass --paid to grade the fee rules')
     if (knownBaseFee === 0) throw soft('no base fee advertised, so the rule cannot bite')
-    // Leave the change one msat short of the base fee. LUD-25 says fail the
-    // whole split rather than hand back a change note worth less than the
-    // fee that was meant to come out of it.
-    const amount = value - knownBaseFee + 1
-    if (amount < 1 || amount >= value) {
+    // Leave change exactly the base fee, so nothing is left once the fee
+    // comes out (split amounts are whole satoshis since luds fd80cdd, as is
+    // the base fee). LUD-25 says fail the whole split - "insufficient value"
+    // - rather than hand back a change note worth nothing.
+    const amount = value - knownBaseFee
+    if (amount < 1000 || amount % 1000 !== 0) {
       throw soft('note too small to leave change short of the base fee')
     }
     const body = await call({k1s: [current], amount, p1: freshBearer().h, p2: freshBearer().h})
@@ -1921,13 +2009,14 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       body.status === 'ERROR',
       `accepted a split leaving ${value - amount} msat of change against a ${knownBaseFee} msat base fee`
     )
+    assert(body.reason === 'insufficient value', `refused as ${JSON.stringify(body.reason)} - LUD-25 fixes it as "insufficient value"`)
     await assertStillLive()
     return body.reason
   })
 
   await report.check('split conserves value', async () => {
-    const half = Math.floor(value / 2)
-    if (half < 1) throw soft('note too small to split')
+    const half = wholeSats(value / 2)
+    if (half < 1000) throw soft('note too small to split')
     if (knownBaseFee !== null && value - half < knownBaseFee + 1) {
       throw soft('note too small to split past the advertised base fee')
     }
@@ -1993,7 +2082,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   await report.check('replays a retried mutation rather than refusing it', async () => {
     const liveValue = async spend => {
       const r = await lookup(spend)
-      return r.status === 'ERROR' ? null : r.maxWithdrawable
+      return isLive(r) ? r.maxWithdrawable : null
     }
 
     // --- a rotate, retried ---
@@ -2035,8 +2124,8 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     // --- a split, retried ---
     // p2 and the change amount are part of what makes a request the same
     // request, so a rotate on its own does not cover it.
-    const half = Math.floor(minted / 2)
-    if (half < 1 || (knownBaseFee !== null && minted - half < knownBaseFee + 1)) {
+    const half = wholeSats(minted / 2)
+    if (half < 1000 || (knownBaseFee !== null && minted - half < knownBaseFee + 1)) {
       throw soft('a rotate replays, in every spelling; note too small to exercise a split retry')
     }
     const a = freshBearer()
@@ -2103,7 +2192,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   let tree = null
   const assertTreeLive = async () => {
     const still = lookupOffered ? await lookupRef(tree.cp1) : await lookup(tree.home)
-    assert(still.status !== 'ERROR', `the refusal burned the script-tree note anyway: ${still.reason}`)
+    assert(isLive(still), `the refusal burned the script-tree note anyway: ${whyNotLive(still)}`)
     assert(still.maxWithdrawable === tree.value, `the refusal changed the note's value: ${tree.value} -> ${still.maxWithdrawable}`)
   }
   // Brings the tree note's value home to a fresh bearer note by the first
@@ -2268,7 +2357,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     const pk = schnorr.getPublicKey(secretKey)
     const q = bytesToHex(pk)
     const before = await lookup(current)
-    assert(before.status !== 'ERROR', `the note held here no longer opens: ${before.reason}`)
+    assert(isLive(before), `the note held here no longer opens: ${whyNotLive(before)}`)
     const body = await call({k1s: [current], p1: encodeCp1(pk)})
     assert(body.status === 'OK', `refused a rotate into a cp1: ${body.reason} - LUD-25 has a SERVICE credit any cp1 it is given`)
     keyNote = {
@@ -2311,7 +2400,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       throw new Error(`spent the note by a ck1 signed for other.invalid, not ${domain} - a signature any mint has seen can be replayed here`)
     }
     const still = await lookup(keyNote.ck1)
-    assert(still.status !== 'ERROR', `the refusal burned the key-path note anyway: ${still.reason}`)
+    assert(isLive(still), `the refusal burned the key-path note anyway: ${whyNotLive(still)}`)
     return body.reason
   })
 
@@ -2324,18 +2413,8 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
       adopt(home.k1)
       noteCertificate('the rotate out of the key-path note', body, home.q, keyNote.value)
     } else {
-      // Bring the value home before failing. The fixed-message ck1 LUD-25
-      // has since dropped is tried only as a rescue: a mint that still
-      // reads it is not graded for doing so.
-      const legacy = encodeCk1(
-        hexToBytes(keyNote.q),
-        schnorr.sign(sha256(utf8ToBytes('LNURLcash')), keyNote.secretKey, new Uint8Array(32))
-      )
-      const rescue = freshBearer()
-      const rescued = await call({k1s: [legacy], p1: rescue.h})
-      if (rescued.status === 'OK') adopt(rescue.k1)
       throw new Error(
-        `refused a ck1 signed over the canonical spend transaction for ${domain}: ${body.reason}. ${rescued.status === 'OK' ? 'The value came home only by the deprecated fixed-message ck1' : `The value is still at cp1<${keyNote.q}>, spendable by ${keyNote.ck1}`}`
+        `refused a ck1 signed over the canonical spend transaction for ${domain}: ${body.reason}. The value is still at cp1<${keyNote.q}>, spendable by ${keyNote.ck1}`
       )
     }
     assert(byKey.status !== 'ERROR', `the callback took the ck1, but the informational GET refused it: ${byKey.reason}`)
@@ -2347,7 +2426,7 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
   })
 
   // Every certificate the mint handed back, wherever it came from. LUD-25
-  // has a SERVICE certify every note (a SHOULD), and a certificate is only
+  // has a SERVICE certify every note (a MUST since luds fd80cdd), and a certificate is only
   // any use offline if it signs exactly (hex(Q), value): one that does not
   // is a wallet rejecting a good note, so it fails.
   await report.check('every certificate verifies over the domain, hex(Q) and the note value', async () => {
@@ -2361,10 +2440,9 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     }
     assert(wrong.length === 0, wrong.join('; '))
     const missing = certificates.length - present.length
-    const legacyOnly = certificates.filter(c => c.legacyOnly).length
     if (missing > 0) {
-      throw soft(
-        `${missing} of ${certificates.length} notes came back uncertified${legacyOnly > 0 ? ` (${legacyOnly} of them certified only as sig/sig2, the names before luds 50d740a; LUD-25 names them c/c2)` : ''} - LUD-25 says a SERVICE SHOULD certify every note it issues${present.length > 0 ? `; the ${present.length} certificates given all verify` : ''}`
+      throw new Error(
+        `${missing} of ${certificates.length} notes came back uncertified - a SERVICE MUST certify every note it issues (luds fd80cdd)${present.length > 0 ? `; the ${present.length} certificates given all verify` : ''}`
       )
     }
     const keys = [...signedBy].map(key => (key === info.mintPubkey ? 'mintPubkey' : `previous key ${key.slice(0, 16)}...`))
@@ -2376,7 +2454,6 @@ export const gradeNote = async (noteUrl, report, options = {}) => {
     noteUrl: (() => {
       const u = new URL(url)
       u.searchParams.delete('c')
-      u.searchParams.delete('sig')
       u.searchParams.delete('amount')
       u.searchParams.set('k1', current)
       return u.toString()

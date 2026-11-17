@@ -4,8 +4,6 @@
   "generatedBy": "tools/generate.mjs",
   "description": "Language-neutral conformance vectors for LNURLcash (LUD-25). Every implementation is expected to load these files directly rather than transcribe them.",
   "files": [
-    "signature.json",
-    "derivation.json",
     "cash-derivation.json",
     "bech32.json",
     "url-admission.json",

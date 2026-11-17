@@ -13,7 +13,7 @@
 import {writeFileSync, mkdirSync} from 'node:fs'
 import {dirname, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
-import {bech32, bech32m, base64urlnopad} from '@scure/base'
+import {bech32, bech32m, base64urlnopad, createBase58check} from '@scure/base'
 import {sha256, sha512} from '@noble/hashes/sha2.js'
 import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {hmac} from '@noble/hashes/hmac.js'
@@ -41,16 +41,6 @@ const MINT_PRIV = hexToBytes(
   '1111111111111111111111111111111111111111111111111111111111111111'
 )
 const MINT_PUB = bytesToHex(secp256k1.getPublicKey(MINT_PRIV, true))
-const OTHER_PRIV = hexToBytes(
-  '2222222222222222222222222222222222222222222222222222222222222222'
-)
-const OTHER_PUB = bytesToHex(secp256k1.getPublicKey(OTHER_PRIV, true))
-// the key this mint signed under before it rotated. Still published, so
-// notes it issued before the rotation still verify.
-const PREV_PRIV = hexToBytes(
-  '3333333333333333333333333333333333333333333333333333333333333333'
-)
-const PREV_PUB = bytesToHex(secp256k1.getPublicKey(PREV_PRIV, true))
 
 const K1_A = 'a'.repeat(64)
 const K1_B = 'b'.repeat(64)
@@ -58,257 +48,8 @@ const K1_C = '0f'.repeat(32)
 
 const noteId = k1 => bytesToHex(sha256(hexToBytes(k1)))
 
-// ---- the signature scheme ------------------------------------------------
-
-const LSM_PREFIX = 'Lightning Signed Message:'
-const DOMAIN_TAG = 'LNURLcash'
-
-const sigMessage = (k1, amountMsat) =>
-  `${DOMAIN_TAG}:${amountMsat}:${noteId(k1)}`
-
-const sigDigest = (k1, amountMsat) =>
-  sha256(
-    sha256(
-      new Uint8Array([
-        ...utf8ToBytes(LSM_PREFIX),
-        ...utf8ToBytes(sigMessage(k1, amountMsat))
-      ])
-    )
-  )
-
-// @noble's 'recovered' format is recovery-id-leading (recid || r || s).
-// LUD-25's wire format is r || s || recid, matching a raw BOLT-11
-// signature - so the canonical vector reorders, and the leading form is
-// emitted separately as the interop case some mints have actually sent.
-const signLeading = (priv, k1, amountMsat) =>
-  secp256k1.sign(sigDigest(k1, amountMsat), priv, {
-    format: 'recovered',
-    prehash: false
-  })
-
-const signTrailing = (priv, k1, amountMsat) => {
-  const lead = signLeading(priv, k1, amountMsat)
-  return new Uint8Array([...lead.subarray(1), lead[0]])
-}
-
-// ---- vectors: signature --------------------------------------------------
-
-const sigCase = (name, opts) => ({
-  name,
-  k1: opts.k1,
-  noteId: noteId(opts.k1),
-  amountMsat: opts.amountMsat,
-  message: sigMessage(opts.k1, opts.amountMsat),
-  digest: bytesToHex(sigDigest(opts.k1, opts.amountMsat)),
-  signature: opts.signature,
-  mintPubkey: opts.mintPubkey,
-  valid: opts.valid,
-  note: opts.note
-})
-
-const signature = {
-  version: VERSION,
-  spec: SPEC,
-  description:
-    'Offline verification of a note (LUD-25). A SERVICE signs (note id, amount) with a stable secp256k1 key it controls; this should be the funding node identity where compatible signing exists, or may be a dedicated persistent SERVICE key otherwise. A holder recovers the pubkey and compares it to the pinned current or previous mintPubkey without contacting the SERVICE.',
-  scheme: {
-    domainTag: DOMAIN_TAG,
-    lightningSignedMessagePrefix: LSM_PREFIX,
-    message: '"LNURLcash:" || amount_msat (decimal ASCII) || ":" || hex(sha256(k1))',
-    digest: 'sha256(sha256(prefix_utf8 || message_utf8))',
-    signature: '65 bytes, r || s || recovery_id, hex encoded',
-    pubkey: '33-byte compressed secp256k1 point, hex encoded',
-    verification:
-      'recover the pubkey from digest with NO further hashing (prehash must be off) and compare to mintPubkey. A verifier MUST also accept recovery_id || r || s, which some SERVICEs emit; trying both is safe because the wrong ordering recovers an unrelated key that cannot match.'
-  },
-  mintPubkey: MINT_PUB,
-  otherPubkey: OTHER_PUB,
-  cases: [
-    sigCase('valid, canonical trailing recovery id', {
-      k1: K1_A,
-      amountMsat: 21000,
-      signature: bytesToHex(signTrailing(MINT_PRIV, K1_A, 21000)),
-      mintPubkey: MINT_PUB,
-      valid: true,
-      note: 'the wire format LUD-25 specifies'
-    }),
-    sigCase('valid, leading recovery id (real-world interop)', {
-      k1: K1_A,
-      amountMsat: 21000,
-      signature: bytesToHex(signLeading(MINT_PRIV, K1_A, 21000)),
-      mintPubkey: MINT_PUB,
-      valid: true,
-      note: 'lnurl-mint once forwarded its node signmessage output unreordered; a verifier must tolerate this layout'
-    }),
-    sigCase('valid, zero amount', {
-      k1: K1_C,
-      amountMsat: 0,
-      signature: bytesToHex(signTrailing(MINT_PRIV, K1_C, 0)),
-      mintPubkey: MINT_PUB,
-      valid: true
-    }),
-    sigCase('valid, large amount', {
-      k1: K1_B,
-      amountMsat: 2100000000000,
-      signature: bytesToHex(signTrailing(MINT_PRIV, K1_B, 2100000000000)),
-      mintPubkey: MINT_PUB,
-      valid: true,
-      note: 'above 2^32 msat - implementations must not truncate the amount to 32 bits'
-    }),
-    sigCase('invalid: amount does not match what was signed', {
-      k1: K1_A,
-      amountMsat: 21001,
-      signature: bytesToHex(signTrailing(MINT_PRIV, K1_A, 21000)),
-      mintPubkey: MINT_PUB,
-      valid: false,
-      note: 'the whole point of signing the amount: a note cannot be inflated after issuance'
-    }),
-    sigCase('invalid: different k1 than was signed', {
-      k1: K1_B,
-      amountMsat: 21000,
-      signature: bytesToHex(signTrailing(MINT_PRIV, K1_A, 21000)),
-      mintPubkey: MINT_PUB,
-      valid: false
-    }),
-    sigCase('invalid: signed by a different key', {
-      k1: K1_A,
-      amountMsat: 21000,
-      signature: bytesToHex(signTrailing(OTHER_PRIV, K1_A, 21000)),
-      mintPubkey: MINT_PUB,
-      valid: false
-    }),
-    sigCase('invalid: signature is not hex', {
-      k1: K1_A,
-      amountMsat: 21000,
-      signature: 'not-hex-at-all',
-      mintPubkey: MINT_PUB,
-      valid: false,
-      note: 'must return false, never throw'
-    }),
-    sigCase('invalid: signature too short', {
-      k1: K1_A,
-      amountMsat: 21000,
-      signature: 'ab'.repeat(10),
-      mintPubkey: MINT_PUB,
-      valid: false
-    }),
-    sigCase('invalid: signature too long', {
-      k1: K1_A,
-      amountMsat: 21000,
-      signature: 'ab'.repeat(70),
-      mintPubkey: MINT_PUB,
-      valid: false
-    }),
-    sigCase('invalid: empty signature', {
-      k1: K1_A,
-      amountMsat: 21000,
-      signature: '',
-      mintPubkey: MINT_PUB,
-      valid: false
-    }),
-    {
-      name: 'invalid: k1 is not hex',
-      k1: 'zzzz',
-      noteId: null,
-      amountMsat: 21000,
-      message: null,
-      digest: null,
-      signature: bytesToHex(signTrailing(MINT_PRIV, K1_A, 21000)),
-      mintPubkey: MINT_PUB,
-      valid: false,
-      note: 'a malformed stored k1 must verify as false rather than crash the caller'
-    },
-    sigCase('invalid: mintPubkey is not a point', {
-      k1: K1_A,
-      amountMsat: 21000,
-      signature: bytesToHex(signTrailing(MINT_PRIV, K1_A, 21000)),
-      mintPubkey: 'ff'.repeat(33),
-      valid: false
-    })
-  ],
-  // Signing-key rotation. A SERVICE that rotates its signing key keeps
-  // publishing the old public keys, so the notes it already issued do not
-  // all stop verifying at once. These cases carry a LIST of acceptable
-  // keys rather than the single mintPubkey the cases above carry, and
-  // live in their own block for exactly that reason: a verifier that
-  // knows nothing about rotation reads `cases` and is unaffected.
-  rotation: {
-    description:
-      'A note signed under a key the SERVICE has since rotated away from. Valid means the signature recovers a key that appears anywhere in mintPubkeys - the current key first, then any previously published one. The same signature against a list that no longer names the old key is invalid, which is what makes the published list load-bearing rather than decorative: a SERVICE cannot retire a key and still have its old notes verify, and an attacker cannot have a key accepted by asserting it.',
-    currentPubkey: MINT_PUB,
-    previousPubkey: PREV_PUB,
-    cases: [
-      {
-        name: 'valid: signed under a previous key, both keys published',
-        k1: K1_A,
-        noteId: noteId(K1_A),
-        amountMsat: 21000,
-        message: sigMessage(K1_A, 21000),
-        digest: bytesToHex(sigDigest(K1_A, 21000)),
-        signature: bytesToHex(signTrailing(PREV_PRIV, K1_A, 21000)),
-        mintPubkeys: [MINT_PUB, PREV_PUB],
-        valid: true,
-        note: 'the note was issued before the rotation; grading it as forged would punish a SERVICE for rotating properly'
-      },
-      {
-        name: 'invalid: the same signature with only the current key published',
-        k1: K1_A,
-        noteId: noteId(K1_A),
-        amountMsat: 21000,
-        message: sigMessage(K1_A, 21000),
-        digest: bytesToHex(sigDigest(K1_A, 21000)),
-        signature: bytesToHex(signTrailing(PREV_PRIV, K1_A, 21000)),
-        mintPubkeys: [MINT_PUB],
-        valid: false,
-        note: 'byte for byte the signature above - only the published list changed, and that alone decides it'
-      },
-      {
-        name: 'valid: signed under the current key while a previous one is published',
-        k1: K1_B,
-        noteId: noteId(K1_B),
-        amountMsat: 21000,
-        message: sigMessage(K1_B, 21000),
-        digest: bytesToHex(sigDigest(K1_B, 21000)),
-        signature: bytesToHex(signTrailing(MINT_PRIV, K1_B, 21000)),
-        mintPubkeys: [MINT_PUB, PREV_PUB],
-        valid: true,
-        note: 'a longer list must not stop the current key from verifying'
-      },
-      {
-        name: 'invalid: signed under a key that was never published',
-        k1: K1_A,
-        noteId: noteId(K1_A),
-        amountMsat: 21000,
-        message: sigMessage(K1_A, 21000),
-        digest: bytesToHex(sigDigest(K1_A, 21000)),
-        signature: bytesToHex(signTrailing(OTHER_PRIV, K1_A, 21000)),
-        mintPubkeys: [MINT_PUB, PREV_PUB],
-        valid: false,
-        note: 'accepting a list must not become accepting anything'
-      }
-    ]
-  }
-}
-
-// ---- vectors: derivation (deterministic note secrets) --------------------
-
-// A note's k1 is WALLET-generated: LUD-25 says nothing about how, so a
-// wallet is free to derive it. Deriving it from a seed is what makes a
-// wallet restorable from words alone, and makes two implementations of the
-// same wallet agree on the same notes. The scheme is HMAC-SHA256 twice: a
-// domain-separated root over the seed bytes, then one secret per
-// "host:index". Nothing here goes on the wire; the mint only ever sees
-// sha256(k1), exactly as before.
-
-const DERIVE_ROOT_KEY = 'lnurlcash-note-v1'
-
-const deriveRoot = seed => hmac(sha256, utf8ToBytes(DERIVE_ROOT_KEY), seed)
-
-const deriveSecret = (root, host, index) =>
-  bytesToHex(hmac(sha256, root, utf8ToBytes(`${host}:${index}`)))
-
 // The two standard BIP39 test mnemonics, so a reader can sanity-check the
-// seed half of the vector against any BIP39 implementation before trusting
+// seed half of a vector against any BIP39 implementation before trusting
 // the derivation half.
 const MNEMONIC_A =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
@@ -316,47 +57,6 @@ const MNEMONIC_B =
   'legal winner thank year wave sausage worth useful legal winner thank yellow'
 
 const seedOf = mnemonic => mnemonicToSeedSync(mnemonic)
-
-const derivationCase = (name, mnemonic, host, index) => {
-  const seed = seedOf(mnemonic)
-  const k1 = deriveSecret(deriveRoot(seed), host, index)
-  return {
-    name,
-    mnemonic,
-    seedHex: bytesToHex(seed),
-    host,
-    index,
-    k1,
-    noteId: noteId(k1)
-  }
-}
-
-const derivation = {
-  version: VERSION,
-  spec: SPEC,
-  description:
-    'Deterministic note secrets from a BIP39 seed. k1 is WALLET-generated in LUD-25, so a wallet may derive it rather than draw it at random; deriving it is what lets a wallet be restored from words alone and lets two implementations of the same wallet agree on the same notes. Both steps are HMAC-SHA256: root = HMAC-SHA256(key = utf8("lnurlcash-note-v1"), msg = seed bytes), then k1 = HMAC-SHA256(key = root, msg = utf8(host + ":" + index)), 32 bytes, lowercase hex. host is the mint host exactly as the wallet stores it, lowercase, with the port when there is one; index is decimal ASCII counting from 0. seedHex is the 64-byte BIP39 seed with no passphrase, included so an implementation with no BIP39 library can still test the derivation. The mint sees only sha256(k1) as before, so nothing about this is observable on the wire.',
-  scheme: {
-    rootKey: DERIVE_ROOT_KEY,
-    rootMsg: 'seed bytes',
-    secretMsg: 'host:index'
-  },
-  cases: [
-    derivationCase('standard mnemonic, index 0', MNEMONIC_A, 'mint.example', 0),
-    derivationCase('standard mnemonic, index 1', MNEMONIC_A, 'mint.example', 1),
-    derivationCase('standard mnemonic, index 2', MNEMONIC_A, 'mint.example', 2),
-    derivationCase('standard mnemonic, index 19', MNEMONIC_A, 'mint.example', 19),
-    derivationCase(
-      'standard mnemonic, index 20 (one past a 20-index gap limit)',
-      MNEMONIC_A,
-      'mint.example',
-      20
-    ),
-    derivationCase('a second mnemonic, same host and index', MNEMONIC_B, 'mint.example', 0),
-    derivationCase('a host carrying a port', MNEMONIC_A, '127.0.0.1:8899', 0)
-  ]
-}
-
 
 // ---- vectors: cash derivation (LUD-25's own m/139' scheme) ----------------
 
@@ -488,8 +188,8 @@ const cashDerivation = {
 // spends the note with `ck1`, Q followed by a BIP-340 signature over the
 // key-path sighash of the canonical spend transaction for the mint's domain
 // (see "the canonical spend transaction" below). The mint certifies each
-// note with `cs1`, a 65-byte recoverable ECDSA signature over
-// "LNURLcash:<amount_msat>:<hex(Q)>". A watch-only `cx1` (the branch's
+// note with `cs1`, a recoverable ECDSA signature over
+// "LNURLcash:<domain>:<amount_msat>:<hex(Q)>:<t>" followed by u32 t, 69 bytes. A watch-only `cx1` (the branch's
 // x-only key and chain code) lets a mint derive every pk on a branch and so
 // mint straight to a holder's next key. The file is still called part2.json
 // because the draft once called this half of LUD-25 "Part 2".
@@ -608,8 +308,9 @@ const bearerNoteOf = preimage => {
   return {preimage, h, leaf, leafHash, t, Q, parity, controlBlock: concat(Uint8Array.of(TAPLEAF_VERSION | parity), NUMS_H)}
 }
 
-// The domain a spend is bound to: the host's lowercase name, never its port.
-const spendDomainOf = host => new URL(`http://${host}`).hostname.toLowerCase()
+// The domain a spend is bound to: the host lowercased, in A-label form,
+// without port, userinfo or trailing dot (luds fd80cdd).
+const spendDomainOf = host => new URL(`http://${host}`).hostname.toLowerCase().replace(/\.$/, '')
 
 const prevoutTxidOf = domain => taggedHash('LNURLcash/mint', utf8ToBytes(domain))
 const p2trOf = Q => concat(Uint8Array.of(0x51, 0x20), Q)
@@ -892,7 +593,7 @@ const legacyBranch = (mnemonic, host) => {
 // selfcheck compares every value with a typed copy of the luds files
 // (tools/luds/), so a spec edit and a generator bug can never silently agree.
 
-const LUDS_COMMIT = '92e430f'
+const LUDS_COMMIT = 'fd80cdd'
 
 const keyPathSpendVectorOf = (secretKey, domain) => {
   const Q = schnorr.getPublicKey(secretKey)
@@ -921,19 +622,170 @@ const keyPathSpendVectorOf = (secretKey, domain) => {
 const SPEC_MINT_SEED_LABEL = 'LUD-25 test vector mint node'
 const SPEC_MINT_KEY = sha256(utf8ToBytes(SPEC_MINT_SEED_LABEL))
 
-// LUD-25's certificate, bound to the SERVICE's domain since luds 92abbb3.
-const certificateMessageOf = (domain, amountMsat, qHex) => `LNURLcash:${domain}:${amountMsat}:${qHex}`
+// LUD-25's certificate, bound to the SERVICE's domain since luds 92abbb3 and
+// to the time of signing since luds fd80cdd: the payload is the 65-byte
+// signature followed by u32 t, big-endian, and t is in the message too.
+const CERT_T = 1800000000
+const certificateMessageOf = (domain, amountMsat, qHex, t = CERT_T) => `LNURLcash:${domain}:${amountMsat}:${qHex}:${t}`
+const cs1Of = (amountMsat, signature, t = CERT_T) => bech32mOf(`cs${amountSuffix(amountMsat)}`, concat(signature, u32be(t)))
 
-const specCertificate = (domain, qHex, amountMsat) => {
-  const message = certificateMessageOf(domain, amountMsat, qHex)
+const specCertificate = (domain, qHex, amountMsat, t = CERT_T) => {
+  const message = certificateMessageOf(domain, amountMsat, qHex, t)
   const digest = lightningSignedDigest(message)
   const signature = signRecoverable(SPEC_MINT_KEY, digest)
   return {
     amount_msat: amountMsat,
+    t,
     message,
     digest: bytesToHex(digest),
     signature: bytesToHex(signature),
-    cs1: bech32mOf(`cs${amountSuffix(amountMsat)}`, signature)
+    cs1: cs1Of(amountMsat, signature, t)
+  }
+}
+
+// ---- 25-vectors.json's timelock_note, domains, fees and transcripts (luds fd80cdd)
+
+// A minimal CScriptNum push, for the CLTV leaf.
+const scriptNumOf = n => {
+  const out = []
+  for (let v = n; v > 0; v = Math.floor(v / 256)) out.push(v % 256)
+  if (out[out.length - 1] & 0x80) out.push(0)
+  return Uint8Array.from(out)
+}
+
+// <T> OP_CHECKLOCKTIMEVERIFY OP_DROP <pk> OP_CHECKSIG under NUMS, T a Unix time.
+const LUD25_LOCK_T = 1800000000
+const lud25TimelockNote = domain => {
+  const sk = sha256(utf8ToBytes('LUD-25 test vector timelock key'))
+  const pk = schnorr.getPublicKey(sk)
+  const T = scriptNumOf(LUD25_LOCK_T)
+  const leaf = concat(Uint8Array.of(T.length), T, Uint8Array.of(0xb1, 0x75, 0x20), pk, Uint8Array.of(0xac))
+  const {Q, parity} = taprootOutput(NUMS_H, tapLeafHash(leaf))
+  const controlBlock = concat(Uint8Array.of(TAPLEAF_VERSION | parity), NUMS_H)
+  const spendAt = (locktime, expect) => {
+    const sequence = 0xfffffffe
+    const sighash = tapSighashOf(sigMsgOf({Q, domain, locktime, sequence, leaf}))
+    const sig = schnorr.sign(sighash, sk, SCHNORR_AUX)
+    return {locktime, sequence, sighash: bytesToHex(sighash), cw1: cw1Of({locktime, sequence, script: leaf, controlBlock, witness: [sig]}), expect}
+  }
+  return {
+    description: `Leaf <T> OP_CHECKLOCKTIMEVERIFY OP_DROP <pk> OP_CHECKSIG under BIP-341's NUMS key, T = ${LUD25_LOCK_T}, signed with an all-zero aux_rand. expect maps the SERVICE's clock to its verdict: the first spend claims T, the second a time before it, which the script refuses.`,
+    T: LUD25_LOCK_T,
+    sk: bytesToHex(sk),
+    leaf: bytesToHex(leaf),
+    Q: bytesToHex(Q),
+    control_block: bytesToHex(controlBlock),
+    cp1: bech32mOf('cp', Q),
+    domain,
+    spends: [
+      spendAt(LUD25_LOCK_T, {[LUD25_LOCK_T - 1]: 'refused', [LUD25_LOCK_T]: 'accepted'}),
+      spendAt(LUD25_LOCK_T - 1, {[LUD25_LOCK_T - 1]: 'refused', [LUD25_LOCK_T]: 'refused'})
+    ]
+  }
+}
+
+// withdrawLink -> domain: LUD-17's lnurlw:// and a bech32 LNURL resolve
+// first; then the host, lowercased, A-label, without port, userinfo or
+// trailing dot.
+const domainOfWithdrawLink = link => {
+  let url = link
+  if (/^lnurl1/i.test(url)) url = new TextDecoder().decode(bech32.fromWords(bech32.decode(url.toLowerCase(), 2000).words))
+  return spendDomainOf(new URL(url.replace(/^lnurlw:\/\//i, 'https://')).host)
+}
+const LUD25_ONION = 'mintmintmintmintmintmintmintmintmintmintmintmintmint4ad'
+const lud25DomainCases = () =>
+  Object.fromEntries(
+    [
+      ['https://Mint.Example.:443/w', 'mint.example'],
+      ['https://mint.example:8443/w', 'mint.example'],
+      ['https://user:pass@mint.example/w', 'mint.example'],
+      ['lnurlw://mint.example/w', 'mint.example'],
+      [bech32.encode('lnurl', bech32.toWords(utf8ToBytes('https://mint.example/w')), 2000).toUpperCase(), 'mint.example'],
+      ['https://Bücher.example/w', 'xn--bcher-kva.example'],
+      [`http://${LUD25_ONION.toUpperCase()}.onion/w`, `${LUD25_ONION}.onion`]
+    ].map(([link, domain]) => {
+      if (domainOfWithdrawLink(link) !== domain) throw new Error(`domain of ${link}`)
+      return [link, domain]
+    })
+  )
+
+// Mint fees: the credit is amount - base - floor(amount * ppm / 1e6),
+// rounded down to whole satoshis; base is a multiple of 1000.
+const creditOf = (amountMsat, baseFeeMsat, feePpm) => {
+  const net = BigInt(amountMsat) - BigInt(baseFeeMsat) - (BigInt(amountMsat) * BigInt(feePpm)) / 1_000_000n
+  return net <= 0n ? 0 : Number((net / 1000n) * 1000n)
+}
+const lud25Fees = () => ({
+  description: "Mint fees parsing (null: the fee is unknown), the credit at minting, and a split's and a merge's outputs (error true: any reason).",
+  parse: [
+    ['a mint', {base_fee_msat: 0, fee_ppm: 0}],
+    ['a mint. Mint fees: 1000,2000 and more', {base_fee_msat: 1000, fee_ppm: 2000}],
+    ['Mint fees: 1000,10,21000', {base_fee_msat: 1000, fee_ppm: 10}],
+    ['Mint fees: 1000 , 2000', null],
+    ['Mint fees: 1k,2000', null]
+  ].map(([text_plain, expect]) => ({text_plain, expect})),
+  mint: [
+    [100_500, 0, 0],
+    [100_000, 1000, 2000],
+    [21_000_999, 1000, 10],
+    [2_100_000_000_000_000, 0, 999_999]
+  ].map(([amount_msat, base_fee_msat, fee_ppm]) => ({amount_msat, base_fee_msat, fee_ppm, credited_msat: creditOf(amount_msat, base_fee_msat, fee_ppm)})),
+  split: [
+    {value_in_msat: 10_000_000, amount_msat: 4_000_000, base_fee_msat: 1000, p1_msat: 4_000_000, p2_msat: 5_999_000},
+    {value_in_msat: 10_000_000, amount_msat: 4_000_500, base_fee_msat: 1000, error: true},
+    {value_in_msat: 10_000_000, amount_msat: 9_999_000, base_fee_msat: 1000, error: 'insufficient value'}
+  ],
+  merge: [{values_in_msat: [1_000_000, 2_000_000, 3_000_000], base_fee_msat: 1000, value_out_msat: 6_002_000}]
+})
+
+// A session at one SERVICE, request by request; luds publishes it.
+const lud25Transcripts = (domain, A, bearer) => {
+  const MINT_PUBKEY = bytesToHex(secp256k1.getPublicKey(SPEC_MINT_KEY, true))
+  const keyNote = label => {
+    const sk = sha256(utf8ToBytes(`LUD-25 transcript note ${label}`))
+    const {Q, ck1} = keyPathSpendOf(sk, domain)
+    return {Q: bytesToHex(Q), cp1: bech32mOf('cp', Q), ck1}
+  }
+  const [B, C, D, U] = ['B', 'C', 'D', 'unknown'].map(keyNote)
+  const preimage = bytesToHex(bearer.preimage)
+  const bearerQ = bytesToHex(bearer.Q)
+  const payLink = `https://${domain}/.well-known/lnurlp/mint`
+  const W = `https://${domain}/w`
+  const CB_ = `https://${domain}/w/cb`
+  const cs = (Q, value) => specCertificate(domain, Q, value).cs1
+  const withdrawInfoOf = (value, k1, Q) => ({
+    tag: 'withdrawRequest',
+    callback: CB_,
+    ...(k1 ? {k1} : {}),
+    defaultDescription: '',
+    minWithdrawable: value,
+    maxWithdrawable: value,
+    payLink,
+    mintPubkey: MINT_PUBKEY,
+    ...(value ? {c: cs(Q, value)} : {})
+  })
+  const ok = (c, c2) => ({status: 'OK', ...(c ? {c} : {}), ...(c2 ? {c2} : {})})
+  const melted = {status: 'OK', verify: '<verify>'}
+  return {
+    description: `In order, at a SERVICE on ${domain} with Mint fees: 1000,0, whose bearer note holds 10000000 msat. Certificates are by the certificates key at t = ${CERT_T}; <pr> is any BOLT-11 invoice for the note's value, <verify> the unguessable verify URL its melt returns and <preimage> the preimage of <pr>; an event step marks something that happens outside the requests. Key-path notes are A (key_path_spend's) and B, C, D, unknown, each with sk sha256("LUD-25 transcript note <name>").`,
+    steps: [
+      {request: `GET ${payLink}`, response: {tag: 'payRequest', callback: `https://${domain}/lnurlp/mint/cb`, minSendable: 2000, maxSendable: 100000000000, metadata: '[["text/plain","Mint fees: 1000,0"]]', withdrawLink: W, commentAllowed: 64, mintPubkey: MINT_PUBKEY}},
+      {request: `GET ${W}?k1=${preimage}`, response: withdrawInfoOf(10_000_000, preimage, bearerQ)},
+      {request: `GET ${W}?p=${U.cp1}`, response: {status: 'ERROR', reason: 'unknown note'}},
+      {request: `GET ${CB_}?k1=${preimage}&p1=${A.cp1}`, response: ok(cs(A.Q, 10_000_000))},
+      {request: `GET ${CB_}?k1=${preimage}&p1=${A.cp1}`, response: ok(cs(A.Q, 10_000_000))},
+      {request: `GET ${CB_}?k1=${A.ck1}&amount=4000000&p1=${B.cp1}&p2=${C.cp1}`, response: ok(cs(B.Q, 4_000_000), cs(C.Q, 5_999_000))},
+      {request: `GET ${CB_}?k1=${B.ck1}&k1=${C.ck1}&p1=${D.cp1}`, response: ok(cs(D.Q, 10_000_000))},
+      {request: `GET ${CB_}?k1=${D.ck1}&pr=<pr>`, response: melted},
+      {request: `GET ${W}?k1=${D.ck1}`, response: withdrawInfoOf(0, D.ck1, D.Q)},
+      {request: `GET ${CB_}?k1=${D.ck1}&p1=${U.cp1}`, response: {status: 'ERROR', reason: 'pending'}},
+      {request: 'GET <verify>', response: {status: 'OK', settled: false, preimage: null, pr: '<pr>'}},
+      {event: 'the payment settles'},
+      {request: 'GET <verify>', response: {status: 'OK', settled: true, preimage: '<preimage>', pr: '<pr>'}},
+      {request: `GET ${CB_}?k1=${D.ck1}&pr=<pr>`, response: melted},
+      {request: `GET ${W}?k1=${D.ck1}`, response: withdrawInfoOf(0, D.ck1, D.Q)},
+      {request: `GET ${CB_}?k1=${D.ck1}&p1=${U.cp1}`, response: {status: 'ERROR', reason: 'already in use'}}
+    ]
   }
 }
 
@@ -952,7 +804,7 @@ const lud25Vectors = () => {
       ...spend
     },
     certificates: {
-      description: 'cs1 certificates from an arbitrary SERVICE key, signed for domain mint.example. Signatures are r || s || recovery-id.',
+      description: `cs1 certificates from an arbitrary SERVICE key, signed for domain mint.example at t = ${CERT_T}. Signatures are r || s || recovery-id; the cs1 payload appends u32 t, big-endian.`,
       service_sk: bytesToHex(SPEC_MINT_KEY),
       mintPubkey: bytesToHex(secp256k1.getPublicKey(SPEC_MINT_KEY, true)),
       Q: spend.Q,
@@ -973,7 +825,11 @@ const lud25Vectors = () => {
       cw1: cw1Of({script: note.leaf, controlBlock: note.controlBlock, witness: [note.preimage]}),
       certificate: bearerCertificate,
       note_url: `lnurlw://${domain}/w?k1=${bytesToHex(note.preimage)}&c=${bearerCertificate.cs1}`
-    }
+    },
+    timelock_note: lud25TimelockNote(domain),
+    domains: {description: 'withdrawLink to domain.', cases: lud25DomainCases()},
+    fees: lud25Fees(),
+    transcripts: lud25Transcripts(domain, spend, note)
   }
 }
 
@@ -991,9 +847,52 @@ const lud26Note = (root, below, i) => {
   }
 }
 
+// BIP-380 descriptor checksum, and BIP-32 extended keys of depth 0 for the
+// descriptors 26-vectors.json carries (luds fd80cdd).
+const DESCRIPTOR_INPUT = "0123456789()[],'/*abcdefgh@:$%{}IJKLMNOPQRSTUVWXYZ&+-.;<=>?!^_|~ijklmnopqrstuvwxyzABCDEFGH`#\"\\ "
+const DESCRIPTOR_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+const DESCRIPTOR_GENERATOR = [0xf5dee51989n, 0xa9fdca3312n, 0x1bab10e32dn, 0x3706b1677an, 0x644d626ffdn]
+const descriptorPolymod = (c, value) => {
+  const c0 = c >> 35n
+  c = ((c & 0x7ffffffffn) << 5n) ^ BigInt(value)
+  for (let i = 0; i < 5; i++) if ((c0 >> BigInt(i)) & 1n) c ^= DESCRIPTOR_GENERATOR[i]
+  return c
+}
+const withDescriptorChecksum = descriptor => {
+  let c = 1n
+  let classes = 0
+  let count = 0
+  for (const ch of descriptor) {
+    const pos = DESCRIPTOR_INPUT.indexOf(ch)
+    if (pos < 0) throw new Error(`not a descriptor character: ${ch}`)
+    c = descriptorPolymod(c, pos & 31)
+    classes = classes * 3 + (pos >> 5)
+    if (++count === 3) {
+      c = descriptorPolymod(c, classes)
+      classes = 0
+      count = 0
+    }
+  }
+  if (count > 0) c = descriptorPolymod(c, classes)
+  for (let i = 0; i < 8; i++) c = descriptorPolymod(c, 0)
+  c ^= 1n
+  let checksum = ''
+  for (let j = 0; j < 8; j++) checksum += DESCRIPTOR_CHARSET[Number((c >> BigInt(5 * (7 - j))) & 31n)]
+  return `${descriptor}#${checksum}`
+}
+if (withDescriptorChecksum('raw(deadbeef)') !== 'raw(deadbeef)#89f8spxm') throw new Error('BIP-380 checksum')
+const base58check = createBase58check(sha256)
+// depth, parent fingerprint and child number all 0, as LUD-26 serializes a cx1
+const xpubOf = (chainCode, publicKey) => base58check.encode(concat(hexToBytes('0488b21e'), new Uint8Array(9), chainCode, publicKey))
+const xprvOf = node => base58check.encode(concat(hexToBytes('0488ade4'), new Uint8Array(9), node.chainCode, Uint8Array.of(0), node.privateKey))
+const descriptorStep = i => (i >= HARDENED ? `${i - HARDENED}h` : `${i}`)
+
 const lud26Account = (root, account, {wallet, change, shares}) => {
   const chain = (c, indices) => ({
     path: `${pathOf(root, [account + HARDENED, c])}/i`,
+    descriptor: withDescriptorChecksum(
+      `rawtr(${xprvOf(root.master)}/${[139 + HARDENED, ...root.domainIndices, account + HARDENED, c].map(descriptorStep).join('/')}/*)`
+    ),
     notes: indices.map(i => lud26Note(root, [account + HARDENED, c], i))
   })
   return {
@@ -1010,6 +909,7 @@ const lud26Account = (root, account, {wallet, change, shares}) => {
         P: bytesToHex(pointOf(node.privateKey).toBytes(true)),
         chaincode: bytesToHex(node.chainCode),
         cx1: cx1Of(node),
+        descriptor: withDescriptorChecksum(`rawtr(${xpubOf(node.chainCode, pointOf(node.privateKey).toBytes(true))}/*)`),
         notes: indices.map(i => lud26Note(root, below, i))
       }
     })
@@ -1022,7 +922,7 @@ const BIP32_SEED_2 = hexToBytes(
 )
 
 const lud26Derivation = (seed, host, accounts) => {
-  const root = serviceRootOf(seed, host)
+  const root = {...serviceRootOf(seed, host), master: masterOf(seed)}
   return {
     seed: bytesToHex(seed),
     domain: root.domain,
@@ -1064,7 +964,7 @@ const lud26Vectors = () => {
   }
 
   return {
-    description: `LUD-26's own test vectors (lnurl/luds ${LUDS_COMMIT}, 26-vectors.json), rebuilt from the primitives in the same shape. S = m/139'/d1/d2/d3/d4; wallet notes S/a'/0/i, change S/a'/1/i, share n S/a'/2/n' exported as cx1 = bech32m(chaincode || P compressed), its notes S/a'/2/n'/i. Q = x(pk).`,
+    description: `LUD-26's own test vectors (lnurl/luds ${LUDS_COMMIT}, 26-vectors.json), rebuilt from the primitives in the same shape. S = m/139'/d1/d2/d3/d4; wallet notes S/a'/0/i, change S/a'/1/i, share n S/a'/2/n' exported as cx1 = bech32m(chaincode || P compressed), its notes S/a'/2/n'/i. Q = x(pk). Each chain and share carries its BIP-386 descriptor.`,
     derivation,
     key_path_spend: {
       description: "A ck1 for derivation[0]'s wallet note 0, whose pk has odd y: the BIP-340 signer negates sk before signing.",
@@ -1135,17 +1035,19 @@ const part2Branches = [MNEMONIC_A, MNEMONIC_B].flatMap(m => PART2_HOSTS.map(h =>
 
 const PART2_MINT_KEY = hexToBytes('da6ec5c4342514114ee493a55ddc06d085d61eb78f0b7163e07cdb7f1f66ac05')
 
-const part2Certificate = (domain, notePubkey, amountMsat, message = certificateMessageOf(domain, amountMsat, notePubkey)) => {
+const part2Certificate = (domain, notePubkey, amountMsat, t = CERT_T) => {
+  const message = certificateMessageOf(domain, amountMsat, notePubkey, t)
   const digest = lightningSignedDigest(message)
   const signature = signRecoverable(PART2_MINT_KEY, digest)
   return {
     domain,
     notePubkey,
     amountMsat,
+    t,
     message,
     digest: bytesToHex(digest),
     signature: bytesToHex(signature),
-    cs1: bech32mOf(`cs${amountSuffix(amountMsat)}`, signature)
+    cs1: cs1Of(amountMsat, signature, t)
   }
 }
 
@@ -1164,15 +1066,17 @@ const part2Certificates = [
   part2Certificate(firstBranch.domain, firstWallet[2].notePubkey, 99999),
   part2Certificate(firstBranch.domain, firstWallet[3].notePubkey, 100000000),
   // the same note and amount at another domain: a different certificate
-  part2Certificate('moneyer.dev', firstWallet[0].notePubkey, 1000)
+  part2Certificate('moneyer.dev', firstWallet[0].notePubkey, 1000),
+  // the same note, amount and domain a second later: a different certificate
+  part2Certificate(firstBranch.domain, firstWallet[0].notePubkey, 1000, CERT_T + 1)
 ]
 
-// Before luds 92abbb3 the message named no domain. Still issued on notes
-// people hold, so a wallet still reads them, reported as legacy.
-const part2LegacyCertificates = [
-  part2Certificate(null, firstWallet[0].notePubkey, 1000, `LNURLcash:1000:${firstWallet[0].notePubkey}`),
-  part2Certificate(null, firstWallet[1].notePubkey, 21000, `LNURLcash:21000:${firstWallet[1].notePubkey}`)
-].map(({domain, ...rest}) => ({superseded: true, ...rest}))
+// A certificate as every mint signed one before luds fd80cdd: 65 bytes, no
+// t. A clean break: a current WALLET refuses it.
+const preTimeCertificate = (() => {
+  const message = `LNURLcash:${firstBranch.domain}:1000:${firstWallet[0].notePubkey}`
+  return bech32mOf(`cs${amountSuffix(1000)}`, signRecoverable(PART2_MINT_KEY, lightningSignedDigest(message)))
+})()
 
 const addressProof = ({action, username, domain = firstBranch.domain, cx1 = null, signer, role}) => {
   const message = addressProofMessageOf(action, domain, username, cx1)
@@ -1205,18 +1109,18 @@ const legacyCx1Bytes = hexToBytes(legacyBranch(MNEMONIC_A, 'mint.example').branc
 const part2 = {
   version: VERSION,
   spec: SPEC,
-  description: `LUD-26 key-path notes (lnurl/luds ${LUDS_COMMIT}). Every branch is a BIP39 seed (no passphrase) at one host. domain is the host's lowercase name without its port; cashHashingKey is the private key at m/139'/0, domainIndices the four raw uint32 read big-endian from HMAC-SHA256(cashHashingKey, utf8(domain)), used as BIP-32 indices exactly as they fall, and serviceRoot S = m/139'/d1/d2/d3/d4 as privateKey||chainCode hex. Below S everything is plain BIP-32: account a's wallet notes at S/a'/0/i, its change at S/a'/1/i, and share n at S/a'/2/n', exported as cx1 = bech32m("cx", chainCode || P compressed), 65 bytes; share notes S/a'/2/n'/i equal CKDpub from the cx1 alone. A note's noteSecretKey is the BIP-32 private key at its path, notePubkeyCompressed its point, and notePubkey = Q = x(point), with no BIP-86 tweak. sighash is the BIP-341 key-path sighash of input 0 of the canonical spend transaction for domain, keyPathSignature BIP-340 with an all-zero aux_rand (the signer negates the key for an odd-y point), ck1 = bech32m("ck", Q || signature). certificates are recoverable ECDSA by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<domain>:<amount_msat>:<hex(Q)>")), HRP "cs" plus the BOLT-11 amount; legacyCertificates are the superseded message without the domain, which a wallet still reads. addressProofs are BIP-340 (all-zero aux_rand) by the share's own key over sha256 of "LNURLcash:register:<domain>:<username>:<cx1>", "LNURLcash:update:<domain>:<username>:<new cx1>" (by the key on file) or "LNURLcash:unregister:<domain>:<username>", the username lowercased; a PUT carries an update sig and a register newsig by the new share. legacy records the superseded tweak schemes, for sweeping only.`,
+  description: `LUD-26 key-path notes (lnurl/luds ${LUDS_COMMIT}). Every branch is a BIP39 seed (no passphrase) at one host. domain is the host's lowercase name without its port; cashHashingKey is the private key at m/139'/0, domainIndices the four raw uint32 read big-endian from HMAC-SHA256(cashHashingKey, utf8(domain)), used as BIP-32 indices exactly as they fall, and serviceRoot S = m/139'/d1/d2/d3/d4 as privateKey||chainCode hex. Below S everything is plain BIP-32: account a's wallet notes at S/a'/0/i, its change at S/a'/1/i, and share n at S/a'/2/n', exported as cx1 = bech32m("cx", chainCode || P compressed), 65 bytes; share notes S/a'/2/n'/i equal CKDpub from the cx1 alone. A note's noteSecretKey is the BIP-32 private key at its path, notePubkeyCompressed its point, and notePubkey = Q = x(point), with no BIP-86 tweak. sighash is the BIP-341 key-path sighash of input 0 of the canonical spend transaction for domain, keyPathSignature BIP-340 with an all-zero aux_rand (the signer negates the key for an odd-y point), ck1 = bech32m("ck", Q || signature). certificates are recoverable ECDSA by the mint key over sha256(sha256("Lightning Signed Message:" || "LNURLcash:<domain>:<amount_msat>:<hex(Q)>:<t>")), the cs1 payload r || s || recovery-id || u32 t (69 bytes), HRP "cs" plus the BOLT-11 amount. addressProofs are BIP-340 (all-zero aux_rand) by the share's own key over sha256 of "LNURLcash:register:<domain>:<username>:<cx1>", "LNURLcash:update:<domain>:<username>:<new cx1>" (by the key on file) or "LNURLcash:unregister:<domain>:<username>", the username lowercased; a PUT carries an update sig and a register newsig by the new share. legacy records the superseded tweak schemes, for sweeping only.`,
   conventions: {
     serviceRoot: "m/139'/d1/d2/d3/d4",
     hashingKey: "m/139'/0",
-    domainHashed: "the host's lowercase name without its port, the string the canonical spend transaction commits to",
+    domainHashed: "the host lowercased, in A-label form, without port, userinfo or trailing dot: the string the canonical spend transaction commits to",
     walletChain: "S/a'/0/i",
     changeChain: "S/a'/1/i",
     share: "S/a'/2/n'",
     shareNote: "S/a'/2/n'/i",
     noteIndex: 'non-hardened, 0 to 2^31 - 1',
     cx1Payload: 'chainCode (32) || P (33, compressed), BIP-32 order, 113 characters',
-    spendDomain: "the host's lowercase name, never its scheme or port",
+    spendDomain: "the host of withdrawLink, lowercased, in A-label form, without port, userinfo or trailing dot",
     canonicalSpendTransaction: 'nVersion 2; vin[0] prevout (tagged_hash("LNURLcash/mint", domain), 0), empty scriptSig, nSequence 0xffffffff; vout[0] value 0, empty scriptPubKey; nLockTime 0; spent output (OP_1 <Q>, 0)',
     ck1Signs: 'tagged_hash("TapSighash", 0x00 || SigMsg), the BIP-341 key-path sighash (SIGHASH_DEFAULT, spend_type 0x00) of input 0 of the canonical spend transaction for the domain',
     keyPathSignature: 'BIP-340 Schnorr, 64 bytes, all-zero aux_rand, so a ck1 is a deterministic function of the key and the domain',
@@ -1228,9 +1132,9 @@ const part2 = {
     },
     addressProofSigner: "the share's own key p at S/a'/2/n', verified against x(P) of the cx1 being registered, or of the one on file",
     addressProofEncoding: 'UTF-8, username lowercased, sha256-hashed to 32 bytes, BIP-340 with an all-zero aux_rand',
-    certificateMessage: 'LNURLcash:<domain>:<amount_msat>:<hex(Q)>',
+    certificateMessage: 'LNURLcash:<domain>:<amount_msat>:<hex(Q)>:<t>',
     certificateHrp: 'cs || BOLT11_amount_suffix(amount_msat)',
-    cs1Payload: 'r || s || recovery-id, 65 bytes, recovery-id 0 to 3'
+    cs1Payload: 'r || s || recovery-id || u32 t (big-endian), 69 bytes, recovery-id 0 to 3, t the Unix time of signing in seconds'
   },
   mint: {
     privateKey: bytesToHex(PART2_MINT_KEY),
@@ -1238,7 +1142,6 @@ const part2 = {
   },
   branches: part2Branches,
   certificates: part2Certificates,
-  legacyCertificates: part2LegacyCertificates,
   addressProofs: part2AddressProofs,
   legacy: {
     superseded: true,
@@ -1259,13 +1162,15 @@ const part2 = {
     {type: 'ck1', value: sampleCp1, why: 'a cp1 is not a ck1'},
     {type: 'ck1', value: bech32mOf('ck', hexToBytes(firstWallet[0].keyPathSignature)), why: '64-byte signature without the 32-byte public key'},
     {type: 'cs1', value: firstWallet[0].ck1, why: 'a ck1 is not a cs1'},
-    {type: 'cs1', value: bech32mOf('cs', hexToBytes(part2Certificates[0].signature)), why: 'legacy fixed cs HRP carries no amount'},
+    {type: 'cs1', value: bech32mOf('cs', concat(hexToBytes(part2Certificates[0].signature), u32be(CERT_T))), why: 'legacy fixed cs HRP carries no amount'},
     {
       type: 'cs1',
-      value: bech32mOf('cs10n', concat(hexToBytes(part2Certificates[0].signature).slice(0, 64), Uint8Array.of(4))),
+      value: bech32mOf('cs10n', concat(hexToBytes(part2Certificates[0].signature).slice(0, 64), Uint8Array.of(4), u32be(CERT_T))),
       why: 'a recovery-id above 3'
     },
-    {type: 'cs1', value: bech32mOf('cs10n', hexToBytes(part2Certificates[0].signature).slice(0, 64)), why: '64 bytes, not 65'},
+    {type: 'cs1', value: preTimeCertificate, why: '65 bytes: a certificate from before t (luds fd80cdd), which a current wallet refuses'},
+    {type: 'cs1', value: bech32mOf('cs10n', concat(hexToBytes(part2Certificates[0].signature).slice(0, 64), u32be(CERT_T))), why: '68 bytes: no recovery-id'},
+    {type: 'cs1', value: bech32mOf('cs10n', concat(hexToBytes(part2Certificates[0].signature), u32be(CERT_T), Uint8Array.of(0))), why: '70 bytes, not 69'},
     {type: 'cx1', value: bech32mOf('cx', concat(legacyCx1Bytes, hexToBytes(legacyBranch(MNEMONIC_A, 'mint.example').chainCode))), why: 'the superseded 64-byte x(P) || chainCode shape'},
     {type: 'cx1', value: bech32mOf('cx', concat(sampleCx1Bytes.slice(0, 32), Uint8Array.of(0x04), sampleCx1Bytes.slice(33))), why: 'P is not a compressed point (prefix 04)'},
     {type: 'cx1', value: bech32mOf('cx', concat(sampleCx1Bytes.slice(0, 32), Uint8Array.of(0x02), new Uint8Array(32).fill(0xff))), why: 'P is not on the curve'},
@@ -1464,13 +1369,6 @@ const noteUrl = {
       why: 'an amount-bearing cs1 carries the declared amount without a duplicate amount query parameter'
     },
     {
-      url: 'https://mint.example/w?k1=' + K1_A + '&sig=' + part2Certificates[1].cs1,
-      k1: K1_A,
-      declaredAmountMsat: 21000,
-      signature: part2Certificates[1].cs1,
-      why: 'a note URL written before lnurl/luds 50d740a carries its certificate as sig; a WALLET may still read it there'
-    },
-    {
       url: 'https://mint.example/w',
       k1: null,
       declaredAmountMsat: null,
@@ -1519,14 +1417,6 @@ const noteUrl = {
       signature: null,
       expect: 'https://mint.example/w?k1=' + K1_B + '&amount=5000',
       why: 'a stale signature must be dropped: it no longer matches the new secret'
-    },
-    {
-      url: 'https://mint.example/w?k1=' + K1_A + '&sig=' + part2Certificates[1].cs1,
-      k1: K1_B,
-      amountMsat: 5000,
-      signature: null,
-      expect: 'https://mint.example/w?k1=' + K1_B + '&amount=5000',
-      why: 'a stale certificate under the pre-50d740a name sig is dropped too'
     },
     {
       url: 'https://mint.example/w?k1=' + K1_A + '&amount=21000',
@@ -1580,12 +1470,16 @@ const meta = entries => JSON.stringify(entries)
 const proportional = (g, ppm) =>
   Math.floor(g / 1e6) * ppm + Math.floor(((g % 1e6) * ppm) / 1e6)
 
-const applyFee = (g, f) => Math.max(0, g - f.baseFeeMsat - proportional(g, f.feePpm))
+// The credit is rounded down to whole satoshis (luds fd80cdd).
+const applyFee = (g, f) => {
+  const net = g - f.baseFeeMsat - proportional(g, f.feePpm)
+  return net <= 0 ? 0 : Math.floor(net / 1000) * 1000
+}
 
-// The inverse: the SMALLEST gross amount that nets `net` after the fee.
+// The inverse: the SMALLEST gross amount that nets at least `net` after the fee.
 //
-// applyFee is non-decreasing in gross with per-msat steps of 0 or 1 (the
-// proportional term grows by at most 1 per msat, since ppm < 1_000_000), so
+// applyFee is non-decreasing in gross (before rounding it grows by 0 or 1
+// per msat, since ppm < 1_000_000, and rounding down keeps it monotone), so
 // the minimal such gross exists and binary search finds it exactly. The
 // obvious alternative - estimate linearly, then walk one msat at a time -
 // is what the reference wallet does, and it is both unbounded and wrong at
@@ -1611,7 +1505,7 @@ const FEE_FREE = {baseFeeMsat: 0, feePpm: 0}
 const FEE_FLAT = {baseFeeMsat: 2000, feePpm: 0}
 const FEE_TINY = {baseFeeMsat: 0, feePpm: 1}
 const FEE_PCT = {baseFeeMsat: 0, feePpm: 10000}
-const FEE_HOSTILE = {baseFeeMsat: 3, feePpm: 999999}
+const FEE_HOSTILE = {baseFeeMsat: 0, feePpm: 999999}
 // the whole-sat trap: a gross where msat-exact and round-to-sat fees differ
 const FEE_SAT_TRAP = {baseFeeMsat: 1000, feePpm: 1000}
 
@@ -1639,8 +1533,9 @@ const fees = {
   description:
     'Optional mint fees (LUD-25) and the address fee (LUD-26). A SERVICE advertises what it withholds on minting with a "Mint fees: <base_fee_msat>,<fee_ppm>" token anywhere in its text/plain metadata entry, so a WALLET can warn the payer that the note it ends up holding is worth less than the invoice it paid. The values are plain base-10 integers separated by commas and end at whitespace or the end of the entry; "Mint fees:" may be followed by spaces. A third value is LUD-26\'s address fee per Lightning Address registration (addressFeeMsat; null when absent or unparseable, which a WALLET reads as free and so refuses any registration invoice). A SERVICE without the token is fee-free; a token whose first two values do not parse is a fee the WALLET does not know (expect null, unknown: true), and it relies on maxWithdrawable alone.',
   formula: {
-    apply: 'max(0, gross - base_fee_msat - floor(gross * fee_percent_ppm / 1_000_000))',
-    grossUp: 'the smallest gross for which apply(gross) == net',
+    apply: 'max(0, gross - base_fee_msat - floor(gross * fee_ppm / 1_000_000)), rounded down to whole satoshis (luds fd80cdd)',
+    grossUp: 'the smallest gross for which apply(gross) >= net; equal to net when net is whole satoshis',
+    baseFee: 'base_fee_msat MUST be a multiple of 1000; an advertisement whose base is not is unknown',
     overflowWarning:
       'compute the proportional term as floor(gross/1e6)*ppm + floor((gross%1e6)*ppm/1e6). A direct gross*ppm overflows 64-bit unsigned at realistic amounts (2.1e15 msat is 21M BTC; times 999999 ppm is ~2.1e21, past the 1.8e19 limit).',
     minimality:
@@ -1752,8 +1647,14 @@ const fees = {
     {metadata: '{}', expect: null, why: 'metadata must be an array'},
     {metadata: '[]', expect: null},
     {
+      metadata: meta([['text/plain', 'Mint fees: 2000,0']]),
+      expect: parsedFee({baseFeeMsat: 2000, feePpm: 0})
+    },
+    {
       metadata: meta([['text/plain', 'Mint fees: 500,0']]),
-      expect: parsedFee({baseFeeMsat: 500, feePpm: 0})
+      expect: null,
+      unknown: true,
+      why: 'base_fee_msat MUST be a multiple of 1000 (luds fd80cdd): a sub-satoshi base cannot be withheld from a whole-satoshi credit, so the fee is unknown'
     },
     {
       metadata: meta([['text/plain', 'Mint fees: 0,5000']]),
@@ -1761,10 +1662,10 @@ const fees = {
     },
     {
       metadata: meta([
-        ['text/plain', 'Mint fees: 500,0'],
+        ['text/plain', 'Mint fees: 2000,0'],
         ['text/plain', 'Mint fees: 1000,2000']
       ]),
-      expect: parsedFee({baseFeeMsat: 500, feePpm: 0}),
+      expect: parsedFee({baseFeeMsat: 2000, feePpm: 0}),
       why: 'the first valid advertisement wins'
     }
   ],
@@ -1789,7 +1690,7 @@ const fees = {
     applyCase(
       500000,
       FEE_SAT_TRAP,
-      'nets 498500 msat. A fee implementation that works in whole sats rounds the withheld fee up to 2000 msat here and mints a 498000 msat note - half a sat short of conformant. The formula is msat-exact; a minted note is worth apply(gross) to the msat'
+      'nets 498500 msat before rounding, so the note is worth 498000 msat: the credit is rounded down to whole satoshis (luds fd80cdd). An implementation that stays msat-exact mints a note half a sat too large'
     )
   ],
   grossUp: [
@@ -1807,7 +1708,7 @@ const fees = {
     grossUpCase(0, FEE_A, 'nothing to gross up')
   ],
   grossUpRoundTrip: {
-    note: 'for every fee and net amount below, apply(grossUp(net, fee), fee) must equal net exactly, and apply(grossUp(net, fee) - 1, fee) must be strictly less than net - that is, the result is the true minimum, not merely sufficient',
+    note: 'for every fee and net amount below, apply(grossUp(net, fee), fee) must be at least net (exactly net when net is whole satoshis), and apply(grossUp(net, fee) - 1, fee) must be strictly less than net - that is, the result is the true minimum, not merely sufficient',
     fees: [FEE_FREE, {baseFeeMsat: 1000, feePpm: 0}, {baseFeeMsat: 0, feePpm: 2000}, FEE_A, FEE_HOSTILE, FEE_TINY],
     netAmountsMsat: [1, 2, 999, 1000, 1001, 21000, 100000, 1000000, 123456789]
   },
@@ -1867,12 +1768,13 @@ const bolt11 = {
 // ---- vectors: callback requests ------------------------------------------
 
 const CB = 'https://mint.example/w/cb'
+const PAY_LINK = 'https://mint.example/.well-known/lnurlp/mint'
 
 const callbacks = {
   version: VERSION,
   spec: SPEC,
   description:
-    'The mutating callback. Every operation is a GET on the `callback` from the note\'s own withdrawRequest response. `h`/`h2` are hashes of secrets the WALLET generates - never the SERVICE - so the SERVICE never sees, generates or persists a replacement note\'s spend secret. Query parameter ORDER is not significant; the expected query below is one valid serialisation and implementations should compare parsed parameters, honouring repeats.',
+    'The mutating callback. Every operation is a GET on the `callback` from the note\'s own withdrawRequest response. `p1`/`p2` name notes whose secrets the WALLET generates - never the SERVICE - here by a bearer note\'s hex h - so the SERVICE never sees, generates or persists a replacement note\'s spend secret. Query parameter ORDER is not significant; the expected query below is one valid serialisation and implementations should compare parsed parameters, honouring repeats.',
   cases: [
     {
       name: 'melt',
@@ -1885,38 +1787,38 @@ const callbacks = {
       name: 'rotate',
       op: 'rotate',
       callback: CB,
-      params: {k1: [K1_A], h: noteId(K1_B)},
-      expectQuery: [['k1', K1_A], ['h', noteId(K1_B)]]
+      params: {k1: [K1_A], p1: noteId(K1_B)},
+      expectQuery: [['k1', K1_A], ['p1', noteId(K1_B)]]
     },
     {
       name: 'split one note',
       op: 'split',
       callback: CB,
-      params: {k1: [K1_A], amountMsat: 5000, h: noteId(K1_B), h2: noteId(K1_C)},
-      expectQuery: [['k1', K1_A], ['amount', '5000'], ['h', noteId(K1_B)], ['h2', noteId(K1_C)]]
+      params: {k1: [K1_A], amountMsat: 5000, p1: noteId(K1_B), p2: noteId(K1_C)},
+      expectQuery: [['k1', K1_A], ['amount', '5000'], ['p1', noteId(K1_B)], ['p2', noteId(K1_C)]]
     },
     {
       name: 'split several notes at once',
       op: 'split',
       callback: CB,
-      params: {k1: [K1_A, K1_B], amountMsat: 5000, h: noteId(K1_C), h2: noteId(K1_A)},
-      expectQuery: [['k1', K1_A], ['k1', K1_B], ['amount', '5000'], ['h', noteId(K1_C)], ['h2', noteId(K1_A)]],
+      params: {k1: [K1_A, K1_B], amountMsat: 5000, p1: noteId(K1_C), p2: noteId(K1_A)},
+      expectQuery: [['k1', K1_A], ['k1', K1_B], ['amount', '5000'], ['p1', noteId(K1_C)], ['p2', noteId(K1_A)]],
       why: 'LUD-25 allows one or many k1 on a split - no prior merge required'
     },
     {
       name: 'merge',
       op: 'merge',
       callback: CB,
-      params: {k1: [K1_A, K1_B, K1_C], h: noteId(K1_A)},
-      expectQuery: [['k1', K1_A], ['k1', K1_B], ['k1', K1_C], ['h', noteId(K1_A)]],
+      params: {k1: [K1_A, K1_B, K1_C], p1: noteId(K1_A)},
+      expectQuery: [['k1', K1_A], ['k1', K1_B], ['k1', K1_C], ['p1', noteId(K1_A)]],
       why: 'k1 repeats rather than being comma-joined: append, never set'
     },
     {
       name: 'callback that already carries query parameters',
       op: 'rotate',
       callback: 'https://mint.example/w/cb?token=abc',
-      params: {k1: [K1_A], h: noteId(K1_B)},
-      expectQuery: [['token', 'abc'], ['k1', K1_A], ['h', noteId(K1_B)]],
+      params: {k1: [K1_A], p1: noteId(K1_B)},
+      expectQuery: [['token', 'abc'], ['k1', K1_A], ['p1', noteId(K1_B)]],
       why: 'existing parameters must be preserved, not overwritten'
     }
   ],
@@ -1934,27 +1836,31 @@ const callbacks = {
       why: 'LUD-25: pr MUST NOT be combined with amount'
     },
     {
-      name: 'rotate without h',
+      name: 'rotate without p1',
       op: 'rotate',
       params: {k1: [K1_A]},
-      why: 'h is required whenever pr is absent - a SERVICE must never generate the secret'
+      why: 'p1 is required whenever pr is absent - a SERVICE must never generate the secret'
     },
     {
-      name: 'split without h2',
+      name: 'split without p2',
       op: 'split',
-      params: {k1: [K1_A], amountMsat: 5000, h: noteId(K1_B)},
-      why: 'h2 is required whenever amount is present'
+      params: {k1: [K1_A], amountMsat: 5000, p1: noteId(K1_B)},
+      why: 'p2 is required whenever amount is present'
     },
     {
       name: 'no k1 at all',
       op: 'rotate',
-      params: {k1: [], h: noteId(K1_B)},
+      params: {k1: [], p1: noteId(K1_B)},
       why: 'nothing to burn'
     }
   ]
 }
 
 // ---- vectors: responses --------------------------------------------------
+
+// Opaque, well-formed cs1 strings: a classifier reads only their presence.
+const CS1_A = bech32mOf('cs210n', hexToBytes('ab'.repeat(69)))
+const CS1_B = bech32mOf('cs210n', hexToBytes('cd'.repeat(69)))
 
 const responses = {
   version: VERSION,
@@ -1963,7 +1869,7 @@ const responses = {
     'Classifying a SERVICE response. The distinction that matters for funds is definitive-rejection versus ambiguous-outcome: a parsed {"status":"ERROR"} means the request was processed and refused, while a transport failure, an unparseable body, or a 200 that does not confirm means the mutation MAY have landed - and for rotate/split/merge the WALLET-generated secrets are then the only copy of the outputs, so they must ride the error rather than be discarded. A confirmed mutation missing a signature the output or caller requires is its own outcome: it definitely landed, so the secrets matter more than ever. `op` says which call each case is driven through - a melt is the one mutation with no signature to return.',
   outcomes: {
     ok: 'the operation is confirmed',
-    unverifiable: 'the mutation is confirmed but a cp1 output came back without its required cs1 certificate, or a legacy hash output came back without the raw signature a strict caller required. The note EXISTS at the output the WALLET disclosed, so keep its secret even while reporting the missing proof',
+    unverifiable: 'the mutation is confirmed but an output came back without its cs1 certificate, which a SERVICE MUST return for every note it issues, a bearer note included (luds fd80cdd). The note EXISTS at the output the WALLET disclosed, so keep its secret even while reporting the missing proof',
     pending: 'this k1 has another operation in flight (a melt); retry shortly',
     spent: 'the SERVICE is authoritative that the note is already burned; a holder may lock it as spent',
     unknown: 'the SERVICE does not recognise this note; surface it, do not silently lock it',
@@ -1972,83 +1878,61 @@ const responses = {
   },
   cases: [
     {
-      name: 'plain success',
+      name: 'success without a certificate',
       op: 'mutation',
       http: 200,
       body: {status: 'OK'},
-      expect: 'ok',
-      why: 'a bare OK is the conforming answer for a plain hash output since the Part 2 rewrite: the note is real, the WALLET keeps its secret, and nobody the holder hands it to can check it offline, which is what a plain note is. Only a cp1 output is owed a certificate'
-    },
-    {
-      name: 'cp1 output confirmed without a certificate',
-      op: 'mutation',
-      output: 'cp1',
-      http: 200,
-      body: {status: 'OK'},
       expect: 'unverifiable',
-      why: 'a cp1 output is owed a cs1 certificate in c; without one the note it names cannot be verified offline, which is the whole reason to hold a cp1 note. The note exists at the key the WALLET disclosed'
+      why: 'every output is owed a cs1 certificate in c, a bearer note included (luds fd80cdd); without one the note it names cannot be verified offline. The note exists at the output the WALLET disclosed'
     },
     {
-      name: 'cp1 output certified',
+      name: 'success with its certificate',
       op: 'mutation',
-      output: 'cp1',
       http: 200,
-      body: {status: 'OK', c: bech32mOf('cs', hexToBytes('ab'.repeat(65)))},
+      body: {status: 'OK', c: CS1_A},
       expect: 'ok',
-      signature: bech32mOf('cs', hexToBytes('ab'.repeat(65)))
+      signature: CS1_A
     },
     {
-      name: 'cp1 output certified under both names',
-      op: 'mutation',
-      output: 'cp1',
-      http: 200,
-      body: {status: 'OK', c: bech32mOf('cs', hexToBytes('ab'.repeat(65))), sig: bech32mOf('cs', hexToBytes('ab'.repeat(65)))},
-      expect: 'ok',
-      signature: bech32mOf('cs', hexToBytes('ab'.repeat(65))),
-      why: 'a SERVICE moving from the pre-50d740a name may send the certificate as both c and sig; c is the one a WALLET reads, and the extra sig is harmless'
-    },
-    {
-      name: 'a split to a cp1 change that certifies only its first output',
+      name: 'split success with both certificates',
       op: 'split',
-      change: 'cp1',
       http: 200,
-      body: {status: 'OK', c: 'ab'.repeat(65)},
+      body: {status: 'OK', c: CS1_A, c2: CS1_B},
+      expect: 'ok',
+      signature: CS1_A,
+      changeSignature: CS1_B
+    },
+    {
+      name: 'a split that certifies only its first output',
+      op: 'split',
+      http: 200,
+      body: {status: 'OK', c: CS1_A},
       expect: 'unverifiable',
-      why: 'the change is a cp1 note and is owed its certificate in c2 exactly as the first output would be; the change is not a lesser note'
+      why: 'the change is owed its certificate in c2 exactly as the first output is in c; the change is not a lesser note'
     },
     {
-      name: 'success with an offline-verification signature',
-      op: 'mutation',
-      http: 200,
-      body: {status: 'OK', c: 'ab'.repeat(65)},
-      expect: 'ok',
-      signature: 'ab'.repeat(65)
-    },
-    {
-      name: 'split success with both signatures',
-      op: 'split',
-      http: 200,
-      body: {status: 'OK', c: 'ab'.repeat(65), c2: 'cd'.repeat(65)},
-      expect: 'ok',
-      signature: 'ab'.repeat(65),
-      changeSignature: 'cd'.repeat(65)
-    },
-    {
-      name: 'a split that signs only its first output',
-      op: 'split',
-      http: 200,
-      body: {status: 'OK', c: 'ab'.repeat(65)},
-      expect: 'ok',
-      signature: 'ab'.repeat(65),
-      why: 'both outputs are legacy hash notes; tolerant callers can retain a landed output without proof, while a strict caller may require both raw Part 1 signatures'
-    },
-    {
-      name: 'melt success with a LUD-21 style proof',
+      name: 'melt success with its verify',
       op: 'melt',
       http: 200,
-      body: {status: 'OK', pr: 'lnbc210n1pjq', verify: 'https://mint.example/verify/abc'},
+      body: {status: 'OK', verify: 'https://mint.example/verify/9c0b1f5e2d7a4c38b6e1d0f2a7c5e9b3'},
       expect: 'ok',
-      why: 'OK on a melt means the payment is in flight, NOT that the note is confirmed spent. A melt mints nothing, so it has no signature to return and none is required'
+      why: 'OK on a melt means the payment is in flight, NOT that the note is confirmed spent. A melt mints nothing, so it has no signature to return; it carries LUD-21 verify (luds fd80cdd), which the WALLET follows to settled or Not found instead of repeating its spend'
+    },
+    {
+      name: 'melt success with an echoed pr',
+      op: 'melt',
+      http: 200,
+      body: {status: 'OK', pr: 'lnbc210n1pjq', verify: 'https://mint.example/verify/9c0b1f5e2d7a4c38b6e1d0f2a7c5e9b3'},
+      expect: 'ok',
+      why: 'an echoed pr is harmless and ignored'
+    },
+    {
+      name: 'melt success without verify',
+      op: 'melt',
+      http: 200,
+      body: {status: 'OK'},
+      expect: 'ok',
+      why: 'a melt MUST carry verify, but the OK still confirms the melt was accepted: the payment is in flight either way. Reading it as an error would have the holder retry a melt that landed; the WALLET has to follow it with the informational GET instead'
     },
     {
       name: 'pending',
@@ -2059,14 +1943,30 @@ const responses = {
       why: 'the exact reason string LUD-25 specifies for a k1 mid-melt'
     },
     {
-      name: 'already spent',
+      name: 'already in use',
+      op: 'mutation',
+      http: 200,
+      body: {status: 'ERROR', reason: 'already in use'},
+      expect: 'spent',
+      why: 'the exact reason LUD-25 fixes for a spend that opens a burned note at the callback'
+    },
+    {
+      name: 'unknown note',
+      op: 'mutation',
+      http: 200,
+      body: {status: 'ERROR', reason: 'unknown note'},
+      expect: 'unknown',
+      why: 'the exact reason LUD-25 fixes for a note the SERVICE never credited (luds fd80cdd)'
+    },
+    {
+      name: 'already spent, older wording',
       op: 'mutation',
       http: 200,
       body: {status: 'ERROR', reason: 'Note already spent.'},
       expect: 'spent'
     },
     {
-      name: 'unknown note',
+      name: 'unknown note, older wording',
       op: 'mutation',
       http: 200,
       body: {status: 'ERROR', reason: 'Unknown note.'},
@@ -2144,70 +2044,76 @@ const withdrawInfo = {
   version: VERSION,
   spec: 'LUD-03, LUD-25',
   description:
-    'The informational GET on a note. Never burns, rotates or alters it. maxWithdrawable is the ONLY authoritative statement of what a note is worth - the URL\'s own `amount` is a claim and the SERVICE ignores it here. The response\'s k1 MUST be the bearer secret itself, never a derived or opaque id. Offline verification is mandatory in the current draft, so the response MUST also carry `mintPubkey`, the stable compressed secp256k1 key the SERVICE\'s note signatures verify against; without it a holder handed a note has nothing to check it against.',
-  queriedUrl: 'https://mint.example/w?k1=' + K1_A + '&amount=99999&c=' + 'ab'.repeat(65),
-  requestMustNotSend: ['c', 'sig'],
+    'The informational GET on a note. Never burns, rotates or alters it. maxWithdrawable is the ONLY authoritative statement of what a note is worth - the URL\'s own `amount` is a claim and the SERVICE ignores it here. The response\'s k1 MUST be the bearer secret itself, never a derived or opaque id. Offline verification is mandatory, so the response MUST also carry `mintPubkey`, and LUD-19 `payLink` to the mint payRequest (luds fd80cdd). A burned or mid-melt note answers with 0 and no certificate, the stable compressed secp256k1 key the SERVICE\'s note signatures verify against; without it a holder handed a note has nothing to check it against.',
+  queriedUrl: 'https://mint.example/w?k1=' + K1_A + '&amount=99999&c=' + 'ab'.repeat(69),
+  requestMustNotSend: ['c'],
   requestMustSendUnchanged: ['k1'],
   accepted: [
     {
       name: 'minimal valid',
-      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, minWithdrawable: 0, maxWithdrawable: 21000, mintPubkey: MINT_PUB},
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, minWithdrawable: 0, maxWithdrawable: 21000, mintPubkey: MINT_PUB, payLink: PAY_LINK},
       maxWithdrawable: 21000
     },
     {
       name: 'minWithdrawable omitted',
-      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB},
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB, payLink: PAY_LINK},
       maxWithdrawable: 21000
     },
     {
       name: 'echoed k1 in a different casing',
-      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A.toUpperCase(), maxWithdrawable: 21000, mintPubkey: MINT_PUB},
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A.toUpperCase(), maxWithdrawable: 21000, mintPubkey: MINT_PUB, payLink: PAY_LINK},
       maxWithdrawable: 21000,
       why: 'k1 is bytes; casing carries no meaning'
     },
     {
       name: 'mintPubkey in a different casing',
-      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB.toUpperCase()},
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB.toUpperCase(), payLink: PAY_LINK},
       maxWithdrawable: 21000,
       why: 'a pubkey is bytes too, and a SERVICE that upper-cases its hex is still naming the same key'
     },
     {
-      name: 'zero value note',
-      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 0, mintPubkey: MINT_PUB},
-      maxWithdrawable: 0
+      name: 'a burned or mid-melt note',
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, minWithdrawable: 0, maxWithdrawable: 0, mintPubkey: MINT_PUB, payLink: PAY_LINK},
+      maxWithdrawable: 0,
+      why: 'luds fd80cdd: a burned note, and one whose melt is still in flight, answers the informational GET as a withdrawRequest worth 0 with no c, as LUD-03 allows, never as an error. 0 means nothing to withdraw now: burned, or pending until its melt verify settles or answers Not found'
     }
   ],
   rejected: [
-    {name: 'wrong tag', body: {tag: 'payRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB}},
-    {name: 'no callback', body: {tag: 'withdrawRequest', k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB}},
-    {name: 'no k1', body: {tag: 'withdrawRequest', callback: CB, maxWithdrawable: 21000, mintPubkey: MINT_PUB}},
-    {name: 'no maxWithdrawable', body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, mintPubkey: MINT_PUB}},
-    {name: 'maxWithdrawable is a string', body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: '21000', mintPubkey: MINT_PUB}},
-    {name: 'negative maxWithdrawable', body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: -1, mintPubkey: MINT_PUB}},
+    {name: 'wrong tag', body: {tag: 'payRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB, payLink: PAY_LINK}},
+    {name: 'no callback', body: {tag: 'withdrawRequest', k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB, payLink: PAY_LINK}},
+    {name: 'no k1', body: {tag: 'withdrawRequest', callback: CB, maxWithdrawable: 21000, mintPubkey: MINT_PUB, payLink: PAY_LINK}},
+    {name: 'no maxWithdrawable', body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, mintPubkey: MINT_PUB, payLink: PAY_LINK}},
+    {name: 'maxWithdrawable is a string', body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: '21000', mintPubkey: MINT_PUB, payLink: PAY_LINK}},
+    {name: 'negative maxWithdrawable', body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: -1, mintPubkey: MINT_PUB, payLink: PAY_LINK}},
     {
       name: 'fractional maxWithdrawable',
-      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000.5, mintPubkey: MINT_PUB},
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000.5, mintPubkey: MINT_PUB, payLink: PAY_LINK},
       why: 'msat are integers'
     },
     {
       name: 'maxWithdrawable past 2^63',
-      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 2 ** 64, mintPubkey: MINT_PUB},
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 2 ** 64, mintPubkey: MINT_PUB, payLink: PAY_LINK},
       why: 'no common integer type holds it and a double rounds it - refuse rather than guess the amount'
     },
-    {name: 'minWithdrawable above maxWithdrawable', body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, minWithdrawable: 30000, maxWithdrawable: 21000, mintPubkey: MINT_PUB}},
+    {name: 'minWithdrawable above maxWithdrawable', body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, minWithdrawable: 30000, maxWithdrawable: 21000, mintPubkey: MINT_PUB, payLink: PAY_LINK}},
     {
       name: 'echoed a different k1 than queried',
-      body: {tag: 'withdrawRequest', callback: CB, k1: K1_B, maxWithdrawable: 21000, mintPubkey: MINT_PUB},
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_B, maxWithdrawable: 21000, mintPubkey: MINT_PUB, payLink: PAY_LINK},
       why: 'spec MUST: the response k1 is the bearer secret itself. A SERVICE returning something else is non-compliant, or the note was rotated by someone else'
     },
     {
+      name: 'no payLink',
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB},
+      why: 'luds fd80cdd: the response MUST carry LUD-19 payLink to the mint payRequest, which is what tells a WALLET the link is a note and not a one-shot voucher'
+    },
+    {
       name: 'no mintPubkey',
-      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, minWithdrawable: 0, maxWithdrawable: 21000},
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, minWithdrawable: 0, maxWithdrawable: 21000, payLink: PAY_LINK},
       why: 'offline verification is mandatory. Without the key a note signature verifies against nothing, and whoever is handed the note is back to the leap of faith the signature exists to remove'
     },
     {
       name: 'mintPubkey that is not a compressed secp256k1 key',
-      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB.slice(2)},
+      body: {tag: 'withdrawRequest', callback: CB, k1: K1_A, maxWithdrawable: 21000, mintPubkey: MINT_PUB.slice(2), payLink: PAY_LINK},
       why: 'an x-only key, a node URI or a truncated hex string verifies nothing. Refused at the response rather than at the first signature check, where the same fault would look like a forged note'
     }
   ]
@@ -2230,7 +2136,8 @@ const payRequest = {
         maxSendable: 100000000,
         metadata: meta([['text/plain', 'a mint'], ['text/identifier', 'mint@mint.example']]),
         commentAllowed: 64,
-        withdrawLink: 'lnurlw://mint.example/w'
+        withdrawLink: 'lnurlw://mint.example/w',
+        mintPubkey: MINT_PUB
       },
       withdrawLink: 'lnurlw://mint.example/w',
       commentAllowed: 64,
@@ -2245,7 +2152,8 @@ const payRequest = {
         maxSendable: 100000000,
         metadata: meta([['text/plain', 'a mint'], ['text/identifier', 'mint@mint.example']]),
         commentAllowed: 64,
-        withdrawLink: 'https://mint.example/w'
+        withdrawLink: 'https://mint.example/w',
+        mintPubkey: MINT_PUB
       },
       withdrawLink: 'https://mint.example/w',
       commentAllowed: 64,
@@ -2261,7 +2169,8 @@ const payRequest = {
         maxSendable: 100000000,
         metadata: meta([['text/plain', 'a mint']]),
         commentAllowed: 64,
-        withdrawLink: 'lnurlw://mintmintmintmintmintmintmintmintmintmintmintmintmintmi.onion/w'
+        withdrawLink: 'lnurlw://mintmintmintmintmintmintmintmintmintmintmintmintmintmi.onion/w',
+        mintPubkey: MINT_PUB
       },
       withdrawLink: 'lnurlw://mintmintmintmintmintmintmintmintmintmintmintmintmintmi.onion/w',
       commentAllowed: 64,
@@ -2277,7 +2186,8 @@ const payRequest = {
         maxSendable: 100000000,
         metadata: meta([['text/plain', 'a mint'], ['text/plain', 'Mint fees: 1000,2000']]),
         commentAllowed: 64,
-        withdrawLink: 'lnurlw://mint.example/w'
+        withdrawLink: 'lnurlw://mint.example/w',
+        mintPubkey: MINT_PUB
       },
       withdrawLink: 'lnurlw://mint.example/w',
       commentAllowed: 64,
@@ -2307,9 +2217,23 @@ const payRequest = {
         minSendable: 1000,
         maxSendable: 100000000,
         metadata: meta([['text/plain', 'a broken mint']]),
-        withdrawLink: 'lnurlw://mint.example/w'
+        withdrawLink: 'lnurlw://mint.example/w',
+        mintPubkey: MINT_PUB
       },
       why: 'current LUD-25 draft: minting is unavailable unless commentAllowed can carry exactly the 64-character hash commitment'
+    },
+    {
+      name: 'minting payRequest without mintPubkey',
+      body: {
+        tag: 'payRequest',
+        callback: 'https://mint.example/p/cb',
+        minSendable: 1000,
+        maxSendable: 100000000,
+        metadata: meta([['text/plain', 'a mint']]),
+        commentAllowed: 64,
+        withdrawLink: 'https://mint.example/w'
+      },
+      why: 'luds fd80cdd: a SERVICE MUST publish mintPubkey in its mint payRequest, so a WALLET knows the key before it pays and can check the certificate of the note it mints'
     }
   ],
   mintCallback: {
@@ -2403,6 +2327,26 @@ const payRequest = {
         preimage: null
       }
     ],
+    melt: [
+      {
+        name: 'melt in flight',
+        body: {status: 'OK', settled: false, preimage: null, pr: 'lnbc210n1pjq'},
+        outcome: 'in-flight',
+        why: 'the note is pending: the informational GET answers 0 and the callback answers pending'
+      },
+      {
+        name: 'melt settled',
+        body: {status: 'OK', settled: true, preimage: K1_A, pr: 'lnbc210n1pjq'},
+        outcome: 'settled',
+        why: 'the note is burned; the preimage is the receipt'
+      },
+      {
+        name: 'melt failed, note restored',
+        body: {status: 'ERROR', reason: 'Not found'},
+        outcome: 'failed',
+        why: 'luds fd80cdd: a melt verify answers LUD-21 Not found once the payment failed and the note is outstanding again. For a URL the SERVICE handed out for a melt, nothing else answers Not found'
+      }
+    ],
     rejected: [
       {name: 'no settled field', body: {status: 'OK', pr: 'lnbc210n1pjq'}},
       {name: 'settled is a string', body: {status: 'OK', settled: 'true', pr: 'lnbc210n1pjq'}},
@@ -2430,12 +2374,12 @@ const lifecycle = {
       name: 'melt is not settlement',
       steps: ['melt', 'receive OK', 'observe the note still reserved'],
       requirement:
-        'OK on a melt means the payment is in flight. The note MUST NOT be treated as confirmed spent until settlement, and a failed payment restores it to outstanding. A holder locking it optimistically must be able to unlock on a confirmed failure.'
+        'OK on a melt means the payment is in flight. The note MUST NOT be treated as confirmed spent until settlement, and a failed payment restores it to outstanding. The OK carries LUD-21 verify: settled true (with the preimage) confirms the burn, Not found confirms the failure and the restored note. A holder locking it optimistically must be able to unlock on a confirmed failure.'
     },
     {
       name: 'pending lockout',
       steps: ['melt k1', 'attempt a rotate on the same k1 before settlement'],
-      requirement: 'the second call fails with reason "pending" and MUST be retried, never read as spent'
+      requirement: 'the second call fails with reason "pending" and MUST be retried, never read as spent. Meanwhile the informational GET answers the note as worth 0 (luds fd80cdd)'
     },
     {
       name: 'ambiguous rotate',
@@ -2456,7 +2400,7 @@ const lifecycle = {
         'the HTTP stack silently resends the identical request'
       ],
       requirement:
-        'a SERVICE MUST recognize the byte-identical retry from the same k1 set, h, h2 and amount, and return the original success, with the same c and c2 where the outputs had any, without moving balance again. A WALLET still persists every fresh output secret before sending the first request and keeps it across an ambiguous transport failure. A request that changes any recorded field is a genuine double-spend attempt and gets the ordinary already-spent refusal.'
+        'a SERVICE MUST recognize the byte-identical retry from the same k1 set, p1, p2 and amount, and return the original success, with the same c and c2 where the outputs had any, without moving balance again. A WALLET still persists every fresh output secret before sending the first request and keeps it across an ambiguous transport failure. A request that changes any recorded field is a genuine double-spend attempt and gets the ordinary already-spent refusal.'
     },
     {
       name: 'settle a merge or split output',
@@ -2477,11 +2421,11 @@ const lifecycle = {
         'observe the refusal'
       ],
       requirement:
-        'a SERVICE MUST refuse h/h2 values that collide with any note id it has ever minted or any invoice payment hash it has ever issued, before burning anything. Minting over an existing id hands the output to whoever already knows that id\'s preimage - for a pending mint invoice that is its future payer, and for a burned note it is every previous holder - or it bricks a paid mint whose settlement can no longer register under that key. A WALLET drawing fresh 32-byte secrets never collides honestly, so a collision is always adversarial. Refuse with the same reason as any dead k1: which table the id collided with is an oracle nobody is owed.'
+        'a SERVICE MUST refuse p1/p2 values that collide with any note id it has ever minted or any invoice payment hash it has ever issued, before burning anything. Minting over an existing id hands the output to whoever already knows that id\'s preimage - for a pending mint invoice that is its future payer, and for a burned note it is every previous holder - or it bricks a paid mint whose settlement can no longer register under that key. A WALLET drawing fresh 32-byte secrets never collides honestly, so a collision is always adversarial. Refuse with the same reason as any dead k1: which table the id collided with is an oracle nobody is owed.'
     },
     {
       name: 'a split into the same hash twice',
-      steps: ['split with h2 equal to h', 'observe the refusal'],
+      steps: ['split with p2 equal to p1', 'observe the refusal'],
       requirement:
         'a SERVICE MUST refuse a split whose two output hashes are equal - one id cannot carry two notes, so accepting it either destroys the change or double-mints a single id.'
     }
@@ -2545,7 +2489,7 @@ const threatSuite = {
       name: 'locked notes',
       status: 'proposal',
       summary:
-        'a second asset class, not a bearer variant: redemption requires an LUD-04 signature from the LUD-05/LUD-13 linkingKey registered at mint/rotate time, over the FULL redemption request (k1, h/h2, amount/pr), so logged signatures are not replayable. Scored separately per scenario as lockedNotes, because the trades differ by note type'
+        'a second asset class, not a bearer variant: redemption requires an LUD-04 signature from the LUD-05/LUD-13 linkingKey registered at mint/rotate time, over the FULL redemption request (k1, p1/p2, amount/pr), so logged signatures are not replayable. Scored separately per scenario as lockedNotes, because the trades differ by note type'
     }
   },
   policy: {
@@ -2801,8 +2745,8 @@ const sameInputs = (a, b) =>
 
 const retryOutcome = (recorded, retry) =>
   sameInputs(recorded.k1, retry.k1) &&
-  recorded.h === retry.h &&
-  (recorded.h2 ?? null) === (retry.h2 ?? null) &&
+  recorded.p1 === retry.p1 &&
+  (recorded.p2 ?? null) === (retry.p2 ?? null) &&
   (recorded.amount ?? null) === (retry.amount ?? null)
     ? 'replay'
     : 'double-spend'
@@ -2815,9 +2759,9 @@ const retryCase = (name, recorded, retry, note) => ({
   ...(note ? {note} : {})
 })
 
-const ROTATE = {k1: [RETRY_IN_A], h: RETRY_OUT}
-const SPLIT = {k1: [RETRY_IN_A], h: RETRY_OUT, h2: RETRY_OUT_2, amount: 5000}
-const MERGE = {k1: [RETRY_IN_A, RETRY_IN_B], h: RETRY_OUT}
+const ROTATE = {k1: [RETRY_IN_A], p1: RETRY_OUT}
+const SPLIT = {k1: [RETRY_IN_A], p1: RETRY_OUT, p2: RETRY_OUT_2, amount: 5000}
+const MERGE = {k1: [RETRY_IN_A, RETRY_IN_B], p1: RETRY_OUT}
 
 const retriedMutation = {
   version: VERSION,
@@ -2826,12 +2770,12 @@ const retriedMutation = {
     'What counts as a retry of a mutation, and what is still a double-spend attempt. Every mutation in LUD-25 is a GET, and HTTP stacks retry a GET when the connection they used is dropped, so a SERVICE sees the byte-identical request twice and the second one arrives with its inputs already burned. A SERVICE that answers the retry as an already-spent input tells the holder the mutation never happened, and the holder discards the only copy of a secret the SERVICE really did mint a note against. Replaying the original success is therefore a MUST. The replay path is a read: it burns nothing, mints nothing and moves no balance, and returns the same signature or signatures. Anything that is NOT a retry and names a burned input is refused exactly as an ordinary double-spend is, with the same reason string, so no oracle appears for whoever is holding a burned secret.',
   identity: [
     'the same input k1 set, compared as a SET: a merge naming the same notes in a different order is the same merge',
-    'the same h',
-    'the same h2, present or absent alike',
+    'the same p1',
+    'the same p2, present or absent alike',
     'the same amount, present or absent alike'
   ],
   provenance:
-    'Recorded, never inferred. A SERVICE links the burned inputs to the outputs they minted and matches against that. Matching on "a note exists at h" alone would let anyone holding a burned k1 and any outstanding note id pull a success out of the SERVICE.',
+    'Recorded, never inferred. A SERVICE links the burned inputs to the outputs they minted and matches against that. Matching on "a note exists at p1" alone would let anyone holding a burned k1 and any outstanding note id pull a success out of the SERVICE.',
   outcomes: {
     replay:
       'the original success, byte for byte: the same status, the same c and c2 where the outputs had any, and no balance moved',
@@ -2845,16 +2789,16 @@ const retriedMutation = {
     retryCase(
       'a merge retried with its inputs in the other order',
       MERGE,
-      {k1: [RETRY_IN_B, RETRY_IN_A], h: RETRY_OUT},
+      {k1: [RETRY_IN_B, RETRY_IN_A], p1: RETRY_OUT},
       'the inputs are a set, not a sequence: this is the same merge'
     ),
     retryCase(
-      'the same input with a different h',
+      'the same input with a different p1',
       ROTATE,
-      {k1: [RETRY_IN_A], h: RETRY_OTHER},
+      {k1: [RETRY_IN_A], p1: RETRY_OTHER},
       'this is the ordinary double-spend attempt, and the existing refusal covers it unchanged'
     ),
-    retryCase('a split retried with a different h2', SPLIT, {...SPLIT, h2: RETRY_OTHER}),
+    retryCase('a split retried with a different p2', SPLIT, {...SPLIT, p2: RETRY_OTHER}),
     retryCase(
       'a split retried with a different amount',
       SPLIT,
@@ -2862,25 +2806,25 @@ const retriedMutation = {
       'the same outputs for a different amount is not the same request; a SERVICE that replayed it would be asked to mint two different splits over one pair of ids'
     ),
     retryCase(
-      'a split retried with no h2 at all',
+      'a split retried with no p2 at all',
       SPLIT,
-      {k1: [RETRY_IN_A], h: RETRY_OUT, amount: 5000},
+      {k1: [RETRY_IN_A], p1: RETRY_OUT, amount: 5000},
       'absent is not the same as present, in either direction'
     ),
     retryCase('a rotate retried with an amount added', ROTATE, {...ROTATE, amount: 5000}),
     retryCase(
-      'a split retried with h and h2 swapped',
+      'a split retried with p1 and p2 swapped',
       SPLIT,
-      {...SPLIT, h: RETRY_OUT_2, h2: RETRY_OUT},
+      {...SPLIT, p1: RETRY_OUT_2, p2: RETRY_OUT},
       'the outputs carry different amounts, so swapping them is a different request'
     ),
     retryCase('a merge retried naming only one of its inputs', MERGE, {
       k1: [RETRY_IN_A],
-      h: RETRY_OUT
+      p1: RETRY_OUT
     }),
     retryCase('a merge retried with an extra input', MERGE, {
       k1: [RETRY_IN_A, RETRY_IN_B, K1_C],
-      h: RETRY_OUT
+      p1: RETRY_OUT
     })
   ]
 }
@@ -2903,7 +2847,8 @@ const MTH_H = noteId(MTH_SECRET)
 const MTH_PREIMAGE = '06'.repeat(32)
 const MTH_PAYMENT_HASH = noteId(MTH_PREIMAGE)
 const MTH_AMOUNT = 21000
-const MTH_RECEIPT_SIG = bytesToHex(signTrailing(MINT_PRIV, MTH_SECRET, MTH_AMOUNT))
+// the bound-mint receipt keeps the message it has always signed, LNURLcash:<amount>:<h>
+const MTH_RECEIPT_SIG = bytesToHex(signRecoverable(MINT_PRIV, lightningSignedDigest(`LNURLcash:${MTH_AMOUNT}:${MTH_H}`)))
 
 // Ids that are already spoken for on the mint the cases below run against:
 // one note, one payment hash of an invoice it issued, and one output
@@ -3978,8 +3923,6 @@ const spends = {
 // ---- write ---------------------------------------------------------------
 
 const files = [
-  write('signature.json', signature),
-  write('derivation.json', derivation),
   write('cash-derivation.json', cashDerivation),
   write('bech32.json', bech32Vectors),
   write('url-admission.json', urlAdmission),

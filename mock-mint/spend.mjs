@@ -248,5 +248,11 @@ const hrpAmount = msat => {
   }
   return `${msat * 10}p`
 }
-export const encodeCs1 = (amountMsat, signature) =>
-  bech32m.encode(`cs${hrpAmount(amountMsat)}`, bech32m.toWords(signature), LIMIT)
+// r || s || recovery-id || u32 t (luds fd80cdd); a null t is the
+// superseded 65-byte form, for the misbehaving modes only.
+export const encodeCs1 = (amountMsat, signature, t = null) => {
+  const payload = new Uint8Array(signature.length + (t === null ? 0 : 4))
+  payload.set(signature)
+  if (t !== null) new DataView(payload.buffer).setUint32(signature.length, t, false)
+  return bech32m.encode(`cs${hrpAmount(amountMsat)}`, bech32m.toWords(payload), LIMIT)
+}
